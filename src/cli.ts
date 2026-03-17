@@ -54,9 +54,10 @@ const runReviewWithConfig = Effect.fn("cli.runReviewWithConfig")(function* (conf
       headRef: gitDiff.headRef,
     })
 
-    const reviewContext = yield* buildReviewContext(config.workspace, metadata, gitDiff)
+    const reviewContext = yield* buildReviewContext(metadata, gitDiff)
     yield* logInfo("Built review context.", {
       changedFiles: reviewContext.changedFiles.length,
+      manifestChars: stringifyJson(reviewContext).length,
     })
     const prompt = yield* buildReviewPrompt(config, reviewContext)
     yield* logInfo("Built review prompt.", {

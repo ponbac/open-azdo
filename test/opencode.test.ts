@@ -161,4 +161,32 @@ describe("opencode", () => {
     expect(args).toContain("--variant")
     expect(args).toContain("high")
   })
+
+  test("keeps the large review prompt out of the command-line arguments", async () => {
+    let args: ReadonlyArray<string> = []
+    const prompt = "review context ".repeat(20_000)
+
+    await Effect.runPromise(
+      runOpenCode(makeReviewConfig(), prompt).pipe(
+        Effect.provide(
+          makeOpenCodeTestLayer({
+            execute: (input) => {
+              args = input.args
+
+              return Effect.succeed({
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+                }),
+                stderr: "",
+              })
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(args).not.toContain(prompt)
+    expect(args.at(-1)).toBe("Review the pull request using your configured instructions and return strict JSON only.")
+  })
 })

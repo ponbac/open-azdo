@@ -1,10 +1,32 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
-import { resolveGitDiff, runGit } from "../src/git"
+import { compressChangedLines, extractHunkHeaders, resolveGitDiff, runGit } from "../src/git"
 import { createSyntheticMergeRepo, makeGitTestLayer, makeReviewConfig } from "./helpers"
 
 describe("git", () => {
+  test("compresses changed lines into contiguous ranges", () => {
+    expect(compressChangedLines(new Set([3, 4, 5, 9, 10, 14]))).toEqual([
+      { start: 3, end: 5 },
+      { start: 9, end: 10 },
+      { start: 14, end: 14 },
+    ])
+  })
+
+  test("extracts hunk headers from a patch", () => {
+    const patch = [
+      "diff --git a/src/example.ts b/src/example.ts",
+      "--- a/src/example.ts",
+      "+++ b/src/example.ts",
+      "@@ -1,3 +1,5 @@",
+      " export const value = 1",
+      "@@ -10,2 +12,4 @@ export function next() {",
+      " }",
+    ].join("\n")
+
+    expect(extractHunkHeaders(patch)).toEqual(["@@ -1,3 +1,5 @@", "@@ -10,2 +12,4 @@ export function next() {"])
+  })
+
   test("resolves synthetic merge commits against HEAD^1", async () => {
     const { repoDir } = await createSyntheticMergeRepo()
     const config = makeReviewConfig({

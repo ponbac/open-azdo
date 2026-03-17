@@ -52,7 +52,9 @@ export const buildOpenCodeConfig = (agentName: string) => ({
   },
 })
 
-const buildOpenCodeArgs = (config: ReviewConfig, prompt: string) => [
+const REVIEW_TRIGGER_MESSAGE = "Review the pull request using your configured instructions and return strict JSON only."
+
+const buildOpenCodeArgs = (config: ReviewConfig) => [
   "run",
   "--format",
   "json",
@@ -61,7 +63,7 @@ const buildOpenCodeArgs = (config: ReviewConfig, prompt: string) => [
   "--model",
   config.model,
   ...(config.opencodeVariant ? ["--variant", config.opencodeVariant] : []),
-  prompt,
+  REVIEW_TRIGGER_MESSAGE,
 ]
 
 export const extractFinalResponse = (output: string) => {
@@ -241,7 +243,7 @@ export class OpenCodeService extends ServiceMap.Service<
             .execute({
               operation: "OpenCodeService.run",
               command: "opencode",
-              args: buildOpenCodeArgs(config, prompt),
+              args: buildOpenCodeArgs(config),
               cwd: config.workspace,
               timeoutMs: config.opencodeTimeoutMs,
               env: {

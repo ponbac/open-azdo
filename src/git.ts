@@ -1,6 +1,4 @@
-import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
-import * as Path from "effect/Path"
 import * as ServiceMap from "effect/ServiceMap"
 import { Effect } from "effect"
 
@@ -20,6 +18,11 @@ export type GitDiff = {
 export type DiffFile = {
   path: string
   patch: string
+}
+
+export type LineRange = {
+  start: number
+  end: number
 }
 
 type GitRunResult = {
@@ -59,6 +62,39 @@ export const splitDiffByFile = (diffText: string): DiffFile[] => {
 
   return files
 }
+
+export const compressChangedLines = (changedLines: ReadonlySet<number>): LineRange[] => {
+  const sortedLines = [...changedLines].sort((left, right) => left - right)
+  const [firstLine, ...rest] = sortedLines
+
+  if (firstLine === undefined) {
+    return []
+  }
+
+  const ranges: LineRange[] = []
+  let start = firstLine
+  let previous = firstLine
+
+  for (const line of rest) {
+    if (line === previous + 1) {
+      previous = line
+      continue
+    }
+
+    ranges.push({ start, end: previous })
+    start = line
+    previous = line
+  }
+
+  ranges.push({ start, end: previous })
+  return ranges
+}
+
+export const extractHunkHeaders = (patch: string) =>
+  patch
+    .split("\n")
+    .filter((line) => line.startsWith("@@"))
+    .map((line) => line.trim())
 
 export const extractChangedLinesByFile = (diffText: string) => {
   const changedLinesByFile = new Map<string, Set<number>>()
@@ -109,7 +145,6 @@ export class GitService extends ServiceMap.Service<
   GitService,
   {
     readonly resolveGitDiff: (config: ReviewConfig) => Effect.Effect<GitDiff, GitCommandError | MissingGitHistoryError>
-    readonly readFileExcerpt: (workspace: string, filePath: string) => Effect.Effect<string | undefined>
     readonly runGit: (
       cwd: string,
       args: ReadonlyArray<string>,
@@ -122,8 +157,6 @@ export class GitService extends ServiceMap.Service<
     GitService,
     Effect.gen(function* () {
       const runner = yield* ProcessRunner
-      const fileSystem = yield* FileSystem.FileSystem
-      const path = yield* Path.Path
 
       const runGit = Effect.fn("GitService.runGit")(function* (
         cwd: string,
@@ -223,24 +256,8 @@ export class GitService extends ServiceMap.Service<
         } satisfies GitDiff
       })
 
-      const readFileExcerpt = Effect.fn("GitService.readFileExcerpt")(function* (workspace: string, filePath: string) {
-        const absolutePath = path.join(workspace, filePath)
-
-        return yield* fileSystem.readFile(absolutePath).pipe(
-          Effect.map((content) => {
-            if (content.byteLength > 16_000 || content.some((byte) => byte === 0)) {
-              return undefined
-            }
-
-            return new TextDecoder().decode(content)
-          }),
-          Effect.catch(() => Effect.sync((): string | undefined => undefined)),
-        )
-      })
-
       return GitService.of({
         resolveGitDiff,
-        readFileExcerpt,
         runGit,
         resolveTargetRef,
       })
@@ -251,11 +268,6 @@ export class GitService extends ServiceMap.Service<
 export const resolveGitDiff = Effect.fn("git.resolveGitDiff")(function* (config: ReviewConfig) {
   const git = yield* GitService
   return yield* git.resolveGitDiff(config)
-})
-
-export const readFileExcerpt = Effect.fn("git.readFileExcerpt")(function* (workspace: string, filePath: string) {
-  const git = yield* GitService
-  return yield* git.readFileExcerpt(workspace, filePath)
 })
 
 export const resolveTargetRef = Effect.fn("git.resolveTargetRef")(function* (config: ReviewConfig) {
