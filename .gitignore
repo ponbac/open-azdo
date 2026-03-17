@@ -1,1 +1,5 @@
-.reference
+.reference/
+coverage/
+dist/
+node_modules/
+tmp/

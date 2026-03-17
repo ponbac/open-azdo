@@ -1,0 +1,44 @@
+{
+  "name": "open-azdo",
+  "version": "0.1.0",
+  "description": "Secure Azure DevOps pull request review CLI powered by OpenCode",
+  "type": "module",
+  "bin": {
+    "open-azdo": "./dist/open-azdo.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "examples"
+  ],
+  "engines": {
+    "bun": ">=1.3.10"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "fmt": "oxfmt --write src bin test",
+    "fmt:check": "oxfmt --check src bin test",
+    "lint": "oxlint src bin test",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun run fmt:check && bun test",
+    "build": "bun run build.ts",
+    "publish:dry": "bun run check && bun run build && bun publish --dry-run",
+    "publish:npm": "bun run check && bun run build && bun publish"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.33",
+    "effect": "4.0.0-beta.33"
+  },
+  "devDependencies": {
+    "@effect/language-service": "0.80.0",
+    "@tsconfig/bun": "1.0.10",
+    "@types/bun": "1.3.10",
+    "oxfmt": "0.41.0",
+    "oxlint": "1.56.0",
+    "typescript": "5.9.3"
+  }
+}

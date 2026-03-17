@@ -1,0 +1,32 @@
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  OpenCodeModel: openai/gpt-5.4
+
+steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 0
+    persistCredentials: false
+
+  - bash: |
+      set -euo pipefail
+
+      curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.3.10/bun-linux-x64.zip -o bun.zip
+      unzip -q bun.zip
+      export PATH="$PWD/bun-linux-x64:$PATH"
+
+      curl -fsSL https://github.com/sst/opencode/releases/download/v1.2.27/opencode-linux-x64.tar.gz -o opencode.tar.gz
+      mkdir -p opencode-bin
+      tar -xzf opencode.tar.gz -C opencode-bin
+      export PATH="$PWD/opencode-bin:$PATH"
+
+      bunx open-azdo review --model "$(OpenCodeModel)"
+    displayName: Review Pull Request
+    env:
+      # Azure Pipelines: enable "Allow scripts to access the OAuth token".
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      OPENAI_API_KEY: $(OpenAIApiKey)
