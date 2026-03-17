@@ -19,7 +19,7 @@ export type ExistingThread = {
   status: number
   comments: Array<{
     id: number
-    content: string
+    content: string | undefined
   }>
   threadContext:
     | {
@@ -75,7 +75,11 @@ export const fingerprintFinding = (finding: ReviewFinding) => {
 
 export const encodeMarker = (marker: ManagedThreadMarker) => `${MARKER_PREFIX}${JSON.stringify(marker)}${MARKER_SUFFIX}`
 
-export const decodeMarker = (content: string): ManagedThreadMarker | undefined => {
+export const decodeMarker = (content: unknown): ManagedThreadMarker | undefined => {
+  if (typeof content !== "string") {
+    return undefined
+  }
+
   const start = content.indexOf(MARKER_PREFIX)
   const end = content.indexOf(MARKER_SUFFIX, start)
 

@@ -103,4 +103,38 @@ describe("azure devops", () => {
 
     expect(calls.some((call) => call.url.includes("/comments/10"))).toBe(true)
   })
+
+  test("ignores existing thread comments without string content", async () => {
+    const finding = makeReviewFinding()
+    const existingThreads = [
+      {
+        id: 99,
+        status: 1,
+        comments: [
+          {
+            id: 999,
+            content: undefined,
+          },
+        ],
+        threadContext: undefined,
+      },
+      makeManagedSummaryThread(),
+    ]
+    const { fetchMock, calls } = makeFetchMock((url, init) => {
+      if (url.endsWith("/threads?api-version=7.1") && init?.method === "GET") {
+        return Response.json({ value: existingThreads })
+      }
+
+      return Response.json({ ok: true })
+    })
+
+    const result = await Effect.runPromise(
+      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding])).pipe(
+        Effect.provide(makeAzureDevOpsTestLayer(fetchMock as typeof fetch)),
+      ),
+    )
+
+    expect(result.actions.some((action) => action.type === "upsert-summary")).toBe(true)
+    expect(calls.filter((call) => call.init?.method === "POST")).toHaveLength(1)
+  })
 })

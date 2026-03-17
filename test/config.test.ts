@@ -32,7 +32,7 @@ describe("config", () => {
     expect(config.command).toBe("review")
     expect(config.model).toBe("openai/gpt-5.4")
     expect(config.opencodeVariant).toBeUndefined()
-    expect(config.opencodeTimeoutMs).toBe(300000)
+    expect(config.opencodeTimeoutMs).toBe(600000)
     expect(config.pullRequestId).toBe(42)
     expect(config.organization).toBe("acme")
   })

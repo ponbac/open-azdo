@@ -106,7 +106,7 @@ export const loadReviewConfig = Effect.fn("config.loadReviewConfig")(function* (
             readStringFlag(parsedArgs.flags, "opencode-variant") ??
             readOptionalEnvString(env.OPEN_AZDO_OPENCODE_VARIANT),
           opencodeTimeoutMs: toPositiveInt(
-            readStringFlag(parsedArgs.flags, "opencode-timeout-ms") ?? env.OPEN_AZDO_OPENCODE_TIMEOUT_MS ?? "300000",
+            readStringFlag(parsedArgs.flags, "opencode-timeout-ms") ?? env.OPEN_AZDO_OPENCODE_TIMEOUT_MS ?? "600000",
           ),
           workspace:
             readStringFlag(parsedArgs.flags, "workspace") ?? env.OPEN_AZDO_WORKSPACE ?? env.BUILD_SOURCESDIRECTORY,

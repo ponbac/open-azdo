@@ -30,7 +30,7 @@ export const makeReviewConfig = (overrides: Partial<ReviewConfig> = {}): ReviewC
   command: "review",
   model: "openai/gpt-5.4",
   opencodeVariant: undefined,
-  opencodeTimeoutMs: 300_000,
+  opencodeTimeoutMs: 600_000,
   workspace: overrides.workspace ?? "/tmp/workspace",
   organization: "acme",
   project: "project",
