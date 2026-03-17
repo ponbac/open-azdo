@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
-import { decodeReviewResult } from "../src/review-output"
+import { decodeReviewResult } from "../src/review/ReviewOutput"
 
 describe("review output", () => {
   test("rejects invalid severities", async () => {

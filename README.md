@@ -38,7 +38,7 @@ Common Azure Pipeline defaults:
 Optional flags:
 
 - `--opencode-variant <name>` provider-specific variant or reasoning level, for example `minimal`, `low`, `medium`, `high`, or `xhigh`
-- `--opencode-timeout-ms <milliseconds>` default `600000`
+- `--opencode-timeout <duration>` default `10 minutes`, for example `5 minutes` or `1 hour`
 - `--workspace <path>`
 - `--organization <name>`
 - `--project <name>`
@@ -104,7 +104,7 @@ steps:
       OPENAI_API_KEY: $(OpenAIApiKey)
       # Alternative to the CLI flag above:
       # OPEN_AZDO_OPENCODE_VARIANT: $(OpenCodeThinking)
-      OPEN_AZDO_OPENCODE_TIMEOUT_MS: "600000"
+      OPEN_AZDO_OPENCODE_TIMEOUT: "10 minutes"
 ```
 
 ## Development

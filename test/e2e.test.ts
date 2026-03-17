@@ -2,14 +2,21 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
+import * as ConfigProvider from "effect/ConfigProvider"
 
-import { runCli } from "../src/cli"
-import { makeAppLayer } from "../src/runtime"
-import { createFixtureRepo, createTempDir, makeFetchMock } from "./helpers"
+import { executeReviewWithInput } from "../src/app/Cli"
+import {
+  createFixtureRepo,
+  createMockFetch,
+  createTempDir,
+  makeBaseEnv,
+  makeFetchMock,
+  makeReviewCliInput,
+} from "./helpers"
 
 describe("e2e", () => {
-  test("runs the CLI against a fixture repo and mocked Azure DevOps", async () => {
+  test("runs the review workflow against a fixture repo and mocked Azure DevOps", async () => {
     const { repoDir } = await createFixtureRepo()
     const binDir = await createTempDir("open-azdo-bin-")
     const opencodePath = join(binDir, "opencode")
@@ -41,7 +48,7 @@ printf '%s\n' '${JSON.stringify({
     await chmod(opencodePath, 0o755)
 
     const { fetchMock, calls } = makeFetchMock((url, init) => {
-      if (url.endsWith("/pullRequests/42")) {
+      if (url.endsWith("/pullRequests/42") && init?.method === "GET") {
         return Response.json({
           title: "Feature PR",
           description: "Adds a new export",
@@ -57,39 +64,31 @@ printf '%s\n' '${JSON.stringify({
 
     const originalFetch = globalThis.fetch
     const originalPath = process.env.PATH
-    globalThis.fetch = fetchMock as typeof fetch
+    const configEnv = {
+      ...makeBaseEnv(),
+      BUILD_SOURCESDIRECTORY: repoDir,
+    }
+
+    globalThis.fetch = createMockFetch(fetchMock, originalFetch)
     process.env.PATH = `${binDir}:${originalPath ?? ""}`
 
     try {
       const exitCode = await Effect.runPromise(
-        runCli().pipe(
+        executeReviewWithInput(
+          makeReviewCliInput({
+            model: Option.some("openai/gpt-5.4"),
+            workspace: Option.some(repoDir),
+            collectionUrl: Option.some("https://dev.azure.com/acme"),
+            project: Option.some("project"),
+            repositoryId: Option.some("repo-1"),
+            pullRequestId: Option.some(42),
+          }),
+        ).pipe(
           Effect.provide(
-            makeAppLayer(
-              [
-                "review",
-                "--model",
-                "openai/gpt-5.4",
-                "--workspace",
-                repoDir,
-                "--collection-url",
-                "https://dev.azure.com/acme",
-                "--project",
-                "project",
-                "--repository-id",
-                "repo-1",
-                "--pull-request-id",
-                "42",
-              ],
-              {
-                ...process.env,
-                SYSTEM_ACCESSTOKEN: "system-token",
-                SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
-                BUILD_SOURCESDIRECTORY: repoDir,
-                SYSTEM_TEAMPROJECT: "project",
-                BUILD_REPOSITORY_ID: "repo-1",
-                SYSTEM_COLLECTIONURI: "https://dev.azure.com/acme",
-                SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
-              },
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: configEnv,
+              }),
             ),
           ),
         ),
@@ -99,7 +98,13 @@ printf '%s\n' '${JSON.stringify({
       expect(calls.filter((call) => call.init?.method === "POST")).toHaveLength(2)
     } finally {
       globalThis.fetch = originalFetch
-      process.env.PATH = originalPath
+
+      if (originalPath === undefined) {
+        delete process.env.PATH
+      } else {
+        process.env.PATH = originalPath
+      }
+
       await rm(binDir, { recursive: true, force: true })
       await rm(repoDir, { recursive: true, force: true })
     }

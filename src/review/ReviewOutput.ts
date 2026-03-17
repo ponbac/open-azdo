@@ -1,6 +1,6 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
 
-import { ReviewOutputValidationError } from "./errors"
+import { ReviewOutputValidationError } from "../errors"
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
@@ -32,25 +32,21 @@ export const ReviewResultSchema = Schema.Struct({
 export type ReviewResult = Schema.Schema.Type<typeof ReviewResultSchema>
 
 export type NormalizedReviewResult = ReviewResult & {
-  inlineFindings: ReviewFinding[]
-  summaryOnlyFindings: ReviewFinding[]
+  readonly inlineFindings: ReviewFinding[]
+  readonly summaryOnlyFindings: ReviewFinding[]
 }
 
-export const decodeReviewResult = Effect.fn("reviewOutput.decodeReviewResult")(function* (
-  payload: unknown,
-  changedLinesByFile: Map<string, Set<number>>,
-) {
-  const decoded = yield* Effect.try({
-    try: () => Schema.decodeUnknownSync(ReviewResultSchema)(payload),
-    catch: (error) =>
-      new ReviewOutputValidationError({
-        message: "Model output did not match the ReviewResult schema.",
-        issues: [String(error)],
-      }),
-  })
-
-  return normalizeReviewResult(decoded, changedLinesByFile)
-})
+export const decodeReviewResult = (payload: unknown, changedLinesByFile: Map<string, Set<number>>) =>
+  Schema.decodeUnknownEffect(ReviewResultSchema)(payload).pipe(
+    Effect.mapError(
+      (error) =>
+        new ReviewOutputValidationError({
+          message: "Model output did not match the ReviewResult schema.",
+          issues: [String(error)],
+        }),
+    ),
+    Effect.map((decoded) => normalizeReviewResult(decoded, changedLinesByFile)),
+  )
 
 export const normalizeReviewResult = (
   reviewResult: ReviewResult,
@@ -106,7 +102,6 @@ export const normalizePath = (value: string) => value.replaceAll("\\", "/").repl
 export const renderUnmappedFinding = (finding: ReviewFinding) =>
   `${finding.title} (${finding.severity}, ${finding.confidence}) at ${normalizePath(finding.filePath)}:${finding.line}`
 
-export const getFindingEndLine = (finding: ReviewFinding) =>
-  Option.getOrElse(Option.fromNullishOr(finding.endLine), () => finding.line)
+export const getFindingEndLine = (finding: ReviewFinding) => finding.endLine ?? finding.line
 
 export const uniqueNotes = (notes: ReadonlyArray<string>) => [...new Set(notes)]

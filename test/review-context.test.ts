@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
 
-import { buildReviewContext } from "../src/review-context"
-import type { GitDiff } from "../src/git"
+import { type PullRequestDiff } from "../src/git/PullRequestDiff"
+import { buildReviewContext } from "../src/review/ReviewContext"
 
 describe("review context", () => {
-  test("builds a compact manifest with refs, line ranges, and hunk headers", async () => {
+  test("builds a compact manifest with refs, line ranges, and hunk headers", () => {
     const diffText = [
       "diff --git a/src/example.ts b/src/example.ts",
       "--- a/src/example.ts",
@@ -21,7 +20,7 @@ describe("review context", () => {
       "+  return true",
     ].join("\n")
 
-    const gitDiff: GitDiff = {
+    const gitDiff: PullRequestDiff = {
       baseRef: "abc123",
       headRef: "HEAD",
       diffText,
@@ -32,14 +31,12 @@ describe("review context", () => {
       ]),
     }
 
-    const context = await Effect.runPromise(
-      buildReviewContext(
-        {
-          title: "Feature PR",
-          description: "Adds a new export",
-        },
-        gitDiff,
-      ),
+    const context = buildReviewContext(
+      {
+        title: "Feature PR",
+        description: "Adds a new export",
+      },
+      gitDiff,
     )
 
     expect(context.baseRef).toBe("abc123")
@@ -61,7 +58,7 @@ describe("review context", () => {
     ])
   })
 
-  test("does not embed full patches or file contents in the manifest", async () => {
+  test("does not embed full patches or file contents in the manifest", () => {
     const largeLine = `+${"x".repeat(200)}`
     const diffText = [
       "diff --git a/src/huge.ts b/src/huge.ts",
@@ -71,20 +68,18 @@ describe("review context", () => {
       ...Array.from({ length: 200 }, () => largeLine),
     ].join("\n")
 
-    const context = await Effect.runPromise(
-      buildReviewContext(
-        {
-          title: "Large PR",
-          description: "Touches one big file",
-        },
-        {
-          baseRef: "base",
-          headRef: "HEAD",
-          diffText,
-          changedFiles: ["src/huge.ts"],
-          changedLinesByFile: new Map([["src/huge.ts", new Set(Array.from({ length: 200 }, (_, index) => index + 1))]]),
-        },
-      ),
+    const context = buildReviewContext(
+      {
+        title: "Large PR",
+        description: "Touches one big file",
+      },
+      {
+        baseRef: "base",
+        headRef: "HEAD",
+        diffText,
+        changedFiles: ["src/huge.ts"],
+        changedLinesByFile: new Map([["src/huge.ts", new Set(Array.from({ length: 200 }, (_, index) => index + 1))]]),
+      },
     )
 
     const serialized = JSON.stringify(context)

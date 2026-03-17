@@ -2,9 +2,20 @@ import { existsSync } from "node:fs"
 
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import * as Duration from "effect/Duration"
 
-import { extractFinalResponse, runOpenCode } from "../src/opencode"
-import { makeOpenCodeTestLayer, makeReviewConfig } from "./helpers"
+import { extractFinalResponse } from "../src/opencode/Layers/OpenCodeRunner"
+import { OpenCodeRunner } from "../src/opencode/Services/OpenCodeRunner"
+import { makeOpenCodeLiveLayer, makeOpenCodeRunRequest, makeProcessRunner } from "./helpers"
+
+const runOpenCode = (
+  request = makeOpenCodeRunRequest(),
+  runner = makeProcessRunner(() => Effect.die("runner not configured")),
+) =>
+  Effect.gen(function* () {
+    const service = yield* OpenCodeRunner
+    return yield* service.run(request)
+  }).pipe(Effect.provide(makeOpenCodeLiveLayer(runner)))
 
 describe("opencode", () => {
   test("extracts the final JSON response from line-delimited events", () => {
@@ -46,29 +57,6 @@ describe("opencode", () => {
           messageID: "msg_cfbd82a0c001eivo5hX596tjMN",
           type: "text",
           text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-          time: {
-            start: 1773751778186,
-            end: 1773751778186,
-          },
-          metadata: {
-            openai: {
-              itemId: "msg_0258bc4fb90d0de80169b94de2008c8191a83ee04a2491722a",
-            },
-          },
-        },
-      }),
-      JSON.stringify({
-        type: "step_finish",
-        timestamp: 1773751778226,
-        sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-        part: {
-          id: "prt_cfbd83ba20015HlTN2GdKMQR1R",
-          sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-          messageID: "msg_cfbd82a0c001eivo5hX596tjMN",
-          type: "step-finish",
-          reason: "stop",
-          snapshot: "5047b7d33fe0f338f7a45ece74a710d7dc4c884e",
-          cost: 0,
         },
       }),
     ].join("\n")
@@ -84,23 +72,23 @@ describe("opencode", () => {
     let configDir = ""
 
     const result = await Effect.runPromise(
-      runOpenCode(makeReviewConfig(), "prompt").pipe(
-        Effect.provide(
-          makeOpenCodeTestLayer({
-            execute: (input) => {
-              configDir = input.env?.OPENCODE_CONFIG_DIR ?? ""
-              expect(input.command).toBe("opencode")
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+          prompt: "prompt",
+        }),
+        makeProcessRunner((input) => {
+          configDir = input.env?.OPENCODE_CONFIG_DIR ?? ""
+          expect(input.command).toBe("opencode")
 
-              return Effect.succeed({
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-                }),
-                stderr: "",
-              })
-            },
-          }),
-        ),
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+            }),
+            stderr: "",
+          })
+        }),
       ),
     )
 
@@ -110,51 +98,51 @@ describe("opencode", () => {
   })
 
   test("passes the configured timeout to the OpenCode process", async () => {
-    let timeoutMs: number | undefined
+    let timeout: Duration.Duration | undefined
 
     await Effect.runPromise(
-      runOpenCode(makeReviewConfig({ opencodeTimeoutMs: 450_000 }), "prompt").pipe(
-        Effect.provide(
-          makeOpenCodeTestLayer({
-            execute: (input) => {
-              timeoutMs = input.timeoutMs
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+          timeout: Duration.seconds(450),
+        }),
+        makeProcessRunner((input) => {
+          timeout = input.timeout
 
-              return Effect.succeed({
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-                }),
-                stderr: "",
-              })
-            },
-          }),
-        ),
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+            }),
+            stderr: "",
+          })
+        }),
       ),
     )
 
-    expect(timeoutMs).toBe(450_000)
+    expect(timeout === undefined ? undefined : Duration.toMillis(timeout)).toBe(450_000)
   })
 
   test("passes the configured OpenCode variant to the process", async () => {
     let args: ReadonlyArray<string> = []
 
     await Effect.runPromise(
-      runOpenCode(makeReviewConfig({ opencodeVariant: "high" }), "prompt").pipe(
-        Effect.provide(
-          makeOpenCodeTestLayer({
-            execute: (input) => {
-              args = input.args
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+          variant: "high",
+        }),
+        makeProcessRunner((input) => {
+          args = input.args
 
-              return Effect.succeed({
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-                }),
-                stderr: "",
-              })
-            },
-          }),
-        ),
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+            }),
+            stderr: "",
+          })
+        }),
       ),
     )
 
@@ -167,26 +155,45 @@ describe("opencode", () => {
     const prompt = "review context ".repeat(20_000)
 
     await Effect.runPromise(
-      runOpenCode(makeReviewConfig(), prompt).pipe(
-        Effect.provide(
-          makeOpenCodeTestLayer({
-            execute: (input) => {
-              args = input.args
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+          prompt,
+        }),
+        makeProcessRunner((input) => {
+          args = input.args
 
-              return Effect.succeed({
-                exitCode: 0,
-                stdout: JSON.stringify({
-                  text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-                }),
-                stderr: "",
-              })
-            },
-          }),
-        ),
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: JSON.stringify({
+              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+            }),
+            stderr: "",
+          })
+        }),
       ),
     )
 
     expect(args).not.toContain(prompt)
     expect(args.at(-1)).toBe("Review the pull request using your configured instructions and return strict JSON only.")
+  })
+
+  test("fails when OpenCode exits non-zero", async () => {
+    const exit = await Effect.runPromiseExit(
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+        }),
+        makeProcessRunner(() =>
+          Effect.succeed({
+            exitCode: 1,
+            stdout: "",
+            stderr: "boom",
+          }),
+        ),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
   })
 })

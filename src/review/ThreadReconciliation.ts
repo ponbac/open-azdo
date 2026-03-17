@@ -1,12 +1,13 @@
 import { Schema } from "effect"
 
+import type { ExistingThread } from "../azdo/Schemas"
 import {
   countBySeverity,
   getFindingEndLine,
   normalizePath,
   type ReviewFinding,
   type ReviewResult,
-} from "./review-output"
+} from "./ReviewOutput"
 
 export const ManagedThreadMarkerSchema = Schema.Struct({
   kind: Schema.Literals(["summary", "finding"]),
@@ -14,42 +15,26 @@ export const ManagedThreadMarkerSchema = Schema.Struct({
 })
 export type ManagedThreadMarker = Schema.Schema.Type<typeof ManagedThreadMarkerSchema>
 
-export type ExistingThread = {
-  id: number
-  status: number
-  comments: Array<{
-    id: number
-    content: string | undefined
-  }>
-  threadContext:
-    | {
-        filePath: string | undefined
-        rightFileStart: { line: number | undefined } | undefined
-        rightFileEnd: { line: number | undefined } | undefined
-      }
-    | undefined
-}
-
 export type ThreadAction =
   | {
-      type: "upsert-summary"
-      marker: ManagedThreadMarker
-      content: string
-      existingThread: ExistingThread | undefined
-      commentId: number | undefined
+      readonly type: "upsert-summary"
+      readonly marker: ManagedThreadMarker
+      readonly content: string
+      readonly existingThread: ExistingThread | undefined
+      readonly commentId: number | undefined
     }
   | {
-      type: "upsert-finding"
-      marker: ManagedThreadMarker
-      content: string
-      finding: ReviewFinding
-      existingThread: ExistingThread | undefined
-      commentId: number | undefined
+      readonly type: "upsert-finding"
+      readonly marker: ManagedThreadMarker
+      readonly content: string
+      readonly finding: ReviewFinding
+      readonly existingThread: ExistingThread | undefined
+      readonly commentId: number | undefined
     }
   | {
-      type: "close-thread"
-      marker: ManagedThreadMarker
-      existingThread: ExistingThread
+      readonly type: "close-thread"
+      readonly marker: ManagedThreadMarker
+      readonly existingThread: ExistingThread
     }
 
 const MARKER_PREFIX = "<!-- open-azdo:"
@@ -96,24 +81,11 @@ export const decodeMarker = (content: unknown): ManagedThreadMarker | undefined 
   }
 }
 
-export const findManagedSummaryThread = (existingThreads: ReadonlyArray<ExistingThread>) => {
-  for (const { thread, commentId, marker } of listManagedThreadComments(existingThreads)) {
-    if (marker.kind === "summary") {
-      return {
-        thread,
-        commentId,
-      }
-    }
-  }
-
-  return undefined
-}
-
 const listManagedThreadComments = (existingThreads: ReadonlyArray<ExistingThread>) => {
   const managed: Array<{
-    thread: ExistingThread
-    commentId: number
-    marker: ManagedThreadMarker
+    readonly thread: ExistingThread
+    readonly commentId: number
+    readonly marker: ManagedThreadMarker
   }> = []
 
   for (const thread of existingThreads) {
@@ -133,6 +105,19 @@ const listManagedThreadComments = (existingThreads: ReadonlyArray<ExistingThread
   }
 
   return managed
+}
+
+export const findManagedSummaryThread = (existingThreads: ReadonlyArray<ExistingThread>) => {
+  for (const { thread, commentId, marker } of listManagedThreadComments(existingThreads)) {
+    if (marker.kind === "summary") {
+      return {
+        thread,
+        commentId,
+      }
+    }
+  }
+
+  return undefined
 }
 
 export const buildSummaryComment = (reviewResult: ReviewResult, buildLink?: string) => {
@@ -184,7 +169,7 @@ export const reconcileThreads = (
   const actions: ThreadAction[] = []
   const managed = new Map<
     string,
-    { thread: ExistingThread; commentId: number | undefined; marker: ManagedThreadMarker }
+    { readonly thread: ExistingThread; readonly commentId: number | undefined; readonly marker: ManagedThreadMarker }
   >()
 
   for (const { thread, commentId, marker } of listManagedThreadComments(existingThreads)) {
@@ -224,7 +209,7 @@ export const reconcileThreads = (
     })
   }
 
-  for (const [key, existing] of managed) {
+  for (const [key, existing] of managed.entries()) {
     if (existing.marker.kind !== "finding" || activeFindingKeys.has(key)) {
       continue
     }

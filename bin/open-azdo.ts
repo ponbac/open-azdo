@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
 
-import { main } from "../src/main"
+import { main } from "../src/app/Main"
 
-process.exitCode = await main(process.argv.slice(2), process.env)
+main()

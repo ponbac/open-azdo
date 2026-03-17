@@ -1,8 +1,17 @@
+import { rm } from "node:fs/promises"
+
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
-import { compressChangedLines, extractHunkHeaders, resolveGitDiff, runGit } from "../src/git"
-import { createSyntheticMergeRepo, makeGitTestLayer, makeReviewConfig } from "./helpers"
+import { resolvePullRequestDiff, compressChangedLines, extractHunkHeaders } from "../src/git/PullRequestDiff"
+import { GitExec } from "../src/git/Services/GitExec"
+import {
+  createFixtureRepo,
+  createSyntheticMergeRepo,
+  makeGitExec,
+  makeGitExecLayer,
+  makeRealGitExecLayer,
+} from "./helpers"
 
 describe("git", () => {
   test("compresses changed lines into contiguous ranges", () => {
@@ -29,43 +38,66 @@ describe("git", () => {
 
   test("resolves synthetic merge commits against HEAD^1", async () => {
     const { repoDir } = await createSyntheticMergeRepo()
-    const config = makeReviewConfig({
-      workspace: repoDir,
-      targetBranch: "refs/heads/main",
-    })
 
-    const diff = await Effect.runPromise(resolveGitDiff(config).pipe(Effect.provide(makeGitTestLayer())))
+    try {
+      const diff = await Effect.runPromise(
+        resolvePullRequestDiff({
+          workspace: repoDir,
+          targetBranch: "refs/heads/main",
+        }).pipe(Effect.provide(makeRealGitExecLayer())),
+      )
 
-    expect(diff.baseRef).toBe("HEAD^1")
-    expect(diff.changedFiles).toContain("src/example.ts")
+      expect(diff.baseRef).toBe("HEAD^1")
+      expect(diff.changedFiles).toContain("src/example.ts")
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
   })
 
   test("fails clearly when target history is unavailable", async () => {
-    const config = makeReviewConfig({
-      workspace: await Bun.write(Bun.file("/tmp/open-azdo-dummy"), "").then(() => "/tmp"),
-      targetBranch: undefined,
-    })
+    const { repoDir } = await createFixtureRepo()
 
-    const exit = await Effect.runPromiseExit(resolveGitDiff(config).pipe(Effect.provide(makeGitTestLayer())))
-    expect(exit._tag).toBe("Failure")
+    try {
+      const exit = await Effect.runPromiseExit(
+        resolvePullRequestDiff({
+          workspace: repoDir,
+          targetBranch: undefined,
+        }).pipe(Effect.provide(makeRealGitExecLayer())),
+      )
+
+      expect(exit._tag).toBe("Failure")
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
   })
 
-  test("uses argv arrays instead of shell strings", async () => {
+  test("executes git via argv arrays instead of shell strings", async () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = []
 
     await Effect.runPromise(
-      runGit("/tmp", ["status", "--short"], true).pipe(
+      Effect.gen(function* () {
+        const git = yield* GitExec
+        yield* git.execute({
+          operation: "Git.test",
+          cwd: "/tmp",
+          args: ["status", "--short"],
+        })
+      }).pipe(
         Effect.provide(
-          makeGitTestLayer({
-            execute: (input) => {
-              calls.push({ command: input.command, args: input.args })
+          makeGitExecLayer(
+            makeGitExec((input) => {
+              calls.push({
+                command: "git",
+                args: input.args,
+              })
+
               return Effect.succeed({
                 exitCode: 0,
                 stdout: "",
                 stderr: "",
               })
-            },
-          }),
+            }),
+          ),
         ),
       ),
     )

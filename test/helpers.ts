@@ -1,52 +1,125 @@
+import { spawnSync } from "node:child_process"
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { spawnSync } from "node:child_process"
 
-import { BunServices } from "@effect/platform-bun"
+import * as ConfigProvider from "effect/ConfigProvider"
+import { Effect, Layer, Option, Redacted } from "effect"
+import * as Duration from "effect/Duration"
 
-import * as Layer from "effect/Layer"
-import { Effect, Redacted } from "effect"
+import { BaseRuntimeLayer } from "../src/app/Runtime"
+import type { ExistingThread, PullRequestMetadata } from "../src/azdo/Schemas"
+import { AzureDevOpsClient, type AzureDevOpsClientShape } from "../src/azdo/Services/AzureDevOpsClient"
+import { AppConfig, makeAppConfigLayer, type AppConfigShape, type ReviewCliInput } from "../src/config/AppConfig"
+import { GitExecLive } from "../src/git/Layers/GitExec"
+import { type PullRequestDiff } from "../src/git/PullRequestDiff"
+import { GitExec, type GitExecShape } from "../src/git/Services/GitExec"
+import { OpenCodeRunnerLive } from "../src/opencode/Layers/OpenCodeRunner"
+import {
+  OpenCodeRunner,
+  type OpenCodeRunRequest,
+  type OpenCodeRunnerShape,
+} from "../src/opencode/Services/OpenCodeRunner"
+import { ProcessRunnerLive } from "../src/platform/Layers/ProcessRunner"
+import {
+  ProcessRunner,
+  type CommandExecutionResult,
+  type ExecuteCommandInput,
+} from "../src/platform/Services/ProcessRunner"
+import type { NormalizedReviewResult, ReviewFinding } from "../src/review/ReviewOutput"
+import { encodeMarker, fingerprintFinding } from "../src/review/ThreadReconciliation"
 
-import { AzureDevOpsService, FetchClient } from "../src/azure-devops"
-import type { ReviewConfig } from "../src/config"
-import { RuntimeInput } from "../src/config"
-import { GitService } from "../src/git"
-import { OpenCodeService } from "../src/opencode"
-import { ProcessRunner, type CommandExecutionResult, type ExecuteCommandInput } from "../src/process"
-import type { NormalizedReviewResult, ReviewFinding } from "../src/review-output"
-import { encodeMarker, fingerprintFinding } from "../src/thread-reconciliation"
+const compactEnv = (env: Record<string, string | undefined>) => {
+  const result: Record<string, string> = {}
 
-export const makeBaseEnv = () => ({
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      result[key] = value
+    }
+  }
+
+  return result
+}
+
+export const makeBaseEnv = (): Record<string, string> => ({
   SYSTEM_ACCESSTOKEN: "system-token",
   SYSTEM_COLLECTIONURI: "https://dev.azure.com/acme",
   SYSTEM_TEAMPROJECT: "project",
   BUILD_REPOSITORY_ID: "repo-1",
   SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
+  SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
   BUILD_SOURCESDIRECTORY: "/tmp/workspace",
+  BUILD_BUILDID: "99",
+  BUILD_BUILDNUMBER: "99",
 })
 
-export const makeReviewConfig = (overrides: Partial<ReviewConfig> = {}): ReviewConfig => ({
-  command: "review",
-  model: "openai/gpt-5.4",
-  opencodeVariant: undefined,
-  opencodeTimeoutMs: 600_000,
-  workspace: overrides.workspace ?? "/tmp/workspace",
-  organization: "acme",
-  project: "project",
-  repositoryId: "repo-1",
-  pullRequestId: 42,
-  collectionUrl: "https://dev.azure.com/acme",
-  agent: "azdo-review",
-  promptFile: undefined,
+export const makeReviewCliInput = (overrides: Partial<ReviewCliInput> = {}): ReviewCliInput => ({
+  model: Option.none(),
+  opencodeVariant: Option.none(),
+  opencodeTimeout: Option.none(),
+  workspace: Option.none(),
+  organization: Option.none(),
+  project: Option.none(),
+  repositoryId: Option.none(),
+  pullRequestId: Option.none(),
+  collectionUrl: Option.none(),
+  agent: Option.none(),
+  promptFile: Option.none(),
   dryRun: false,
   json: false,
-  systemAccessToken: Redacted.make("system-token"),
-  targetBranch: "refs/heads/main",
-  sourceVersion: undefined,
-  buildId: "99",
-  buildNumber: "99",
-  buildUri: undefined,
+  ...overrides,
+})
+
+export const resolveAppConfig = (cliInput: ReviewCliInput, env: Record<string, string | undefined>) =>
+  Effect.gen(function* () {
+    return yield* AppConfig
+  }).pipe(
+    Effect.provide(
+      makeAppConfigLayer(cliInput).pipe(
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: compactEnv(env),
+            }),
+          ),
+        ),
+      ),
+    ),
+  )
+
+export const makeAppConfig = (overrides: Partial<AppConfigShape> = {}): AppConfig["Service"] =>
+  ({
+    command: "review",
+    model: "openai/gpt-5.4",
+    opencodeTimeout: Duration.minutes(10),
+    workspace: "/tmp/workspace",
+    organization: "acme",
+    project: "project",
+    repositoryId: "repo-1",
+    pullRequestId: 42,
+    collectionUrl: "https://dev.azure.com/acme",
+    agent: "azdo-review",
+    dryRun: false,
+    json: false,
+    systemAccessToken: Redacted.make("system-token"),
+    targetBranch: "refs/heads/main",
+    buildId: "99",
+    buildNumber: "99",
+    ...overrides,
+  }) as AppConfig["Service"]
+
+export const makePullRequestMetadata = (overrides: Partial<PullRequestMetadata> = {}): PullRequestMetadata => ({
+  title: "Feature PR",
+  description: "Adds a new export",
+  ...overrides,
+})
+
+export const makePullRequestDiff = (overrides: Partial<PullRequestDiff> = {}): PullRequestDiff => ({
+  baseRef: "abc123",
+  headRef: "HEAD",
+  diffText: "",
+  changedFiles: [],
+  changedLinesByFile: new Map<string, Set<number>>(),
   ...overrides,
 })
 
@@ -61,18 +134,18 @@ export const makeReviewFinding = (overrides: Partial<ReviewFinding> = {}): Revie
 })
 
 export const makeNormalizedReviewResult = (
-  findings: ReviewFinding[],
-  inlineFindings: ReviewFinding[] = findings,
+  findings: ReadonlyArray<ReviewFinding>,
+  inlineFindings: ReadonlyArray<ReviewFinding> = findings,
 ): NormalizedReviewResult => ({
   summary: "Summary",
   verdict: "concerns",
-  findings,
-  inlineFindings,
+  findings: [...findings],
+  inlineFindings: [...inlineFindings],
   summaryOnlyFindings: findings.filter((finding) => !inlineFindings.includes(finding)),
   unmappedNotes: [],
 })
 
-export const makeManagedSummaryThread = () => ({
+export const makeManagedSummaryThread = (): ExistingThread => ({
   id: 1,
   status: 1,
   comments: [
@@ -81,10 +154,9 @@ export const makeManagedSummaryThread = () => ({
       content: `summary\n${encodeMarker({ kind: "summary", fingerprint: "summary" })}`,
     },
   ],
-  threadContext: undefined,
 })
 
-export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2) => ({
+export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2): ExistingThread => ({
   id: threadId,
   status: 1,
   comments: [
@@ -99,6 +171,33 @@ export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2) =
     rightFileEnd: { line: finding.endLine ?? finding.line },
   },
 })
+
+export type FetchCall = {
+  readonly url: string
+  readonly init: RequestInit | undefined
+}
+
+export type FetchLike = (url: string | URL | Request, init?: RequestInit) => Promise<Response>
+
+export const makeFetchMock = (handler: (url: string, init?: RequestInit) => Response | Promise<Response>) => {
+  const calls: FetchCall[] = []
+  const fetchMock: FetchLike = async (url, init) => {
+    const normalizedUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url
+    calls.push({ url: normalizedUrl, init })
+    return handler(normalizedUrl, init)
+  }
+
+  return {
+    calls,
+    fetchMock,
+  }
+}
+
+export const createMockFetch = (fetchMock: FetchLike, originalFetch: typeof fetch): typeof fetch => {
+  const mockedFetch: typeof fetch = (input, init) => fetchMock(input, init)
+  mockedFetch.preconnect = originalFetch.preconnect.bind(originalFetch)
+  return mockedFetch
+}
 
 export const createTempDir = async (prefix: string) => mkdtemp(join(tmpdir(), prefix))
 
@@ -118,8 +217,8 @@ export const createFixtureRepo = async () => {
   runGit(repoDir, ["commit", "-am", "feature"])
 
   return {
-    repoDir,
     mainSha,
+    repoDir,
   }
 }
 
@@ -146,50 +245,57 @@ export const createSyntheticMergeRepo = async () => {
   }
 }
 
-export const makeFetchMock = (handler: (url: string, init?: RequestInit) => Response | Promise<Response>) => {
-  const calls: Array<{ url: string; init: RequestInit | undefined }> = []
-  const fetchMock = async (url: string | URL | Request, init?: RequestInit) => {
-    const normalizedUrl = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url
-    calls.push({ url: normalizedUrl, init })
-    return handler(normalizedUrl, init)
-  }
+export const makeProcessRunner = (
+  execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, never>,
+): ProcessRunner["Service"] => ({
+  execute,
+})
 
-  return {
-    fetchMock,
-    calls,
-  }
-}
+export const makeGitExec = (execute: GitExecShape["execute"]): GitExec["Service"] => ({
+  execute,
+})
 
-export type ProcessRunnerStub = {
-  execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, never>
-}
+export const makeAzureDevOpsClient = (
+  overrides: Partial<AzureDevOpsClientShape> = {},
+): AzureDevOpsClient["Service"] => ({
+  getPullRequestMetadata: () => Effect.succeed(makePullRequestMetadata()),
+  listThreads: () => Effect.succeed([]),
+  updateThreadStatus: () => Effect.void,
+  updateComment: () => Effect.void,
+  createThread: () => Effect.void,
+  ...overrides,
+})
 
-const makeProcessTestLayer = (runner?: ProcessRunnerStub) =>
-  runner ? Layer.succeed(ProcessRunner, runner) : ProcessRunner.layer.pipe(Layer.provide(BunServices.layer))
+export const makeOpenCodeRunner = (run: OpenCodeRunnerShape["run"]): OpenCodeRunner["Service"] => ({
+  run,
+})
 
-export const makeGitTestLayer = (runner?: ProcessRunnerStub) => {
-  return GitService.layer.pipe(Layer.provide(Layer.mergeAll(makeProcessTestLayer(runner), BunServices.layer)))
-}
+export const makeGitExecLayer = (service: GitExec["Service"]) => Layer.succeed(GitExec, service)
 
-export const makeOpenCodeTestLayer = (runner: ProcessRunnerStub, env: NodeJS.ProcessEnv = {}) =>
-  OpenCodeService.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        makeProcessTestLayer(runner),
-        BunServices.layer,
-        Layer.succeed(RuntimeInput, {
-          argv: [],
-          env,
-        }),
-      ),
-    ),
-  )
+export const makeAzureDevOpsClientLayer = (service: AzureDevOpsClient["Service"]) =>
+  Layer.succeed(AzureDevOpsClient, service)
 
-export const makeAzureDevOpsTestLayer = (fetchMock: typeof fetch) =>
-  AzureDevOpsService.layer.pipe(Layer.provide(Layer.succeed(FetchClient, { fetch: fetchMock })))
+export const makeOpenCodeRunnerLayer = (service: OpenCodeRunner["Service"]) => Layer.succeed(OpenCodeRunner, service)
 
-const runGit = (cwd: string, args: string[]) => {
-  const result = spawnSync("git", args, {
+export const makeRealGitExecLayer = () =>
+  GitExecLive.pipe(Layer.provide(ProcessRunnerLive.pipe(Layer.provide(BaseRuntimeLayer))))
+
+export const makeOpenCodeLiveLayer = (runner: ProcessRunner["Service"]) =>
+  OpenCodeRunnerLive.pipe(Layer.provide(Layer.mergeAll(BaseRuntimeLayer, Layer.succeed(ProcessRunner, runner))))
+
+export const makeOpenCodeRunRequest = (overrides: Partial<OpenCodeRunRequest> = {}): OpenCodeRunRequest => ({
+  workspace: "/tmp/workspace",
+  model: "openai/gpt-5.4",
+  agent: "azdo-review",
+  variant: undefined,
+  timeout: Duration.minutes(10),
+  prompt: "Review this pull request.",
+  inheritedEnv: {},
+  ...overrides,
+})
+
+const runGit = (cwd: string, args: ReadonlyArray<string>) => {
+  const result = spawnSync("git", [...args], {
     cwd,
     encoding: "utf8",
   })

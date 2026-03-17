@@ -1,39 +1,38 @@
 import { describe, expect, test } from "bun:test"
-import { BunServices } from "@effect/platform-bun"
 import { Effect } from "effect"
 
-import { buildReviewPrompt } from "../src/review-prompt"
-import { makeReviewConfig } from "./helpers"
+import { BaseRuntimeLayer } from "../src/app/Runtime"
+import { buildReviewPrompt } from "../src/review/ReviewPrompt"
+import type { ReviewContext } from "../src/review/ReviewContext"
+
+const reviewContext: ReviewContext = {
+  pullRequest: {
+    title: "Feature PR",
+    description: "Adds a new export",
+  },
+  baseRef: "abc123",
+  headRef: "HEAD",
+  changedFiles: [
+    {
+      path: "src/example.ts",
+      changedLineRanges: [{ start: 2, end: 3 }],
+      hunkHeaders: ["@@ -1 +1,2 @@"],
+    },
+  ],
+}
 
 describe("review prompt", () => {
   test("instructs the model to review files via an internal checklist and allowed commands", async () => {
     const prompt = await Effect.runPromise(
-      buildReviewPrompt(makeReviewConfig(), {
-        pullRequest: {
-          title: "Feature PR",
-          description: "Adds a new export",
-        },
-        baseRef: "abc123",
-        headRef: "HEAD",
-        changedFiles: [
-          {
-            path: "src/example.ts",
-            changedLineRanges: [{ start: 2, end: 3 }],
-            hunkHeaders: ["@@ -1 +1,2 @@"],
-          },
-        ],
-      }).pipe(Effect.provide(BunServices.layer)),
+      buildReviewPrompt(undefined, reviewContext).pipe(Effect.provide(BaseRuntimeLayer)),
     )
 
     expect(prompt).toContain("Build an internal checklist containing every path in changedFiles")
     expect(prompt).toContain("For each changed file, inspect the diff with `git diff <baseRef> <headRef> -- <path>`")
     expect(prompt).toContain("Return strict JSON only with the shape:")
     expect(prompt).toContain("Keep the internal checklist private and do not include it in the final JSON output.")
-    expect(prompt).not.toContain("Only report issues grounded in the provided diff and file excerpts.")
+    expect(prompt).toContain("Ground every finding in the review manifest plus repository evidence")
     expect(prompt).toContain("Use a lively review tone with emojis throughout the human-readable text fields.")
-    expect(prompt).toContain(
-      "Include emojis in summary, finding titles, finding bodies, and unmapped notes; prefer multiple relevant emojis instead of a single token.",
-    )
   })
 
   test("stays compact when the review manifest covers many changed lines", async () => {
@@ -43,7 +42,7 @@ describe("review prompt", () => {
     }))
 
     const prompt = await Effect.runPromise(
-      buildReviewPrompt(makeReviewConfig(), {
+      buildReviewPrompt(undefined, {
         pullRequest: {
           title: "Large PR",
           description: "Touches a lot of lines",
@@ -57,11 +56,21 @@ describe("review prompt", () => {
             hunkHeaders: ["@@ -1,3 +1,3 @@"],
           },
         ],
-      }).pipe(Effect.provide(BunServices.layer)),
+      } satisfies ReviewContext).pipe(Effect.provide(BaseRuntimeLayer)),
     )
 
     expect(prompt.length).toBeLessThan(15_000)
     expect(prompt).toContain('"changedLineRanges"')
     expect(prompt).not.toContain("diff --git")
+  })
+
+  test("fails explicitly when a prompt file cannot be read", async () => {
+    const exit = await Effect.runPromiseExit(
+      buildReviewPrompt("/definitely-missing/open-azdo-prompt.md", reviewContext).pipe(
+        Effect.provide(BaseRuntimeLayer),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
   })
 })

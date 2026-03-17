@@ -15,10 +15,10 @@ export class CommandExecutionError extends Schema.TaggedErrorClass<CommandExecut
 }) {}
 
 export class GitCommandError extends Schema.TaggedErrorClass<GitCommandError>()("GitCommandError", {
-  message: Schema.String,
-  command: Schema.Array(Schema.String),
-  stderr: Schema.String,
-  exitCode: Schema.Number,
+  operation: Schema.String,
+  command: Schema.String,
+  cwd: Schema.String,
+  detail: Schema.String,
 }) {}
 
 export class MissingGitHistoryError extends Schema.TaggedErrorClass<MissingGitHistoryError>()(
@@ -36,6 +36,21 @@ export class AzureDevOpsHttpError extends Schema.TaggedErrorClass<AzureDevOpsHtt
   body: Schema.String,
 }) {}
 
+export class AzureDevOpsDecodeError extends Schema.TaggedErrorClass<AzureDevOpsDecodeError>()(
+  "AzureDevOpsDecodeError",
+  {
+    message: Schema.String,
+    url: Schema.String,
+    body: Schema.String,
+    issues: Schema.Array(Schema.String),
+  },
+) {}
+
+export class JsonParseError extends Schema.TaggedErrorClass<JsonParseError>()("JsonParseError", {
+  message: Schema.String,
+  input: Schema.String,
+}) {}
+
 export class OpenCodeInvocationError extends Schema.TaggedErrorClass<OpenCodeInvocationError>()(
   "OpenCodeInvocationError",
   {
@@ -48,6 +63,11 @@ export class OpenCodeInvocationError extends Schema.TaggedErrorClass<OpenCodeInv
 export class OpenCodeOutputError extends Schema.TaggedErrorClass<OpenCodeOutputError>()("OpenCodeOutputError", {
   message: Schema.String,
   output: Schema.String,
+}) {}
+
+export class PromptFileError extends Schema.TaggedErrorClass<PromptFileError>()("PromptFileError", {
+  message: Schema.String,
+  path: Schema.String,
 }) {}
 
 export class ReviewOutputValidationError extends Schema.TaggedErrorClass<ReviewOutputValidationError>()(

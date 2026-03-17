@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Redacted } from "effect"
 
-import { renderLogLine, sanitizeForLog } from "../src/logging"
+import { renderLogLine, sanitizeForLog } from "../src/shared/Logging"
 
 describe("logging", () => {
   test("redacts secrets in structured output", () => {
