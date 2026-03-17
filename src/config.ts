@@ -1,3 +1,5 @@
+import * as Layer from "effect/Layer"
+import * as ServiceMap from "effect/ServiceMap"
 import { Effect, Redacted, Schema } from "effect"
 
 import { ConfigError } from "./errors"
@@ -8,6 +10,8 @@ const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 export type ReviewConfig = {
   command: "review"
   model: string
+  opencodeVariant: string | undefined
+  opencodeTimeoutMs: number
   workspace: string
   organization: string
   project: string
@@ -39,9 +43,19 @@ export type AzureContext = {
   targetBranch: string | undefined
 }
 
+export type RuntimeInput = {
+  argv: ReadonlyArray<string>
+  env: NodeJS.ProcessEnv
+}
+
+export const RuntimeInput = ServiceMap.Service<RuntimeInput>("open-azdo/RuntimeInput")
+export const ReviewConfigValue = ServiceMap.Service<ReviewConfig>("open-azdo/ReviewConfigValue")
+
 const RawReviewConfigSchema = Schema.Struct({
   command: Schema.Literal("review"),
   model: NonEmptyString,
+  opencodeVariant: Schema.optionalKey(NonEmptyString),
+  opencodeTimeoutMs: PositiveInt,
   workspace: NonEmptyString,
   organization: NonEmptyString,
   project: NonEmptyString,
@@ -88,6 +102,12 @@ export const loadReviewConfig = Effect.fn("config.loadReviewConfig")(function* (
         compactOptionalKeys({
           command: "review",
           model: readStringFlag(parsedArgs.flags, "model") ?? env.OPEN_AZDO_MODEL,
+          opencodeVariant:
+            readStringFlag(parsedArgs.flags, "opencode-variant") ??
+            readOptionalEnvString(env.OPEN_AZDO_OPENCODE_VARIANT),
+          opencodeTimeoutMs: toPositiveInt(
+            readStringFlag(parsedArgs.flags, "opencode-timeout-ms") ?? env.OPEN_AZDO_OPENCODE_TIMEOUT_MS ?? "300000",
+          ),
           workspace:
             readStringFlag(parsedArgs.flags, "workspace") ?? env.OPEN_AZDO_WORKSPACE ?? env.BUILD_SOURCESDIRECTORY,
           organization,
@@ -123,6 +143,14 @@ export const loadReviewConfig = Effect.fn("config.loadReviewConfig")(function* (
 
   return toReviewConfig(rawConfig)
 })
+
+export const makeReviewConfigLayer = Layer.effect(
+  ReviewConfigValue,
+  Effect.gen(function* () {
+    const input = yield* RuntimeInput
+    return yield* loadReviewConfig(input.argv, input.env)
+  }),
+)
 
 export const createAzureContext = (config: ReviewConfig): AzureContext => ({
   organization: config.organization,
@@ -193,6 +221,8 @@ export const parseArgs = (argv: ReadonlyArray<string>): ParsedArgs => {
 const toReviewConfig = (rawConfig: RawReviewConfig): ReviewConfig => ({
   command: rawConfig.command,
   model: rawConfig.model,
+  opencodeVariant: rawConfig.opencodeVariant,
+  opencodeTimeoutMs: rawConfig.opencodeTimeoutMs,
   workspace: rawConfig.workspace,
   organization: rawConfig.organization,
   project: rawConfig.project,
@@ -232,6 +262,15 @@ const readStringFlag = (flags: Record<string, string | boolean>, key: string) =>
 }
 
 const readBooleanFlag = (flags: Record<string, string | boolean>, key: string) => flags[key] === true
+
+const readOptionalEnvString = (value: string | undefined) => {
+  if (typeof value !== "string") {
+    return undefined
+  }
+
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
 
 const toPositiveInt = (value: string | undefined) => {
   if (!value) {

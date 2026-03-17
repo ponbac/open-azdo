@@ -31,7 +31,53 @@ describe("config", () => {
 
     expect(config.command).toBe("review")
     expect(config.model).toBe("openai/gpt-5.4")
+    expect(config.opencodeVariant).toBeUndefined()
+    expect(config.opencodeTimeoutMs).toBe(300000)
     expect(config.pullRequestId).toBe(42)
     expect(config.organization).toBe("acme")
+  })
+
+  test("loads an explicit OpenCode variant from the environment", async () => {
+    const config = await Effect.runPromise(
+      loadReviewConfig(["review", "--model", "openai/gpt-5.4"], {
+        ...makeBaseEnv(),
+        OPEN_AZDO_OPENCODE_VARIANT: "high",
+      }),
+    )
+
+    expect(config.opencodeVariant).toBe("high")
+  })
+
+  test("prefers the CLI OpenCode variant over the environment", async () => {
+    const config = await Effect.runPromise(
+      loadReviewConfig(["review", "--model", "openai/gpt-5.4", "--opencode-variant", "minimal"], {
+        ...makeBaseEnv(),
+        OPEN_AZDO_OPENCODE_VARIANT: "high",
+      }),
+    )
+
+    expect(config.opencodeVariant).toBe("minimal")
+  })
+
+  test("loads an explicit OpenCode timeout from the environment", async () => {
+    const config = await Effect.runPromise(
+      loadReviewConfig(["review", "--model", "openai/gpt-5.4"], {
+        ...makeBaseEnv(),
+        OPEN_AZDO_OPENCODE_TIMEOUT_MS: "450000",
+      }),
+    )
+
+    expect(config.opencodeTimeoutMs).toBe(450000)
+  })
+
+  test("prefers the CLI OpenCode timeout over the environment", async () => {
+    const config = await Effect.runPromise(
+      loadReviewConfig(["review", "--model", "openai/gpt-5.4", "--opencode-timeout-ms", "600000"], {
+        ...makeBaseEnv(),
+        OPEN_AZDO_OPENCODE_TIMEOUT_MS: "450000",
+      }),
+    )
+
+    expect(config.opencodeTimeoutMs).toBe(600000)
   })
 })

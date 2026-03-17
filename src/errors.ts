@@ -5,6 +5,15 @@ export class ConfigError extends Schema.TaggedErrorClass<ConfigError>()("ConfigE
   issues: Schema.Array(Schema.String),
 }) {}
 
+export class CommandExecutionError extends Schema.TaggedErrorClass<CommandExecutionError>()("CommandExecutionError", {
+  operation: Schema.String,
+  command: Schema.Array(Schema.String),
+  cwd: Schema.String,
+  detail: Schema.String,
+  stderr: Schema.String,
+  exitCode: Schema.Number,
+}) {}
+
 export class GitCommandError extends Schema.TaggedErrorClass<GitCommandError>()("GitCommandError", {
   message: Schema.String,
   command: Schema.Array(Schema.String),

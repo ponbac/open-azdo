@@ -9,6 +9,7 @@ import {
   makeNormalizedReviewResult,
   makeReviewConfig,
   makeReviewFinding,
+  makeAzureDevOpsTestLayer,
 } from "./helpers"
 
 describe("azure devops", () => {
@@ -27,7 +28,9 @@ describe("azure devops", () => {
     })
 
     const result = await Effect.runPromise(
-      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding]), fetchMock as typeof fetch),
+      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding])).pipe(
+        Effect.provide(makeAzureDevOpsTestLayer(fetchMock as typeof fetch)),
+      ),
     )
 
     expect(result.actions).toHaveLength(2)
@@ -54,7 +57,9 @@ describe("azure devops", () => {
     })
 
     const result = await Effect.runPromise(
-      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding]), fetchMock as typeof fetch),
+      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding])).pipe(
+        Effect.provide(makeAzureDevOpsTestLayer(fetchMock as typeof fetch)),
+      ),
     )
 
     expect(result.actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding", "close-thread"])
@@ -72,7 +77,9 @@ describe("azure devops", () => {
     })
 
     const exit = await Effect.runPromiseExit(
-      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding]), fetchMock as typeof fetch),
+      publishReview(makeReviewConfig(), makeNormalizedReviewResult([finding])).pipe(
+        Effect.provide(makeAzureDevOpsTestLayer(fetchMock as typeof fetch)),
+      ),
     )
 
     expect(exit._tag).toBe("Failure")
@@ -88,7 +95,11 @@ describe("azure devops", () => {
       return Response.json({ ok: true })
     })
 
-    await Effect.runPromise(publishFailureSummary(makeReviewConfig(), "Failed badly", fetchMock as typeof fetch))
+    await Effect.runPromise(
+      publishFailureSummary(makeReviewConfig(), "Failed badly").pipe(
+        Effect.provide(makeAzureDevOpsTestLayer(fetchMock as typeof fetch)),
+      ),
+    )
 
     expect(calls.some((call) => call.url.includes("/comments/10"))).toBe(true)
   })

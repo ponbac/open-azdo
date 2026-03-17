@@ -1,93 +1,138 @@
-import { Cause, Effect } from "effect"
+import * as Stdio from "effect/Stdio"
+import * as Stream from "effect/Stream"
+import { Cause, Effect, Exit } from "effect"
 
 import { getPullRequestMetadata, publishFailureSummary, publishReview } from "./azure-devops"
-import { createAzureContext, loadReviewConfig, type ReviewConfig } from "./config"
+import { createAzureContext, ReviewConfigValue, type ReviewConfig } from "./config"
 import { resolveGitDiff } from "./git"
 import { parseJsonString, stringifyJson } from "./json"
-import { writeErrorLog, writeInfoLog } from "./logging"
+import { logError, logInfo, withLogAnnotations } from "./logging"
 import { runOpenCode } from "./opencode"
 import { buildReviewContext } from "./review-context"
 import { buildReviewPrompt } from "./review-prompt"
 import { decodeReviewResult } from "./review-output"
 import { buildSummaryComment } from "./thread-reconciliation"
 
-export const runCli = Effect.fn("cli.runCli")(function* (argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv) {
-  const config = yield* loadReviewConfig(argv, env)
-  return yield* runReviewWithConfig(config)
+const writeStdout = Effect.fn("cli.writeStdout")(function* (text: string) {
+  const stdio = yield* Stdio.Stdio
+  yield* Stream.make(text).pipe(Stream.run(stdio.stdout()))
+})
+
+const reviewLogFields = (config: ReviewConfig) => ({
+  command: config.command,
+  model: config.model,
+  opencodeVariant: config.opencodeVariant,
+  opencodeTimeoutMs: config.opencodeTimeoutMs,
+  workspace: config.workspace,
+  organization: config.organization,
+  project: config.project,
+  repositoryId: config.repositoryId,
+  pullRequestId: config.pullRequestId,
+  collectionUrl: config.collectionUrl,
+  agent: config.agent,
+  dryRun: config.dryRun,
+  json: config.json,
 })
 
 const runReviewWithConfig = Effect.fn("cli.runReviewWithConfig")(function* (config: ReviewConfig) {
-  const azureContext = createAzureContext(config)
+  return yield* Effect.gen(function* () {
+    const azureContext = createAzureContext(config)
 
-  writeInfoLog("Resolved review configuration.", {
-    command: config.command,
-    model: config.model,
-    workspace: config.workspace,
-    organization: config.organization,
-    project: config.project,
-    repositoryId: config.repositoryId,
-    pullRequestId: config.pullRequestId,
-    collectionUrl: config.collectionUrl,
-    agent: config.agent,
-    dryRun: config.dryRun,
-    json: config.json,
-    systemAccessToken: config.systemAccessToken,
-  })
+    yield* logInfo("Resolved review configuration.")
+    yield* logInfo("Loading pull request metadata and git diff.")
 
-  const [metadata, gitDiff] = yield* Effect.all([
-    getPullRequestMetadata(azureContext, config.systemAccessToken),
-    resolveGitDiff(config),
-  ])
+    const [metadata, gitDiff] = yield* Effect.all([
+      getPullRequestMetadata(azureContext, config.systemAccessToken),
+      resolveGitDiff(config),
+    ])
 
-  const reviewContext = yield* buildReviewContext(config.workspace, metadata, gitDiff)
-  const prompt = yield* buildReviewPrompt(config, reviewContext)
-  const rawResult = yield* runOpenCode(config, prompt)
-  const decodedJson = yield* Effect.try({
-    try: () => parseJsonString(rawResult),
-    catch: () => ({ summary: rawResult, verdict: "concerns", findings: [], unmappedNotes: [] }),
-  })
-  const reviewResult = yield* decodeReviewResult(decodedJson, gitDiff.changedLinesByFile)
-  const publishResult = yield* publishReview(config, reviewResult)
+    yield* logInfo("Loaded review inputs.", {
+      pullRequestTitle: metadata.title,
+      changedFiles: gitDiff.changedFiles.length,
+      diffBytes: gitDiff.diffText.length,
+      baseRef: gitDiff.baseRef,
+      headRef: gitDiff.headRef,
+    })
 
-  if (config.json) {
-    process.stdout.write(
-      `${stringifyJson({
-        status: "ok",
-        verdict: reviewResult.verdict,
-        findings: reviewResult.findings.length,
-        inlineFindings: reviewResult.inlineFindings.length,
-        unmappedNotes: reviewResult.unmappedNotes.length,
-        dryRun: config.dryRun,
-        actions: publishResult.actions.length,
-      })}\n`,
-    )
-  } else if (config.dryRun) {
-    process.stdout.write(`${buildSummaryComment(reviewResult)}\n`)
-  } else {
-    process.stdout.write(
-      `Posted review verdict ${reviewResult.verdict} with ${reviewResult.findings.length} findings.\n`,
-    )
-  }
+    const reviewContext = yield* buildReviewContext(config.workspace, metadata, gitDiff)
+    yield* logInfo("Built review context.", {
+      changedFiles: reviewContext.changedFiles.length,
+    })
+    const prompt = yield* buildReviewPrompt(config, reviewContext)
+    yield* logInfo("Built review prompt.", {
+      promptChars: prompt.length,
+    })
+    const rawResult = yield* runOpenCode(config, prompt)
+    yield* logInfo("Received OpenCode response.", {
+      responseChars: rawResult.length,
+    })
+    const decodedJson = yield* Effect.try({
+      try: () => parseJsonString(rawResult),
+      catch: () => ({ summary: rawResult, verdict: "concerns", findings: [], unmappedNotes: [] }),
+    })
+    const reviewResult = yield* decodeReviewResult(decodedJson, gitDiff.changedLinesByFile)
+    yield* logInfo("Decoded review result.", {
+      verdict: reviewResult.verdict,
+      findings: reviewResult.findings.length,
+      inlineFindings: reviewResult.inlineFindings.length,
+      summaryOnlyFindings: reviewResult.summaryOnlyFindings.length,
+      unmappedNotes: reviewResult.unmappedNotes.length,
+    })
+    const publishResult = yield* publishReview(config, reviewResult)
+    yield* logInfo("Published review result.", {
+      actions: publishResult.actions.length,
+      dryRun: config.dryRun,
+    })
 
-  return 0
+    if (config.json) {
+      yield* writeStdout(
+        `${stringifyJson({
+          status: "ok",
+          verdict: reviewResult.verdict,
+          findings: reviewResult.findings.length,
+          inlineFindings: reviewResult.inlineFindings.length,
+          unmappedNotes: reviewResult.unmappedNotes.length,
+          dryRun: config.dryRun,
+          actions: publishResult.actions.length,
+        })}\n`,
+      )
+    } else if (config.dryRun) {
+      yield* writeStdout(`${buildSummaryComment(reviewResult)}\n`)
+    } else {
+      yield* writeStdout(
+        `Posted review verdict ${reviewResult.verdict} with ${reviewResult.findings.length} findings.\n`,
+      )
+    }
+
+    return 0
+  }).pipe(withLogAnnotations(reviewLogFields(config)))
 })
 
-export const runCliWithExitHandling = async (argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv) => {
-  const exit = await Effect.runPromiseExit(runCli(argv, env))
+export const runCli = Effect.fn("cli.runCli")(function* () {
+  const config = yield* ReviewConfigValue
+  return yield* runReviewWithConfig(config).pipe(Effect.withLogSpan("open-azdo.review"))
+})
 
-  if (exit._tag === "Success") {
+export const runCliWithExitHandling = Effect.fn("cli.runCliWithExitHandling")(function* () {
+  const exit = yield* Effect.exit(runCli())
+
+  if (Exit.isSuccess(exit)) {
     return exit.value
   }
 
   const failureReason = Cause.pretty(exit.cause)
-  const configExit = await Effect.runPromiseExit(loadReviewConfig(argv, env))
+  const configExit = yield* Effect.exit(
+    Effect.gen(function* () {
+      return yield* ReviewConfigValue
+    }),
+  )
 
-  if (configExit._tag === "Success") {
-    await Effect.runPromise(publishFailureSummary(configExit.value, failureReason).pipe(Effect.ignore))
+  if (Exit.isSuccess(configExit)) {
+    yield* publishFailureSummary(configExit.value, failureReason).pipe(Effect.ignore)
   }
 
-  writeErrorLog("open-azdo failed.", {
+  yield* logError("open-azdo failed.", {
     cause: failureReason,
   })
   return 1
-}
+})

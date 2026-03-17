@@ -1,8 +1,9 @@
-import { Redacted } from "effect"
+import { Effect, Redacted } from "effect"
 
 const REDACTED = "<redacted>"
+const DEFAULT_PREVIEW_LENGTH = 400
 
-type LogLevel = "info" | "error"
+type LogLevel = "info" | "error" | "debug"
 
 export const sanitizeForLog = (value: unknown): unknown => {
   if (Redacted.isRedacted(value)) {
@@ -32,6 +33,14 @@ export const sanitizeForLog = (value: unknown): unknown => {
   return value
 }
 
+export const truncateForLog = (value: string, maxLength = DEFAULT_PREVIEW_LENGTH) => {
+  if (value.length <= maxLength) {
+    return value
+  }
+
+  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
+}
+
 export const renderLogLine = (level: LogLevel, message: string, fields?: Record<string, unknown>) => {
   const sanitizedFields = sanitizeForLog(fields ?? {}) as Record<string, unknown>
   return JSON.stringify({
@@ -41,10 +50,40 @@ export const renderLogLine = (level: LogLevel, message: string, fields?: Record<
   })
 }
 
-export const writeInfoLog = (message: string, fields?: Record<string, unknown>) => {
-  process.stdout.write(`${renderLogLine("info", message, fields)}\n`)
+const withSanitizedAnnotations = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  fields?: Record<string, unknown>,
+): Effect.Effect<A, E, R> => {
+  if (!fields || Object.keys(fields).length === 0) {
+    return effect
+  }
+
+  return effect.pipe(Effect.annotateLogs(sanitizeForLog(fields) as Record<string, unknown>))
 }
 
-export const writeErrorLog = (message: string, fields?: Record<string, unknown>) => {
-  process.stderr.write(`${renderLogLine("error", message, fields)}\n`)
+export const annotateLogsScoped = (fields?: Record<string, unknown>) => {
+  if (!fields || Object.keys(fields).length === 0) {
+    return Effect.void
+  }
+
+  return Effect.annotateLogsScoped(sanitizeForLog(fields) as Record<string, unknown>)
 }
+
+export const withLogAnnotations =
+  (fields?: Record<string, unknown>) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> => {
+    if (!fields || Object.keys(fields).length === 0) {
+      return effect
+    }
+
+    return effect.pipe(Effect.annotateLogs(sanitizeForLog(fields) as Record<string, unknown>))
+  }
+
+export const logInfo = (message: string, fields?: Record<string, unknown>) =>
+  withSanitizedAnnotations(Effect.logInfo(message), fields)
+
+export const logError = (message: string, fields?: Record<string, unknown>) =>
+  withSanitizedAnnotations(Effect.logError(message), fields)
+
+export const logDebug = (message: string, fields?: Record<string, unknown>) =>
+  withSanitizedAnnotations(Effect.logDebug(message), fields)

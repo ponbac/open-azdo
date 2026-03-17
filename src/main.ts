@@ -1,6 +1,7 @@
-import { runCliWithExitHandling } from "./cli"
+import { Effect } from "effect"
 
-export const main = async (argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv) => {
-  const exitCode = await runCliWithExitHandling(argv, env)
-  process.exit(exitCode)
-}
+import { runCliWithExitHandling } from "./cli"
+import { makeAppLayer } from "./runtime"
+
+export const main = async (argv: ReadonlyArray<string>, env: NodeJS.ProcessEnv) =>
+  await Effect.runPromise(runCliWithExitHandling().pipe(Effect.provide(makeAppLayer(argv, env))))

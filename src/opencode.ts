@@ -1,87 +1,15 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-
+import * as FileSystem from "effect/FileSystem"
+import * as Layer from "effect/Layer"
+import * as Path from "effect/Path"
+import * as ServiceMap from "effect/ServiceMap"
 import { Effect } from "effect"
 
 import type { ReviewConfig } from "./config"
+import { RuntimeInput } from "./config"
 import { OpenCodeInvocationError, OpenCodeOutputError } from "./errors"
-
-export type SpawnLike = typeof Bun.spawn
-
-export const runOpenCode = Effect.fn("opencode.runOpenCode")(function* (
-  config: ReviewConfig,
-  prompt: string,
-  spawn: SpawnLike = Bun.spawn,
-) {
-  const tempDir = yield* Effect.tryPromise({
-    try: () => mkdtemp(join(tmpdir(), "open-azdo-opencode-")),
-    catch: (error) =>
-      new OpenCodeOutputError({
-        message: "Failed to create OpenCode temp directory.",
-        output: String(error),
-      }),
-  })
-
-  try {
-    const configPath = join(tempDir, "opencode.json")
-    const promptPath = join(tempDir, "agent-prompt.md")
-
-    yield* Effect.tryPromise({
-      try: async () => {
-        await writeFile(promptPath, prompt, "utf8")
-        await writeFile(configPath, JSON.stringify(buildOpenCodeConfig(config.agent), null, 2), "utf8")
-      },
-      catch: (error) =>
-        new OpenCodeOutputError({
-          message: "Failed to write temporary OpenCode configuration.",
-          output: String(error),
-        }),
-    })
-
-    const child = yield* Effect.try({
-      try: () =>
-        spawn(["opencode", "run", "--format", "json", "--agent", config.agent, "--model", config.model, prompt], {
-          cwd: config.workspace,
-          stdout: "pipe",
-          stderr: "pipe",
-          env: {
-            ...process.env,
-            OPENCODE_CONFIG: configPath,
-            OPENCODE_CONFIG_DIR: tempDir,
-          },
-        }),
-      catch: (error) =>
-        new OpenCodeInvocationError({
-          message: "Failed to start OpenCode.",
-          stderr: String(error),
-          exitCode: -1,
-        }),
-    })
-
-    const [stdout, stderr, exitCode] = yield* Effect.tryPromise({
-      try: () => Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]),
-      catch: (error) =>
-        new OpenCodeInvocationError({
-          message: "Failed while waiting for OpenCode output.",
-          stderr: String(error),
-          exitCode: -1,
-        }),
-    })
-
-    if (exitCode !== 0) {
-      return yield* new OpenCodeInvocationError({
-        message: "OpenCode exited with a non-zero status.",
-        stderr,
-        exitCode,
-      })
-    }
-
-    return extractFinalResponse(stdout)
-  } finally {
-    yield* Effect.promise(() => rm(tempDir, { recursive: true, force: true }))
-  }
-})
+import { stringifyJson } from "./json"
+import { logError, logInfo, truncateForLog } from "./logging"
+import { ProcessRunner } from "./process"
 
 export const buildOpenCodeConfig = (agentName: string) => ({
   $schema: "https://opencode.ai/config.json",
@@ -124,8 +52,90 @@ export const buildOpenCodeConfig = (agentName: string) => ({
   },
 })
 
+const buildOpenCodeArgs = (config: ReviewConfig, prompt: string) => [
+  "run",
+  "--format",
+  "json",
+  "--agent",
+  config.agent,
+  "--model",
+  config.model,
+  ...(config.opencodeVariant ? ["--variant", config.opencodeVariant] : []),
+  prompt,
+]
+
 export const extractFinalResponse = (output: string) => {
   const texts: string[] = []
+  const structuredCandidates: string[] = []
+
+  const maybeCollectStructuredCandidate = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return
+    }
+
+    if ("summary" in value && "verdict" in value && "findings" in value) {
+      structuredCandidates.push(JSON.stringify(value))
+    }
+  }
+
+  const collectTextCandidates = (value: unknown): void => {
+    if (!value) {
+      return
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim()
+      if (!trimmed) {
+        return
+      }
+
+      texts.push(trimmed)
+
+      try {
+        maybeCollectStructuredCandidate(JSON.parse(trimmed))
+      } catch {
+        // Ignore non-JSON text fragments.
+      }
+
+      return
+    }
+
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        collectTextCandidates(entry)
+      }
+      return
+    }
+
+    if (typeof value !== "object") {
+      return
+    }
+
+    maybeCollectStructuredCandidate(value)
+
+    if ("type" in value && value.type === "text" && "text" in value && typeof value.text === "string") {
+      texts.push(value.text.trim())
+    }
+
+    for (const [key, nested] of Object.entries(value)) {
+      if (
+        (key === "text" ||
+          key === "content" ||
+          key === "message" ||
+          key === "part" ||
+          key === "parts" ||
+          key === "delta" ||
+          key === "textDelta" ||
+          key === "response" ||
+          key === "result" ||
+          key === "data" ||
+          key === "info") &&
+        nested !== undefined
+      ) {
+        collectTextCandidates(nested)
+      }
+    }
+  }
 
   for (const line of output.split("\n")) {
     const trimmed = line.trim()
@@ -140,25 +150,15 @@ export const extractFinalResponse = (output: string) => {
         texts.push(event)
         continue
       }
-
-      if (typeof event.text === "string") {
-        texts.push(event.text)
-      }
-
-      if (typeof event.content === "string") {
-        texts.push(event.content)
-      }
-
-      if (Array.isArray(event.content)) {
-        for (const part of event.content) {
-          if (part && typeof part.text === "string") {
-            texts.push(part.text)
-          }
-        }
-      }
+      collectTextCandidates(event)
     } catch {
       texts.push(trimmed)
     }
+  }
+
+  const structuredResponse = structuredCandidates.at(-1)?.trim()
+  if (structuredResponse) {
+    return structuredResponse
   }
 
   const response = texts.join("\n").trim()
@@ -171,3 +171,152 @@ export const extractFinalResponse = (output: string) => {
 
   return response
 }
+
+export class OpenCodeService extends ServiceMap.Service<
+  OpenCodeService,
+  {
+    readonly run: (
+      config: ReviewConfig,
+      prompt: string,
+    ) => Effect.Effect<string, OpenCodeInvocationError | OpenCodeOutputError>
+  }
+>()("open-azdo/OpenCodeService") {
+  static readonly layer = Layer.effect(
+    OpenCodeService,
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner
+      const fileSystem = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      const runtimeInput = yield* RuntimeInput
+
+      const run = Effect.fn("OpenCodeService.run")(function* (config: ReviewConfig, prompt: string) {
+        return yield* Effect.gen(function* () {
+          yield* logInfo("Preparing OpenCode execution.", {
+            agent: config.agent,
+            model: config.model,
+            workspace: config.workspace,
+            promptChars: prompt.length,
+          })
+
+          const tempDir = yield* fileSystem
+            .makeTempDirectoryScoped({
+              prefix: "open-azdo-opencode-",
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OpenCodeOutputError({
+                    message: "Failed to create OpenCode temp directory.",
+                    output: String(error),
+                  }),
+              ),
+            )
+
+          const configPath = path.join(tempDir, "opencode.json")
+          const promptPath = path.join(tempDir, "agent-prompt.md")
+
+          yield* Effect.all(
+            [
+              fileSystem.writeFileString(promptPath, prompt),
+              fileSystem.writeFileString(configPath, stringifyJson(buildOpenCodeConfig(config.agent))),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(
+            Effect.mapError(
+              (error) =>
+                new OpenCodeOutputError({
+                  message: "Failed to write temporary OpenCode configuration.",
+                  output: String(error),
+                }),
+            ),
+          )
+
+          yield* logInfo("Prepared temporary OpenCode files.", {
+            tempDir,
+            configPath,
+            promptPath,
+          })
+
+          const result = yield* runner
+            .execute({
+              operation: "OpenCodeService.run",
+              command: "opencode",
+              args: buildOpenCodeArgs(config, prompt),
+              cwd: config.workspace,
+              timeoutMs: config.opencodeTimeoutMs,
+              env: {
+                ...runtimeInput.env,
+                OPENCODE_CONFIG: configPath,
+                OPENCODE_CONFIG_DIR: tempDir,
+              },
+              allowNonZeroExit: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OpenCodeInvocationError({
+                    message: error.detail,
+                    stderr: error.stderr,
+                    exitCode: error.exitCode,
+                  }),
+              ),
+            )
+
+          yield* logInfo("OpenCode process exited.", {
+            exitCode: result.exitCode,
+            stdoutBytes: result.stdout.length,
+            stderrBytes: result.stderr.length,
+          })
+
+          if (result.exitCode !== 0) {
+            yield* logError("OpenCode exited with a non-zero status.", {
+              exitCode: result.exitCode,
+              stderrPreview: truncateForLog(result.stderr),
+            })
+
+            return yield* new OpenCodeInvocationError({
+              message: "OpenCode exited with a non-zero status.",
+              stderr: result.stderr,
+              exitCode: result.exitCode,
+            })
+          }
+
+          const response = yield* Effect.try({
+            try: () => extractFinalResponse(result.stdout),
+            catch: (error) =>
+              error instanceof OpenCodeOutputError
+                ? error
+                : new OpenCodeOutputError({
+                    message: "OpenCode did not return a valid final response.",
+                    output: String(error),
+                  }),
+          }).pipe(
+            Effect.tapError((error) =>
+              logError("Failed to extract final OpenCode response.", {
+                stdoutPreview: truncateForLog(result.stdout),
+                stderrPreview: truncateForLog(result.stderr),
+                detail: error.message,
+              }),
+            ),
+          )
+
+          yield* logInfo("Extracted final OpenCode response.", {
+            responseChars: response.length,
+            responsePreview: truncateForLog(response),
+          })
+
+          return response
+        }).pipe(Effect.scoped)
+      })
+
+      return OpenCodeService.of({
+        run,
+      })
+    }),
+  )
+}
+
+export const runOpenCode = Effect.fn("opencode.runOpenCode")(function* (config: ReviewConfig, prompt: string) {
+  const openCode = yield* OpenCodeService
+  return yield* openCode.run(config, prompt)
+})

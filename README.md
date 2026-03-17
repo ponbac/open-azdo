@@ -19,7 +19,7 @@ The CLI consumes the Azure Pipeline checkout workspace directly and uses the bui
 Use Bun 1.3.10 or newer.
 
 ```bash
-bunx open-azdo review --model "openai/gpt-5.4"
+bun x open-azdo review --model "openai/gpt-5.4"
 ```
 
 Required inputs:
@@ -37,6 +37,8 @@ Common Azure Pipeline defaults:
 
 Optional flags:
 
+- `--opencode-variant <name>` provider-specific variant or reasoning level, for example `minimal`, `low`, `medium`, `high`, or `xhigh`
+- `--opencode-timeout-ms <milliseconds>` default `300000`
 - `--workspace <path>`
 - `--organization <name>`
 - `--project <name>`
@@ -56,6 +58,7 @@ Exit behavior:
 ## Azure Pipelines
 
 The canonical example is in [examples/azure-pipelines.review.yml](/home/ponbac/dev/open-azdo/examples/azure-pipelines.review.yml).
+For first-time rollout or debugging, use [examples/azure-pipelines.review.debug.yml](/home/ponbac/dev/open-azdo/examples/azure-pipelines.review.debug.yml). It pins the npm package version, emits explicit phase markers, and keeps the standalone OpenCode smoke test opt-in behind `RunOpenCodeSmokeTest`.
 
 Key requirements:
 
@@ -72,6 +75,10 @@ trigger: none
 
 pool:
   vmImage: ubuntu-latest
+
+variables:
+  OpenCodeModel: openai/gpt-5.4
+  OpenCodeThinking: high
 
 steps:
   - checkout: self
@@ -90,16 +97,20 @@ steps:
       tar -xzf opencode.tar.gz -C opencode-bin
       export PATH="$PWD/opencode-bin:$PATH"
 
-      bunx open-azdo review --model "$(OpenCodeModel)"
+      bun x open-azdo review --model "$(OpenCodeModel)" --opencode-variant "$(OpenCodeThinking)"
     displayName: Review Pull Request
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
       OPENAI_API_KEY: $(OpenAIApiKey)
+      # Alternative to the CLI flag above:
+      # OPEN_AZDO_OPENCODE_VARIANT: $(OpenCodeThinking)
+      OPEN_AZDO_OPENCODE_TIMEOUT_MS: "300000"
 ```
 
 ## Development
 
-Reference assets live under `.reference/`. Refresh them with:
+Reference assets live under `.reference/`, including `t3code` for Effect v4
+service and command-runner patterns. Refresh them with:
 
 ```bash
 ./scripts/pull-ref-repos.sh

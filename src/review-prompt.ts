@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import * as FileSystem from "effect/FileSystem"
 
 import { Effect } from "effect"
 
@@ -10,11 +10,9 @@ export const buildReviewPrompt = Effect.fn("reviewPrompt.buildReviewPrompt")(fun
   config: ReviewConfig,
   reviewContext: ReviewContext,
 ) {
+  const fileSystem = yield* FileSystem.FileSystem
   const customPrompt = config.promptFile
-    ? yield* Effect.tryPromise({
-        try: () => readFile(config.promptFile!, "utf8"),
-        catch: () => "",
-      })
+    ? yield* fileSystem.readFileString(config.promptFile).pipe(Effect.catch(() => Effect.succeed("")))
     : ""
 
   return [
@@ -41,6 +39,9 @@ export const buildReviewPrompt = Effect.fn("reviewPrompt.buildReviewPrompt")(fun
     }),
     "Only report issues grounded in the provided diff and file excerpts.",
     "If a concern does not map cleanly to a changed line, leave it out of findings and put it in unmappedNotes.",
+    "Use a lively review tone with emojis throughout the human-readable text fields.",
+    "Include emojis in summary, finding titles, finding bodies, and unmapped notes; prefer multiple relevant emojis instead of a single token.",
+    "Keep the JSON schema unchanged and keep every string concise, professional, and readable.",
     customPrompt ? `Additional repository prompt:\n${customPrompt}` : "",
     "Pull request context:",
     stringifyJson(reviewContext),

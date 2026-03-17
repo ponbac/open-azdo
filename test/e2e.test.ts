@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
 import { runCli } from "../src/cli"
+import { makeAppLayer } from "../src/runtime"
 import { createFixtureRepo, createTempDir, makeFetchMock } from "./helpers"
 
 describe("e2e", () => {
@@ -61,31 +62,36 @@ printf '%s\n' '${JSON.stringify({
 
     try {
       const exitCode = await Effect.runPromise(
-        runCli(
-          [
-            "review",
-            "--model",
-            "openai/gpt-5.4",
-            "--workspace",
-            repoDir,
-            "--collection-url",
-            "https://dev.azure.com/acme",
-            "--project",
-            "project",
-            "--repository-id",
-            "repo-1",
-            "--pull-request-id",
-            "42",
-          ],
-          {
-            SYSTEM_ACCESSTOKEN: "system-token",
-            SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
-            BUILD_SOURCESDIRECTORY: repoDir,
-            SYSTEM_TEAMPROJECT: "project",
-            BUILD_REPOSITORY_ID: "repo-1",
-            SYSTEM_COLLECTIONURI: "https://dev.azure.com/acme",
-            SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
-          },
+        runCli().pipe(
+          Effect.provide(
+            makeAppLayer(
+              [
+                "review",
+                "--model",
+                "openai/gpt-5.4",
+                "--workspace",
+                repoDir,
+                "--collection-url",
+                "https://dev.azure.com/acme",
+                "--project",
+                "project",
+                "--repository-id",
+                "repo-1",
+                "--pull-request-id",
+                "42",
+              ],
+              {
+                ...process.env,
+                SYSTEM_ACCESSTOKEN: "system-token",
+                SYSTEM_PULLREQUEST_TARGETBRANCH: "refs/heads/main",
+                BUILD_SOURCESDIRECTORY: repoDir,
+                SYSTEM_TEAMPROJECT: "project",
+                BUILD_REPOSITORY_ID: "repo-1",
+                SYSTEM_COLLECTIONURI: "https://dev.azure.com/acme",
+                SYSTEM_PULLREQUEST_PULLREQUESTID: "42",
+              },
+            ),
+          ),
         ),
       )
 

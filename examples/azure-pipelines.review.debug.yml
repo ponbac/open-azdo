@@ -10,6 +10,8 @@ variables:
   BunLinuxX64Sha256: f57bc0187e39623de716ba3a389fda5486b2d7be7131a980ba54dc7b733d2e08
   OpenCodeVersion: 1.2.27
   OpenCodeLinuxX64Sha256: 6fe3820b145857f7ff507d2826058b7acf1fce8258def1498468dd43809e69e8
+  OpenAzdoVersion: 0.1.7
+  RunOpenCodeSmokeTest: "false"
 
 steps:
   - checkout: self
@@ -31,7 +33,26 @@ steps:
       tar -xzf opencode.tar.gz -C opencode-bin
       export PATH="$PWD/opencode-bin:$PATH"
 
-      bun x open-azdo review --model "$(OpenCodeModel)" --opencode-variant "$(OpenCodeThinking)"
+      bun --version
+      opencode --version
+
+      test -n "${SYSTEM_ACCESSTOKEN:-}" || { echo "SYSTEM_ACCESSTOKEN is empty"; exit 1; }
+      test -n "${OPENAI_API_KEY:-}" || { echo "OPENAI_API_KEY is empty"; exit 1; }
+
+      echo "Phase: environment checks passed"
+
+      if [ "$(RunOpenCodeSmokeTest)" = "true" ]; then
+        echo "Phase: starting standalone OpenCode smoke test"
+        timeout 60s opencode run --format json --model "$(OpenCodeModel)" --variant "$(OpenCodeThinking)" \
+          'Return exactly {"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}'
+        echo "Phase: standalone OpenCode smoke test completed"
+      else
+        echo "Phase: skipping standalone OpenCode smoke test"
+      fi
+
+      echo "Phase: starting open-azdo review"
+      bun x "open-azdo@$(OpenAzdoVersion)" review --model "$(OpenCodeModel)" --opencode-variant "$(OpenCodeThinking)"
+      echo "Phase: open-azdo review completed"
     displayName: Review Pull Request
     env:
       # Azure Pipelines: enable "Allow scripts to access the OAuth token".

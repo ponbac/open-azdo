@@ -2,4 +2,4 @@
 
 import { main } from "../src/main"
 
-await main(process.argv.slice(2), process.env)
+process.exitCode = await main(process.argv.slice(2), process.env)

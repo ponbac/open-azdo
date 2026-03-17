@@ -3,9 +3,17 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 
-import { Redacted } from "effect"
+import { BunServices } from "@effect/platform-bun"
 
+import * as Layer from "effect/Layer"
+import { Effect, Redacted } from "effect"
+
+import { AzureDevOpsService, FetchClient } from "../src/azure-devops"
 import type { ReviewConfig } from "../src/config"
+import { RuntimeInput } from "../src/config"
+import { GitService } from "../src/git"
+import { OpenCodeService } from "../src/opencode"
+import { ProcessRunner, type CommandExecutionResult, type ExecuteCommandInput } from "../src/process"
 import type { NormalizedReviewResult, ReviewFinding } from "../src/review-output"
 import { encodeMarker, fingerprintFinding } from "../src/thread-reconciliation"
 
@@ -21,6 +29,8 @@ export const makeBaseEnv = () => ({
 export const makeReviewConfig = (overrides: Partial<ReviewConfig> = {}): ReviewConfig => ({
   command: "review",
   model: "openai/gpt-5.4",
+  opencodeVariant: undefined,
+  opencodeTimeoutMs: 300_000,
   workspace: overrides.workspace ?? "/tmp/workspace",
   organization: "acme",
   project: "project",
@@ -149,6 +159,34 @@ export const makeFetchMock = (handler: (url: string, init?: RequestInit) => Resp
     calls,
   }
 }
+
+export type ProcessRunnerStub = {
+  execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, never>
+}
+
+const makeProcessTestLayer = (runner?: ProcessRunnerStub) =>
+  runner ? Layer.succeed(ProcessRunner, runner) : ProcessRunner.layer.pipe(Layer.provide(BunServices.layer))
+
+export const makeGitTestLayer = (runner?: ProcessRunnerStub) => {
+  return GitService.layer.pipe(Layer.provide(Layer.mergeAll(makeProcessTestLayer(runner), BunServices.layer)))
+}
+
+export const makeOpenCodeTestLayer = (runner: ProcessRunnerStub, env: NodeJS.ProcessEnv = {}) =>
+  OpenCodeService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        makeProcessTestLayer(runner),
+        BunServices.layer,
+        Layer.succeed(RuntimeInput, {
+          argv: [],
+          env,
+        }),
+      ),
+    ),
+  )
+
+export const makeAzureDevOpsTestLayer = (fetchMock: typeof fetch) =>
+  AzureDevOpsService.layer.pipe(Layer.provide(Layer.succeed(FetchClient, { fetch: fetchMock })))
 
 const runGit = (cwd: string, args: string[]) => {
   const result = spawnSync("git", args, {

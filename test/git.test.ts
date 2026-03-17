@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
 import { resolveGitDiff, runGit } from "../src/git"
-import { createSyntheticMergeRepo, makeReviewConfig } from "./helpers"
+import { createSyntheticMergeRepo, makeGitTestLayer, makeReviewConfig } from "./helpers"
 
 describe("git", () => {
   test("resolves synthetic merge commits against HEAD^1", async () => {
@@ -12,7 +12,7 @@ describe("git", () => {
       targetBranch: "refs/heads/main",
     })
 
-    const diff = await Effect.runPromise(resolveGitDiff(config))
+    const diff = await Effect.runPromise(resolveGitDiff(config).pipe(Effect.provide(makeGitTestLayer())))
 
     expect(diff.baseRef).toBe("HEAD^1")
     expect(diff.changedFiles).toContain("src/example.ts")
@@ -24,24 +24,33 @@ describe("git", () => {
       targetBranch: undefined,
     })
 
-    const exit = await Effect.runPromiseExit(resolveGitDiff(config))
+    const exit = await Effect.runPromiseExit(resolveGitDiff(config).pipe(Effect.provide(makeGitTestLayer())))
     expect(exit._tag).toBe("Failure")
   })
 
   test("uses argv arrays instead of shell strings", async () => {
-    const calls: Array<{ argv: string[] }> = []
-    const spawn = ((argv: string[]) => {
-      calls.push({ argv })
+    const calls: Array<{ command: string; args: ReadonlyArray<string> }> = []
 
-      return {
-        stdout: new Blob([""]).stream(),
-        stderr: new Blob([""]).stream(),
-        exited: Promise.resolve(0),
-      }
-    }) as typeof Bun.spawn
+    await Effect.runPromise(
+      runGit("/tmp", ["status", "--short"], true).pipe(
+        Effect.provide(
+          makeGitTestLayer({
+            execute: (input) => {
+              calls.push({ command: input.command, args: input.args })
+              return Effect.succeed({
+                exitCode: 0,
+                stdout: "",
+                stderr: "",
+              })
+            },
+          }),
+        ),
+      ),
+    )
 
-    await Effect.runPromise(runGit("/tmp", ["status", "--short"], spawn, true))
-
-    expect(calls[0]?.argv).toEqual(["git", "status", "--short"])
+    expect(calls[0]).toEqual({
+      command: "git",
+      args: ["status", "--short"],
+    })
   })
 })
