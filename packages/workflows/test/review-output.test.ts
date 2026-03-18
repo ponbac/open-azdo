@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
-import { decodeReviewResult } from "@open-azdo/workflows/review"
+import { decodeReviewResult } from "../src/review/ReviewOutput"
 
 describe("review output", () => {
   test("rejects invalid severities", async () => {
@@ -79,5 +79,32 @@ describe("review output", () => {
 
     expect(result.inlineFindings).toHaveLength(0)
     expect(result.unmappedNotes[0]).toContain("Unmapped")
+  })
+
+  test("keeps follow-up findings outside the scoped diff out of inline comments", async () => {
+    const result = await Effect.runPromise(
+      decodeReviewResult(
+        {
+          summary: "Summary",
+          verdict: "concerns",
+          findings: [
+            {
+              severity: "high",
+              confidence: "high",
+              title: "Old line",
+              body: "Body",
+              filePath: "src/example.ts",
+              line: 2,
+            },
+          ],
+          unmappedNotes: [],
+        },
+        new Map([["src/example.ts", new Set([10])]]),
+      ),
+    )
+
+    expect(result.inlineFindings).toHaveLength(0)
+    expect(result.summaryOnlyFindings).toHaveLength(1)
+    expect(result.unmappedNotes[0]).toContain("Old line")
   })
 })

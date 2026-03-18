@@ -3,11 +3,14 @@ import { Effect, Logger, Redacted } from "effect"
 import { createAzureContext, type AzureDevOpsClient, type AzureDevOpsClientShape } from "@open-azdo/azdo/client"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import {
-  encodeMarker,
+  buildInlineComment,
+  buildManagedReviewState,
+  buildSummaryComment,
+  findManagedSummaryThread,
   fingerprintFinding,
-  type NormalizedReviewResult,
-  type ReviewFinding,
-} from "@open-azdo/workflows/review"
+  type ManagedReviewState,
+} from "../src/review/ThreadReconciliation"
+import type { NormalizedReviewResult, ReviewFinding } from "../src/review/ReviewOutput"
 
 export const makeAzureContext = () =>
   createAzureContext({
@@ -50,24 +53,49 @@ export const makeNormalizedReviewResult = (
   unmappedNotes: [],
 })
 
-export const makeManagedSummaryThread = (): ExistingThread => ({
-  id: 1,
-  status: 1,
-  comments: [
-    {
-      id: 10,
-      content: `summary\n${encodeMarker({ kind: "summary", fingerprint: "summary" })}`,
-    },
-  ],
+export const makeManagedReviewState = (overrides: Partial<ManagedReviewState> = {}): ManagedReviewState =>
+  ({
+    ...buildManagedReviewState({
+      reviewedCommit: "reviewed-sha",
+      pullRequestBaseRef: "base-sha",
+      reviewResult: makeNormalizedReviewResult([makeReviewFinding()]),
+    }),
+    ...overrides,
+  }) satisfies ManagedReviewState
+
+export const makeSummarySnapshot = (
+  overrides: Record<string, unknown> = {},
+  persistedState: ManagedReviewState = makeManagedReviewState(),
+) => ({
+  verdict: persistedState.verdict,
+  summary: "Summary",
+  unmappedNotes: [],
+  severityCounts: persistedState.severityCounts,
+  persistedState,
+  ...overrides,
 })
 
-export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2): ExistingThread => ({
+export const makeManagedSummaryThread = (
+  reviewState: ManagedReviewState = makeManagedReviewState(),
+  threadId = 1,
+): ExistingThread => ({
   id: threadId,
   status: 1,
   comments: [
     {
       id: threadId * 10,
-      content: `finding\n${encodeMarker({ kind: "finding", fingerprint: fingerprintFinding(finding) })}`,
+      content: buildSummaryComment(makeSummarySnapshot({}, reviewState)),
+    },
+  ],
+})
+
+export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2, status: 1 | 2 = 1): ExistingThread => ({
+  id: threadId,
+  status,
+  comments: [
+    {
+      id: threadId * 10,
+      content: buildInlineComment(finding),
     },
   ],
   threadContext: {
@@ -93,3 +121,7 @@ export const makeAzureDevOpsClient = (
 })
 
 export const systemToken = Redacted.make("system-token")
+
+export const extractManagedSummaryState = (thread: ExistingThread) => findManagedSummaryThread([thread])?.reviewState
+
+export const findingFingerprint = (finding: ReviewFinding) => fingerprintFinding(finding)

@@ -58,6 +58,7 @@ export type AppConfigShape = {
   readonly json: boolean
   readonly systemAccessToken: SystemAccessToken
   readonly targetBranch?: string
+  readonly sourceCommitId?: string
   readonly sourceVersion?: string
   readonly buildId?: string
   readonly buildNumber?: string
@@ -83,6 +84,7 @@ const AppConfigSchema = Schema.Struct({
   json: Schema.Boolean,
   systemAccessToken: SystemAccessToken,
   targetBranch: Schema.optionalKey(NonEmptyString),
+  sourceCommitId: Schema.optionalKey(NonEmptyString),
   sourceVersion: Schema.optionalKey(NonEmptyString),
   buildId: Schema.optionalKey(NonEmptyString),
   buildNumber: Schema.optionalKey(NonEmptyString),
@@ -108,6 +110,7 @@ type EnvConfig = {
   readonly systemPullRequestPullRequestId?: string
   readonly buildSourcesDirectory?: string
   readonly systemPullRequestTargetBranch?: string
+  readonly systemPullRequestSourceCommitId?: string
   readonly buildSourceVersion?: string
   readonly buildBuildId?: string
   readonly buildBuildNumber?: string
@@ -136,6 +139,7 @@ const EnvConfig = Config.all({
   systemPullRequestPullRequestId: optionalStringConfig("SYSTEM_PULLREQUEST_PULLREQUESTID"),
   buildSourcesDirectory: optionalStringConfig("BUILD_SOURCESDIRECTORY"),
   systemPullRequestTargetBranch: optionalStringConfig("SYSTEM_PULLREQUEST_TARGETBRANCH"),
+  systemPullRequestSourceCommitId: optionalStringConfig("SYSTEM_PULLREQUEST_SOURCECOMMITID"),
   buildSourceVersion: optionalStringConfig("BUILD_SOURCEVERSION"),
   buildBuildId: optionalStringConfig("BUILD_BUILDID"),
   buildBuildNumber: optionalStringConfig("BUILD_BUILDNUMBER"),
@@ -260,6 +264,7 @@ const resolveAppConfig = (cliInput: ReviewCliInput) =>
       json: cliInput.json,
       systemAccessToken: env.systemAccessToken ? Redacted.make(env.systemAccessToken) : undefined,
       targetBranch: env.systemPullRequestTargetBranch,
+      sourceCommitId: env.systemPullRequestSourceCommitId,
       sourceVersion: env.buildSourceVersion,
       buildId: env.buildBuildId,
       buildNumber: env.buildBuildNumber,

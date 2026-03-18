@@ -2,20 +2,25 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
 import { AzureDevOpsClient } from "@open-azdo/azdo/client"
-import { publishFailureSummary, publishReview } from "@open-azdo/workflows/review"
+import { publishFailureSummary, publishReview } from "../src/review/ReviewPublisher"
+import { buildSummaryComment } from "../src/review/ThreadReconciliation"
 
 import {
   makeAzureContext,
   makeAzureDevOpsClient,
+  makeManagedReviewState,
   makeManagedFindingThread,
   makeManagedSummaryThread,
-  makeNormalizedReviewResult,
   makeReviewFinding,
+  makeSummarySnapshot,
   systemToken,
 } from "./helpers"
 
 const context = makeAzureContext()
 const token = systemToken
+const scopedChangedLinesByFile = new Map([["src/example.ts", new Set([2, 3])]])
+const scopedDeletedLinesByFile = new Map<string, Set<number>>()
+const summaryContent = buildSummaryComment(makeSummarySnapshot())
 
 describe("review publisher", () => {
   test("creates summary and inline threads for new managed findings", async () => {
@@ -27,8 +32,11 @@ describe("review publisher", () => {
         context,
         token,
         dryRun: false,
-        buildLink: undefined,
-        reviewResult: makeNormalizedReviewResult([finding]),
+        summaryContent,
+        inlineFindings: [finding],
+        reviewMode: "full",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
@@ -60,8 +68,11 @@ describe("review publisher", () => {
         context,
         token,
         dryRun: false,
-        buildLink: undefined,
-        reviewResult: makeNormalizedReviewResult([finding]),
+        summaryContent,
+        inlineFindings: [finding],
+        reviewMode: "full",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
@@ -98,8 +109,11 @@ describe("review publisher", () => {
         context,
         token,
         dryRun: false,
-        buildLink: undefined,
-        reviewResult: makeNormalizedReviewResult([finding]),
+        summaryContent,
+        inlineFindings: [finding],
+        reviewMode: "full",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
@@ -122,12 +136,15 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         buildLink: undefined,
+        existingThreads: [makeManagedSummaryThread()],
         failureReason: "Failed badly",
+        preservedSummaryState: makeManagedReviewState({
+          reviewedCommit: "preserved-sha",
+        }),
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
           makeAzureDevOpsClient({
-            listThreads: () => Effect.succeed([makeManagedSummaryThread()]),
             updateComment: (input) =>
               Effect.sync(() => {
                 updateCommentCalls.push(input.commentId)
@@ -149,8 +166,11 @@ describe("review publisher", () => {
         context,
         token,
         dryRun: false,
-        buildLink: undefined,
-        reviewResult: makeNormalizedReviewResult([finding]),
+        summaryContent,
+        inlineFindings: [finding],
+        reviewMode: "full",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
@@ -179,5 +199,37 @@ describe("review publisher", () => {
 
     expect(result.actions.some((action) => action.type === "upsert-summary")).toBe(true)
     expect(createThreadCalls).toHaveLength(1)
+  })
+
+  test("skipped mode only updates the managed summary thread", async () => {
+    const updateCommentCalls: number[] = []
+    const result = await Effect.runPromise(
+      publishReview({
+        context,
+        token,
+        dryRun: false,
+        summaryContent,
+        inlineFindings: [],
+        reviewMode: "skipped",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
+      }).pipe(
+        Effect.provideService(
+          AzureDevOpsClient,
+          makeAzureDevOpsClient({
+            listThreads: () =>
+              Effect.succeed([makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)]),
+            updateComment: (input) =>
+              Effect.sync(() => {
+                updateCommentCalls.push(input.commentId)
+              }),
+          }),
+        ),
+      ),
+    )
+
+    expect(result.actions).toHaveLength(1)
+    expect(result.actions[0]?.type).toBe("upsert-summary")
+    expect(updateCommentCalls).toEqual([10])
   })
 })

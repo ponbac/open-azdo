@@ -32,8 +32,10 @@ export const createFixtureRepo = async () => {
   runGit(repoDir, ["checkout", "-b", "feature"])
   await writeFile(join(repoDir, "src/example.ts"), "export const value = 2\nexport const next = 3\n", "utf8")
   runGit(repoDir, ["commit", "-am", "feature"])
+  const featureSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
 
   return {
+    featureSha,
     mainSha,
     repoDir,
   }
@@ -55,10 +57,66 @@ export const createSyntheticMergeRepo = async () => {
   await writeFile(join(repoDir, "README.md"), "# Main\n", "utf8")
   runGit(repoDir, ["add", "README.md"])
   runGit(repoDir, ["commit", "-m", "main-change"])
+  const mainSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
   runGit(repoDir, ["merge", "--no-ff", "feature", "-m", "merge"])
+  const mergeSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  const featureSha = runGit(repoDir, ["rev-parse", "HEAD^2"]).trim()
+
+  return {
+    featureSha,
+    mainSha,
+    mergeSha,
+    repoDir,
+  }
+}
+
+export const createDeletionFollowUpRepo = async () => {
+  const repoDir = await createTempDir("open-azdo-delete-follow-up-")
+  runGit(repoDir, ["init", "-b", "main"])
+  runGit(repoDir, ["config", "user.name", "Open AZDO"])
+  runGit(repoDir, ["config", "user.email", "open-azdo@example.com"])
+  await mkdir(join(repoDir, "src"), { recursive: true })
+  await writeFile(
+    join(repoDir, "src/example.ts"),
+    ["export const keep = 1", "export const flagged = 2", "export const stay = 3", ""].join("\n"),
+    "utf8",
+  )
+  runGit(repoDir, ["add", "."])
+  runGit(repoDir, ["commit", "-m", "reviewed"])
+  const reviewedSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  await writeFile(
+    join(repoDir, "src/example.ts"),
+    ["export const keep = 1", "export const stay = 3", ""].join("\n"),
+    "utf8",
+  )
+  runGit(repoDir, ["commit", "-am", "delete-flagged-line"])
+  const headSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
 
   return {
     repoDir,
+    reviewedSha,
+    headSha,
+  }
+}
+
+export const createDeletedFileFollowUpRepo = async () => {
+  const repoDir = await createTempDir("open-azdo-delete-file-follow-up-")
+  runGit(repoDir, ["init", "-b", "main"])
+  runGit(repoDir, ["config", "user.name", "Open AZDO"])
+  runGit(repoDir, ["config", "user.email", "open-azdo@example.com"])
+  await mkdir(join(repoDir, "src"), { recursive: true })
+  await writeFile(join(repoDir, "src/obsolete.ts"), "export const obsolete = true\n", "utf8")
+  runGit(repoDir, ["add", "."])
+  runGit(repoDir, ["commit", "-m", "reviewed"])
+  const reviewedSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  runGit(repoDir, ["rm", "src/obsolete.ts"])
+  runGit(repoDir, ["commit", "-m", "delete-file"])
+  const headSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+
+  return {
+    repoDir,
+    reviewedSha,
+    headSha,
   }
 }
 
@@ -104,6 +162,7 @@ export const makePullRequestDiff = (overrides: Partial<PullRequestDiff> = {}): P
   diffText: "",
   changedFiles: [],
   changedLinesByFile: new Map<string, Set<number>>(),
+  deletedLinesByFile: new Map<string, Set<number>>(),
   ...overrides,
 })
 
