@@ -1,0 +1,56 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node"],
+  "ignorePatterns": [".reference/**", "node_modules/**", ".turbo/**", "dist/**", "coverage/**", "tmp/**"],
+  "rules": {
+    "typescript/consistent-type-imports": "error",
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error",
+    "import/no-self-import": "error",
+    "import/no-default-export": "error",
+    "promise/no-return-in-finally": "error",
+    "promise/prefer-await-to-then": "error",
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/error-message": "error",
+    "unicorn/filename-case": [
+      "error",
+      {
+        "cases": {
+          "kebabCase": true,
+          "pascalCase": true
+        }
+      }
+    ],
+    "no-console": "error",
+    "node/no-process-env": "error",
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          "@open-azdo/*/src/*",
+          "../../packages/*/src/*",
+          "../../../packages/*/src/*",
+          "../../../../packages/*/src/*",
+          "../../apps/*/src/*",
+          "../../../apps/*/src/*",
+          "../../../../apps/*/src/*"
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts"],
+      "rules": {
+        "no-console": "off",
+        "node/no-process-env": "off"
+      }
+    },
+    {
+      "files": ["apps/open-azdo/src/AppConfig.ts", "apps/open-azdo/src/Cli.ts", "apps/open-azdo/src/Runtime.ts"],
+      "rules": {
+        "node/no-process-env": "off"
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@open-azdo/workflows",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./review": "./src/review.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@open-azdo/azdo": "workspace:*",
+    "@open-azdo/core": "workspace:*",
+    "effect": "4.0.0-beta.33"
+  }
+}

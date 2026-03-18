@@ -1,5 +1,9 @@
 .reference/
+.turbo/
+*.tsbuildinfo
 coverage/
 dist/
+apps/*/dist/
+packages/*/dist/
 node_modules/
 tmp/

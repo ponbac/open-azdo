@@ -1,0 +1,22 @@
+{
+  "name": "@open-azdo/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./base-runtime": "./src/BaseRuntimeLayer.ts",
+    "./json": "./src/Json.ts",
+    "./logging": "./src/Logging.ts",
+    "./paths": "./src/paths.ts",
+    "./process-runner": "./src/process-runner.ts",
+    "./git": "./src/git.ts",
+    "./opencode": "./src/opencode.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.33",
+    "effect": "4.0.0-beta.33"
+  }
+}

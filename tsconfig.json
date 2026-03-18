@@ -1,20 +1,18 @@
 {
-  "extends": "@tsconfig/bun/tsconfig.json",
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noFallthroughCasesInSwitch": true,
-    "exactOptionalPropertyTypes": true,
-    "types": ["bun-types"],
-    "plugins": [
-      {
-        "name": "@effect/language-service"
-      }
-    ],
-    "outDir": "dist"
-  },
-  "include": ["bin", "src", "test", "build.ts"]
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/open-azdo"
+    },
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/azdo"
+    },
+    {
+      "path": "./packages/workflows"
+    }
+  ]
 }
