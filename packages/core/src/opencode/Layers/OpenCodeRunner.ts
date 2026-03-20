@@ -9,6 +9,8 @@ import { logError, logInfo, truncateForLog } from "../../Logging"
 import { ProcessRunner } from "../../process-runner"
 import { OpenCodeRunner, type OpenCodeRunRequest } from "../Services/OpenCodeRunner"
 
+const OPENCODE_MAX_OUTPUT_BYTES = 10_000_000
+
 export const buildOpenCodeConfig = (agentName: string) => ({
   $schema: "https://opencode.ai/config.json",
   permission: {
@@ -67,6 +69,37 @@ const buildOpenCodeArgs = (request: OpenCodeRunRequest) => [
 export const extractFinalResponse = (output: string) => {
   const texts: string[] = []
   const structuredCandidates: string[] = []
+  const reportedErrors: string[] = []
+
+  const describeError = (value: unknown): string | undefined => {
+    if (value === null || value === undefined) {
+      return undefined
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim()
+      return trimmed.length > 0 ? trimmed : undefined
+    }
+
+    if (typeof value !== "object" || Array.isArray(value)) {
+      return String(value)
+    }
+
+    const record = value as Record<string, unknown>
+    const message =
+      describeError(record.message) ??
+      describeError(record.detail) ??
+      describeError(record.data) ??
+      describeError(record.error) ??
+      describeError(record.cause)
+
+    if (!message) {
+      return stringifyJson(record)
+    }
+
+    const name = typeof record.name === "string" ? record.name.trim() : ""
+    return name.length > 0 && !message.startsWith(`${name}:`) ? `${name}: ${message}` : message
+  }
 
   const maybeCollectStructuredCandidate = (value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -150,6 +183,14 @@ export const extractFinalResponse = (output: string) => {
         texts.push(event)
         continue
       }
+
+      if (event && typeof event === "object" && !Array.isArray(event) && event.type === "error" && "error" in event) {
+        const message = describeError(event.error)
+        if (message) {
+          reportedErrors.push(message)
+        }
+      }
+
       collectTextCandidates(event)
     } catch {
       texts.push(trimmed)
@@ -164,7 +205,7 @@ export const extractFinalResponse = (output: string) => {
   const response = texts.join("\n").trim()
   if (!response) {
     throw new OpenCodeOutputError({
-      message: "OpenCode did not return a final response.",
+      message: reportedErrors.at(-1) ?? "OpenCode did not return a final response.",
       output,
     })
   }
@@ -228,6 +269,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
           args: buildOpenCodeArgs(request),
           cwd: request.workspace,
           timeout: request.timeout,
+          maxOutputBytes: OPENCODE_MAX_OUTPUT_BYTES,
           env: {
             ...request.inheritedEnv,
             OPENCODE_CONFIG: configPath,

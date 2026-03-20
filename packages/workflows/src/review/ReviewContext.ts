@@ -11,11 +11,16 @@ export type PullRequestMetadata = {
   readonly description: string
 }
 
+export type ReviewMode = "full" | "follow-up" | "skipped"
+
 export type ReviewContext = {
   readonly pullRequest: {
     readonly title: string
     readonly description: string
   }
+  readonly reviewMode: ReviewMode
+  readonly previousReviewedCommit?: string
+  readonly pullRequestBaseRef: string
   readonly baseRef: string
   readonly headRef: string
   readonly changedFiles: Array<{
@@ -25,11 +30,28 @@ export type ReviewContext = {
   }>
 }
 
-export const buildReviewContext = (metadata: PullRequestMetadata, gitDiff: PullRequestDiff): ReviewContext => ({
+export type BuildReviewContextInput = {
+  readonly metadata: PullRequestMetadata
+  readonly reviewMode: ReviewMode
+  readonly previousReviewedCommit?: string | undefined
+  readonly pullRequestBaseRef: string
+  readonly gitDiff: PullRequestDiff
+}
+
+export const buildReviewContext = ({
+  metadata,
+  reviewMode,
+  previousReviewedCommit,
+  pullRequestBaseRef,
+  gitDiff,
+}: BuildReviewContextInput): ReviewContext => ({
   pullRequest: {
     title: metadata.title,
     description: metadata.description,
   },
+  reviewMode,
+  ...(previousReviewedCommit !== undefined ? { previousReviewedCommit } : {}),
+  pullRequestBaseRef,
   baseRef: gitDiff.baseRef,
   headRef: gitDiff.headRef,
   changedFiles: splitDiffByFile(gitDiff.diffText).map((file) => ({

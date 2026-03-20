@@ -37,4 +37,4 @@ steps:
       # Azure Pipelines: enable "Allow scripts to access the OAuth token".
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
       OPENAI_API_KEY: $(OPENAI_API_KEY)
-      OPEN_AZDO_OPENCODE_TIMEOUT: "10 minutes"
+      OPEN_AZDO_OPENCODE_TIMEOUT: "15 minutes"

@@ -12,7 +12,9 @@
     "lint": "oxlint --config .oxlintrc.json apps packages --report-unused-disable-directives",
     "fmt": "oxfmt --write apps packages AGENTS.md README.md package.json turbo.json tsconfig.base.json tsconfig.json",
     "test": "turbo run test",
-    "check": "bun run fmt && bun run typecheck && bun run lint && bun run test"
+    "check": "bun run fmt && bun run typecheck && bun run lint && bun run test",
+    "publish:dry": "bash ./scripts/publish-npm.sh dry-run",
+    "publish:npm": "bash ./scripts/publish-npm.sh"
   },
   "devDependencies": {
     "@effect/language-service": "0.80.0",

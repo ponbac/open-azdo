@@ -1,5 +1,6 @@
 {
   "name": "@open-azdo/azdo",
+  "version": "0.1.10",
   "private": true,
   "type": "module",
   "exports": {

@@ -11,7 +11,7 @@ import {
   type UpdateCommentInput,
   type UpdateThreadStatusInput,
 } from "../Services/AzureDevOpsClient"
-import { ExistingThreadsResponseSchema, PullRequestMetadataSchema } from "../Schemas"
+import { ExistingThreadsResponseSchema, PullRequestMetadataResponseSchema } from "../Schemas"
 
 const createHeaders = (token: Redacted.Redacted<string>) => ({
   authorization: `Bearer ${Redacted.value(token)}`,
@@ -81,7 +81,12 @@ const getPullRequestMetadata: AzureDevOpsClient["Service"]["getPullRequestMetada
 }: AzureRequestContext) =>
   requestJson(buildPullRequestUrl(context), { method: "GET", headers: createHeaders(token) }, (input) => {
     try {
-      return Schema.decodeUnknownSync(PullRequestMetadataSchema)(input)
+      const metadata = Schema.decodeUnknownSync(PullRequestMetadataResponseSchema)(input)
+      return {
+        title: metadata.title,
+        description: metadata.description ?? "",
+        url: metadata.url ?? undefined,
+      }
     } catch (error) {
       throw new AzureDevOpsDecodeError({
         message: "Azure DevOps response did not match the expected schema.",

@@ -20,6 +20,8 @@ bun install
 bun run check
 bun run build
 bun run test
+bun run publish:dry
+bun run publish:npm
 ```
 
 Focused iteration is fine during development:
@@ -29,6 +31,23 @@ bun run --cwd apps/open-azdo test
 bun run --cwd packages/core typecheck
 bun run --cwd packages/workflows test
 ```
+
+To publish the CLI package from the repo root, use Bun's built-in publish command with the app workspace as the working directory:
+
+```bash
+bun publish --cwd apps/open-azdo
+```
+
+If Bun does not pick up your `~/.npmrc` login for publish auth, export `NPM_CONFIG_TOKEN` first.
+
+For a guarded flow that mirrors the pre-monorepo setup, use:
+
+```bash
+bun run publish:dry
+bun run publish:npm
+```
+
+`bun publish` itself is a Bun CLI command, not a package script alias, so it cannot be redirected to a root `package.json` script.
 
 ## CLI Package
 

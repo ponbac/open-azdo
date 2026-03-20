@@ -131,8 +131,10 @@ export const createFixtureRepo = async () => {
   runGit(repoDir, ["checkout", "-b", "feature"])
   await writeFile(join(repoDir, "src/example.ts"), "export const value = 2\nexport const next = 3\n", "utf8")
   runGit(repoDir, ["commit", "-am", "feature"])
+  const featureSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
 
   return {
+    featureSha,
     mainSha,
     repoDir,
   }

@@ -1,6 +1,6 @@
 {
   "name": "open-azdo",
-  "version": "0.1.10",
+  "version": "0.2.5",
   "description": "Secure Azure DevOps pull request review CLI powered by OpenCode",
   "repository": {
     "type": "git",
@@ -22,13 +22,11 @@
   "scripts": {
     "build": "bun run build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun install --cwd ../.. --frozen-lockfile && bun run --cwd ../.. check && bun run build"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-beta.33",
-    "@open-azdo/azdo": "workspace:*",
-    "@open-azdo/core": "workspace:*",
-    "@open-azdo/workflows": "workspace:*",
     "effect": "4.0.0-beta.33"
   },
   "engines": {

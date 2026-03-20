@@ -43,6 +43,23 @@ describe("config", () => {
     expect(Duration.toMillis(config.opencodeTimeout)).toBe(600_000)
     expect(Number(config.pullRequestId)).toBe(42)
     expect(config.organization).toBe("acme")
+    expect(config.sourceCommitId).toBeUndefined()
+  })
+
+  test("loads the pull request source commit id when available", async () => {
+    const config = await Effect.runPromise(
+      resolveAppConfig(
+        makeReviewCliInput({
+          model: Option.some("openai/gpt-5.4"),
+        }),
+        {
+          ...makeBaseEnv(),
+          SYSTEM_PULLREQUEST_SOURCECOMMITID: "1234567890abcdef",
+        },
+      ),
+    )
+
+    expect(config.sourceCommitId).toBe("1234567890abcdef")
   })
 
   test("prefers OPEN_AZDO_* over Azure Pipelines defaults", async () => {

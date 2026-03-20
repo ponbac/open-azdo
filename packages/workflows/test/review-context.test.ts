@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { type PullRequestDiff } from "@open-azdo/core/git"
-import { buildReviewContext } from "@open-azdo/workflows/review"
+import { buildReviewContext } from "../src/review/ReviewContext"
 
 describe("review context", () => {
   test("builds a compact manifest with refs, line ranges, and hunk headers", () => {
@@ -29,16 +29,21 @@ describe("review context", () => {
         ["src/example.ts", new Set([2, 3, 8, 9])],
         ["src/other.ts", new Set([10])],
       ]),
+      deletedLinesByFile: new Map(),
     }
 
-    const context = buildReviewContext(
-      {
+    const context = buildReviewContext({
+      metadata: {
         title: "Feature PR",
         description: "Adds a new export",
       },
+      reviewMode: "full",
+      pullRequestBaseRef: "abc123",
       gitDiff,
-    )
+    })
 
+    expect(context.reviewMode).toBe("full")
+    expect(context.pullRequestBaseRef).toBe("abc123")
     expect(context.baseRef).toBe("abc123")
     expect(context.headRef).toBe("HEAD")
     expect(context.changedFiles).toEqual([
@@ -58,6 +63,38 @@ describe("review context", () => {
     ])
   })
 
+  test("includes follow-up review metadata when present", () => {
+    const context = buildReviewContext({
+      metadata: {
+        title: "Feature PR",
+        description: "Adds a new export",
+      },
+      reviewMode: "follow-up",
+      previousReviewedCommit: "prev123",
+      pullRequestBaseRef: "pr-base",
+      gitDiff: {
+        baseRef: "prev123",
+        headRef: "next456",
+        diffText: [
+          "diff --git a/src/example.ts b/src/example.ts",
+          "--- a/src/example.ts",
+          "+++ b/src/example.ts",
+          "@@ -1,1 +1,2 @@",
+          "+export const next = 2",
+        ].join("\n"),
+        changedFiles: ["src/example.ts"],
+        changedLinesByFile: new Map([["src/example.ts", new Set([1])]]),
+        deletedLinesByFile: new Map(),
+      },
+    })
+
+    expect(context.reviewMode).toBe("follow-up")
+    expect(context.previousReviewedCommit).toBe("prev123")
+    expect(context.pullRequestBaseRef).toBe("pr-base")
+    expect(context.baseRef).toBe("prev123")
+    expect(context.headRef).toBe("next456")
+  })
+
   test("does not embed full patches or file contents in the manifest", () => {
     const largeLine = `+${"x".repeat(200)}`
     const diffText = [
@@ -68,19 +105,22 @@ describe("review context", () => {
       ...Array.from({ length: 200 }, () => largeLine),
     ].join("\n")
 
-    const context = buildReviewContext(
-      {
+    const context = buildReviewContext({
+      metadata: {
         title: "Large PR",
         description: "Touches one big file",
       },
-      {
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
         baseRef: "base",
         headRef: "HEAD",
         diffText,
         changedFiles: ["src/huge.ts"],
         changedLinesByFile: new Map([["src/huge.ts", new Set(Array.from({ length: 200 }, (_, index) => index + 1))]]),
+        deletedLinesByFile: new Map(),
       },
-    )
+    })
 
     const serialized = JSON.stringify(context)
 

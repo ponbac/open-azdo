@@ -10,7 +10,7 @@ variables:
   BunLinuxX64Sha256: f57bc0187e39623de716ba3a389fda5486b2d7be7131a980ba54dc7b733d2e08
   OpenCodeVersion: 1.2.27
   OpenCodeLinuxX64Sha256: 6fe3820b145857f7ff507d2826058b7acf1fce8258def1498468dd43809e69e8
-  OpenAzdoVersion: 0.1.10
+  OpenAzdoVersion: 0.2.5
   RunOpenCodeSmokeTest: "false"
 
 steps:
@@ -58,4 +58,4 @@ steps:
       # Azure Pipelines: enable "Allow scripts to access the OAuth token".
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
       OPENAI_API_KEY: $(OPENAI_API_KEY)
-      OPEN_AZDO_OPENCODE_TIMEOUT: "10 minutes"
+      OPEN_AZDO_OPENCODE_TIMEOUT: "15 minutes"
