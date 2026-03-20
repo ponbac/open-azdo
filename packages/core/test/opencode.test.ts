@@ -67,6 +67,36 @@ describe("opencode", () => {
     expect(() => extractFinalResponse("")).toThrow("OpenCode did not return a final response.")
   })
 
+  test("surfaces the embedded OpenCode error event message", () => {
+    const output = [
+      JSON.stringify({
+        type: "step_start",
+        timestamp: 1774010510111,
+        sessionID: "ses_test",
+        part: {
+          id: "prt_test",
+          sessionID: "ses_test",
+          messageID: "msg_test",
+          type: "step-start",
+          snapshot: "snap",
+        },
+      }),
+      JSON.stringify({
+        type: "error",
+        timestamp: 1774010510115,
+        sessionID: "ses_test",
+        error: {
+          name: "ProviderAuthError",
+          data: {
+            message: "Missing OpenAI API key.",
+          },
+        },
+      }),
+    ].join("\n")
+
+    expect(() => extractFinalResponse(output)).toThrow("ProviderAuthError: Missing OpenAI API key.")
+  })
+
   test("cleans up temp config directories after a run", async () => {
     let configDir = ""
 
@@ -147,6 +177,38 @@ describe("opencode", () => {
 
     expect(args).toContain("--variant")
     expect(args).toContain("high")
+  })
+
+  test("raises the process output cap for large OpenCode event streams", async () => {
+    let maxOutputBytes: number | undefined
+    const largePrelude = "x".repeat(1_100_000)
+
+    const result = await Effect.runPromise(
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          workspace: process.cwd(),
+        }),
+        makeProcessRunner((input) => {
+          maxOutputBytes = input.maxOutputBytes
+
+          return Effect.succeed({
+            exitCode: 0,
+            stdout: [
+              JSON.stringify({
+                text: largePrelude,
+              }),
+              JSON.stringify({
+                text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+              }),
+            ].join("\n"),
+            stderr: "",
+          })
+        }),
+      ),
+    )
+
+    expect(maxOutputBytes).toBe(10_000_000)
+    expect(result).toBe('{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}')
   })
 
   test("keeps the large review prompt out of the command-line arguments", async () => {

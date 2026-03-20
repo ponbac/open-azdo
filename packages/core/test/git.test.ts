@@ -115,6 +115,23 @@ describe("git", () => {
     }
   })
 
+  test("falls back to HEAD^2 when the explicit source commit id is not available locally", async () => {
+    const { repoDir, featureSha } = await createSyntheticMergeRepo()
+
+    try {
+      const reviewedSourceCommit = await Effect.runPromise(
+        resolveReviewedSourceCommit({
+          workspace: repoDir,
+          sourceCommitId: "1111111111111111111111111111111111111111",
+        }).pipe(Effect.provide(makeRealGitExecLayer()), withSilentLogs),
+      )
+
+      expect(reviewedSourceCommit).toBe(featureSha)
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
   test("resolves explicit diff ranges", async () => {
     const { repoDir, mainSha, featureSha } = await createFixtureRepo()
 

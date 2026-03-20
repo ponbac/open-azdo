@@ -78,6 +78,9 @@ type ReconcileThreadsInput = {
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
 }
 
+const isActiveThreadStatus = (status: ExistingThread["status"]) =>
+  status === 1 || status === "active" || status === "pending"
+
 const STATE_SCHEMA_VERSION = 1
 const FINDING_MARKER_PREFIX = "<!-- open-azdo:"
 const SUMMARY_STATE_PREFIX = "<!-- open-azdo-review:"
@@ -298,7 +301,7 @@ export const mergeFollowUpReviewResult = ({
   readonly reviewResult: NormalizedReviewResult
 }): NormalizedReviewResult => {
   const carriedForwardFindings = listManagedFindingThreads(existingThreads)
-    .filter((existingThread) => existingThread.thread.status === 1)
+    .filter((existingThread) => isActiveThreadStatus(existingThread.thread.status))
     .filter(
       (existingThread) =>
         !findingTouchesScopedDiff(existingThread.finding, scopedChangedLinesByFile, scopedDeletedLinesByFile),

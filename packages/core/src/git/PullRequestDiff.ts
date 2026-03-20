@@ -176,6 +176,9 @@ const extractDiffLineMaps = (diffText: string) => {
   }
 }
 
+export const extractChangedLinesByFile = (diffText: string): Map<string, Set<number>> =>
+  extractDiffLineMaps(diffText).changedLinesByFile
+
 export const buildTargetRefCandidates = (targetBranch: string) => {
   const normalized = targetBranch.replace(/^refs\/heads\//, "")
   return [targetBranch, `refs/remotes/origin/${normalized}`, `refs/heads/${normalized}`, normalized]
@@ -192,22 +195,29 @@ const runGit = (workspace: string, operation: string, args: ReadonlyArray<string
     })
   })
 
+const resolveHeadReviewedSourceCommitCandidate = (workspace: string) =>
+  runGit(workspace, "Git.resolveReviewedSourceCommit.revList", ["rev-list", "--parents", "-n", "1", "HEAD"]).pipe(
+    Effect.map((result) => {
+      const hashes = result.stdout.trim().split(/\s+/)
+      return hashes.length === 3 ? "HEAD^2" : "HEAD"
+    }),
+  )
+
 export const resolveReviewedSourceCommit = ({ workspace, sourceCommitId }: ResolveReviewedSourceCommitInput) =>
   Effect.gen(function* () {
-    const candidate =
-      sourceCommitId ??
-      (yield* runGit(workspace, "Git.resolveReviewedSourceCommit.revList", [
-        "rev-list",
-        "--parents",
-        "-n",
-        "1",
-        "HEAD",
-      ]).pipe(
-        Effect.map((result) => {
-          const hashes = result.stdout.trim().split(/\s+/)
-          return hashes.length === 3 ? "HEAD^2" : "HEAD"
-        }),
-      ))
+    const fallbackCandidate = yield* resolveHeadReviewedSourceCommitCandidate(workspace)
+
+    let candidate = fallbackCandidate
+
+    if (sourceCommitId !== undefined) {
+      const explicitCandidate = yield* runGit(
+        workspace,
+        "Git.resolveReviewedSourceCommit.verifyExplicit",
+        ["rev-parse", "--verify", `${sourceCommitId}^{commit}`],
+        true,
+      )
+      candidate = explicitCandidate.exitCode === 0 ? sourceCommitId : fallbackCandidate
+    }
 
     const resolved = yield* runGit(workspace, "Git.resolveReviewedSourceCommit.revParse", [
       "rev-parse",
