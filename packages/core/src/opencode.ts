@@ -1,2 +1,14 @@
-export { OpenCodeRunner, type OpenCodeRunRequest, type OpenCodeRunnerShape } from "./opencode/Services/OpenCodeRunner"
-export { OpenCodeRunnerLive, buildOpenCodeConfig, extractFinalResponse } from "./opencode/Layers/OpenCodeRunner"
+export {
+  OpenCodeRunner,
+  type OpenCodeRunRequest,
+  type OpenCodeRunResult,
+  type OpenCodeRunnerShape,
+  type OpenCodeRunTokens,
+  type OpenCodeRunUsage,
+} from "./opencode/Services/OpenCodeRunner"
+export {
+  OpenCodeRunnerLive,
+  buildOpenCodeConfig,
+  extractFinalResponse,
+  extractOpenCodeRunResult,
+} from "./opencode/Layers/OpenCodeRunner"

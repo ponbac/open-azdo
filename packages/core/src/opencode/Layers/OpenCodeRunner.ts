@@ -8,7 +8,13 @@ import { formatUnknownDetail } from "../../format-unknown"
 import { stringifyJson } from "../../Json"
 import { logError, logInfo, truncateForLog } from "../../Logging"
 import { ProcessRunner } from "../../process-runner"
-import { OpenCodeRunner, type OpenCodeRunRequest } from "../Services/OpenCodeRunner"
+import {
+  OpenCodeRunner,
+  type OpenCodeRunRequest,
+  type OpenCodeRunResult,
+  type OpenCodeRunTokens,
+  type OpenCodeRunUsage,
+} from "../Services/OpenCodeRunner"
 
 const OPENCODE_MAX_OUTPUT_BYTES = 10_000_000
 
@@ -67,10 +73,92 @@ const buildOpenCodeArgs = (request: OpenCodeRunRequest) => [
   REVIEW_TRIGGER_MESSAGE,
 ]
 
-export const extractFinalResponse = (output: string) => {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const toNumberOrUndefined = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined
+
+const getNestedCacheTokenCount = (value: unknown, key: "read" | "write") => {
+  if (!isRecord(value) || !isRecord(value.cache)) {
+    return undefined
+  }
+
+  return toNumberOrUndefined(value.cache[key])
+}
+
+const parseTokenUsage = (value: unknown): OpenCodeRunTokens | undefined => {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  const input = toNumberOrUndefined(value.input)
+  const output = toNumberOrUndefined(value.output)
+  if (input === undefined || output === undefined) {
+    return undefined
+  }
+
+  return {
+    input,
+    output,
+    reasoning: toNumberOrUndefined(value.reasoning) ?? 0,
+    cacheRead: toNumberOrUndefined(value.cacheRead) ?? getNestedCacheTokenCount(value, "read") ?? 0,
+    cacheWrite: toNumberOrUndefined(value.cacheWrite) ?? getNestedCacheTokenCount(value, "write") ?? 0,
+  }
+}
+
+const buildUsage = ({
+  costUsd,
+  tokens,
+}: {
+  readonly costUsd?: number | undefined
+  readonly tokens?: OpenCodeRunTokens | undefined
+}): OpenCodeRunUsage | undefined => {
+  if (costUsd === undefined && tokens === undefined) {
+    return undefined
+  }
+
+  return {
+    ...(costUsd !== undefined ? { costUsd } : {}),
+    ...(tokens ? { tokens } : {}),
+  }
+}
+
+const parsePartUsage = (value: unknown): OpenCodeRunUsage | undefined => {
+  if (!isRecord(value) || value.type !== "step-finish") {
+    return undefined
+  }
+
+  return buildUsage({
+    costUsd: toNumberOrUndefined(value.cost),
+    tokens: parseTokenUsage(value.tokens),
+  })
+}
+
+const parseAssistantUsage = (value: unknown): OpenCodeRunUsage | undefined => {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  const candidate = isRecord(value.info) ? value.info : value
+  return buildUsage({
+    costUsd: toNumberOrUndefined(candidate.cost),
+    tokens: parseTokenUsage(candidate.tokens),
+  })
+}
+
+export const extractOpenCodeRunResult = (output: string): OpenCodeRunResult => {
   const texts: string[] = []
   const structuredCandidates: string[] = []
   const reportedErrors: string[] = []
+  let sessionId: string | undefined
+  let stepFinishUsage: OpenCodeRunUsage | undefined
+  let assistantUsage: OpenCodeRunUsage | undefined
+  const buildRunResult = (response: string): OpenCodeRunResult => ({
+    response,
+    ...(sessionId ? { sessionId } : {}),
+    ...(stepFinishUsage || assistantUsage ? { usage: stepFinishUsage ?? assistantUsage } : {}),
+  })
 
   const describeError = (value: unknown): string | undefined => {
     if (value === null || value === undefined) {
@@ -86,28 +174,27 @@ export const extractFinalResponse = (output: string) => {
       return String(value)
     }
 
-    if (typeof value !== "object" || Array.isArray(value)) {
+    if (!isRecord(value)) {
       return undefined
     }
 
-    const record = value as Record<string, unknown>
     const message =
-      describeError(record.message) ??
-      describeError(record.detail) ??
-      describeError(record.data) ??
-      describeError(record.error) ??
-      describeError(record.cause)
+      describeError(value.message) ??
+      describeError(value.detail) ??
+      describeError(value.data) ??
+      describeError(value.error) ??
+      describeError(value.cause)
 
     if (!message) {
-      return stringifyJson(record)
+      return stringifyJson(value)
     }
 
-    const name = typeof record.name === "string" ? record.name.trim() : ""
+    const name = typeof value.name === "string" ? value.name.trim() : ""
     return name.length > 0 && !message.startsWith(`${name}:`) ? `${name}: ${message}` : message
   }
 
   const maybeCollectStructuredCandidate = (value: unknown) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
+    if (!isRecord(value)) {
       return
     }
 
@@ -145,11 +232,25 @@ export const extractFinalResponse = (output: string) => {
       return
     }
 
-    if (typeof value !== "object") {
+    if (!isRecord(value)) {
       return
     }
 
     maybeCollectStructuredCandidate(value)
+
+    const usageFromPart = parsePartUsage(value)
+    if (usageFromPart) {
+      stepFinishUsage = usageFromPart
+    }
+
+    const usageFromAssistant = parseAssistantUsage(value)
+    if (usageFromAssistant) {
+      assistantUsage = usageFromAssistant
+    }
+
+    if (typeof value.sessionID === "string") {
+      sessionId = value.sessionID
+    }
 
     if ("type" in value && value.type === "text" && "text" in value && typeof value.text === "string") {
       texts.push(value.text.trim())
@@ -204,7 +305,7 @@ export const extractFinalResponse = (output: string) => {
 
   const structuredResponse = structuredCandidates.at(-1)?.trim()
   if (structuredResponse) {
-    return structuredResponse
+    return buildRunResult(structuredResponse)
   }
 
   const response = texts.join("\n").trim()
@@ -215,8 +316,10 @@ export const extractFinalResponse = (output: string) => {
     })
   }
 
-  return response
+  return buildRunResult(response)
 }
+
+export const extractFinalResponse = (output: string) => extractOpenCodeRunResult(output).response
 
 const makeOpenCodeRunner = Effect.gen(function* () {
   const runner = yield* ProcessRunner
@@ -312,8 +415,8 @@ const makeOpenCodeRunner = Effect.gen(function* () {
         })
       }
 
-      const response = yield* Effect.try({
-        try: () => extractFinalResponse(result.stdout),
+      const runResult = yield* Effect.try({
+        try: () => extractOpenCodeRunResult(result.stdout),
         catch: (error) =>
           error instanceof OpenCodeOutputError
             ? error
@@ -332,11 +435,15 @@ const makeOpenCodeRunner = Effect.gen(function* () {
       )
 
       yield* logInfo("Extracted final OpenCode response.", {
-        responseChars: response.length,
-        responsePreview: truncateForLog(response),
+        responseChars: runResult.response.length,
+        responsePreview: truncateForLog(runResult.response),
+        sessionId: runResult.sessionId,
+        costUsd: runResult.usage?.costUsd,
+        inputTokens: runResult.usage?.tokens?.input,
+        outputTokens: runResult.usage?.tokens?.output,
       })
 
-      return response
+      return runResult
     }).pipe(Effect.scoped)
   })
 

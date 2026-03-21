@@ -77,7 +77,7 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  OpenCodeModel: openai/gpt-5.4
+  OpenCodeModel: openai/gpt-5.4-mini
   OpenCodeThinking: high
 
 steps:

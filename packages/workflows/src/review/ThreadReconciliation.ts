@@ -27,6 +27,29 @@ const SeverityCountsSchema = Schema.Struct({
 })
 export type SeverityCounts = Schema.Schema.Type<typeof SeverityCountsSchema>
 
+const ReviewHistoryTokensSchema = Schema.Struct({
+  input: Schema.Int,
+  output: Schema.Int,
+  reasoning: Schema.Int,
+  cacheRead: Schema.Int,
+  cacheWrite: Schema.Int,
+})
+export type ReviewHistoryTokens = Schema.Schema.Type<typeof ReviewHistoryTokensSchema>
+
+const ReviewHistoryEntrySchema = Schema.Struct({
+  reviewedCommit: Schema.String,
+  reviewedAt: Schema.optionalKey(Schema.String),
+  reviewMode: Schema.Literals(["full", "follow-up"]),
+  model: Schema.String,
+  variant: Schema.optionalKey(Schema.String),
+  buildNumber: Schema.optionalKey(Schema.String),
+  buildId: Schema.optionalKey(Schema.String),
+  buildLink: Schema.optionalKey(Schema.String),
+  costUsd: Schema.optionalKey(Schema.Number),
+  tokens: Schema.optionalKey(ReviewHistoryTokensSchema),
+})
+export type ReviewHistoryEntry = Schema.Schema.Type<typeof ReviewHistoryEntrySchema>
+
 export const ManagedReviewStateSchema = Schema.Struct({
   schemaVersion: Schema.Int,
   reviewedCommit: Schema.String,
@@ -36,6 +59,7 @@ export const ManagedReviewStateSchema = Schema.Struct({
   findingsCount: Schema.Int,
   inlineFindingsCount: Schema.Int,
   unmappedNotesCount: Schema.Int,
+  reviewHistory: Schema.optionalKey(Schema.Array(ReviewHistoryEntrySchema)),
 })
 export type ManagedReviewState = Schema.Schema.Type<typeof ManagedReviewStateSchema>
 
@@ -81,7 +105,7 @@ type ReconcileThreadsInput = {
 const isActiveThreadStatus = (status: ExistingThread["status"]) =>
   status === 1 || status === "active" || status === "pending"
 
-const STATE_SCHEMA_VERSION = 1
+const STATE_SCHEMA_VERSION = 2
 const FINDING_MARKER_PREFIX = "<!-- open-azdo:"
 const SUMMARY_STATE_PREFIX = "<!-- open-azdo-review:"
 const COMMENT_SUFFIX = " -->"
@@ -148,12 +172,14 @@ export const buildManagedReviewState = ({
   reviewedCommit,
   pullRequestBaseRef,
   reviewResult,
+  reviewHistory,
 }: {
   readonly reviewedCommit: string
   readonly pullRequestBaseRef: string
   readonly reviewResult: ReviewResult & {
     readonly inlineFindings?: ReadonlyArray<ReviewFinding>
   }
+  readonly reviewHistory?: ReadonlyArray<ReviewHistoryEntry> | undefined
 }): ManagedReviewState => ({
   schemaVersion: STATE_SCHEMA_VERSION,
   reviewedCommit,
@@ -163,7 +189,101 @@ export const buildManagedReviewState = ({
   findingsCount: reviewResult.findings.length,
   inlineFindingsCount: reviewResult.inlineFindings?.length ?? 0,
   unmappedNotesCount: reviewResult.unmappedNotes.length,
+  ...(reviewHistory && reviewHistory.length > 0 ? { reviewHistory: [...reviewHistory] } : {}),
 })
+
+const shortCommit = (value: string) => value.slice(0, 12)
+
+const formatInteger = (value: number) => new Intl.NumberFormat("en-US").format(value)
+
+const formatCostUsd = (value: number) =>
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4,
+  }).format(value)
+
+const escapeTableCell = (value: string) => value.replaceAll("|", "\\|").replaceAll("\n", "<br>")
+
+const formatReviewLabel = (entry: ReviewHistoryEntry) => {
+  const buildLabel = entry.buildNumber
+    ? `Build ${entry.buildNumber}`
+    : entry.buildId
+      ? `Build ${entry.buildId}`
+      : undefined
+  const commitLabel = shortCommit(entry.reviewedCommit)
+
+  if (buildLabel && entry.buildLink) {
+    return `[${buildLabel}](${entry.buildLink}) · ${commitLabel}`
+  }
+
+  if (buildLabel) {
+    return `${buildLabel} · ${commitLabel}`
+  }
+
+  return commitLabel
+}
+
+const formatReviewTimestamp = (entry: ReviewHistoryEntry) => {
+  if (!entry.reviewedAt) {
+    return "-"
+  }
+
+  const date = new Date(entry.reviewedAt)
+  if (Number.isNaN(date.valueOf())) {
+    return entry.reviewedAt
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "UTC",
+  }).format(date)
+}
+
+const formatTokenBreakdown = (tokens: ReviewHistoryTokens | undefined) => {
+  if (!tokens) {
+    return "-"
+  }
+
+  const segments = [`input ${formatInteger(tokens.input)}`, `output ${formatInteger(tokens.output)}`]
+
+  if (tokens.reasoning > 0) {
+    segments.push(`reasoning ${formatInteger(tokens.reasoning)}`)
+  }
+
+  if (tokens.cacheRead > 0) {
+    segments.push(`cache read ${formatInteger(tokens.cacheRead)}`)
+  }
+
+  if (tokens.cacheWrite > 0) {
+    segments.push(`cache write ${formatInteger(tokens.cacheWrite)}`)
+  }
+
+  return segments.join(", ")
+}
+
+const formatModelLabel = (entry: ReviewHistoryEntry) =>
+  entry.variant ? `${entry.model} (${entry.variant})` : entry.model
+
+const appendReviewHistorySection = (lines: string[], reviewHistory: ReadonlyArray<ReviewHistoryEntry>) => {
+  if (reviewHistory.length === 0) {
+    return
+  }
+
+  lines.push(
+    "",
+    "| Review | Reviewed At (UTC) | Mode | Model | Tokens | Cost |",
+    "| --- | --- | --- | --- | --- | --- |",
+  )
+
+  for (const entry of [...reviewHistory].reverse()) {
+    lines.push(
+      `| ${escapeTableCell(formatReviewLabel(entry))} | ${escapeTableCell(formatReviewTimestamp(entry))} | ${escapeTableCell(entry.reviewMode)} | ${escapeTableCell(formatModelLabel(entry))} | ${escapeTableCell(formatTokenBreakdown(entry.tokens))} | ${escapeTableCell(entry.costUsd !== undefined ? formatCostUsd(entry.costUsd) : "-")} |`,
+    )
+  }
+}
 
 export const buildSummaryComment = (snapshot: SummarySnapshot) => {
   const lines = [
@@ -184,6 +304,8 @@ export const buildSummaryComment = (snapshot: SummarySnapshot) => {
   if (snapshot.buildLink) {
     lines.push("", `Build: ${snapshot.buildLink}`)
   }
+
+  appendReviewHistorySection(lines, snapshot.persistedState?.reviewHistory ?? [])
 
   if (snapshot.persistedState) {
     lines.push("", encodeManagedReviewState(snapshot.persistedState))

@@ -4,6 +4,25 @@ import type { Effect } from "effect"
 
 import type { OpenCodeInvocationError, OpenCodeOutputError } from "../../errors"
 
+export type OpenCodeRunTokens = {
+  readonly input: number
+  readonly output: number
+  readonly reasoning: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+}
+
+export type OpenCodeRunUsage = {
+  readonly costUsd?: number | undefined
+  readonly tokens?: OpenCodeRunTokens | undefined
+}
+
+export type OpenCodeRunResult = {
+  readonly response: string
+  readonly sessionId?: string | undefined
+  readonly usage?: OpenCodeRunUsage | undefined
+}
+
 export type OpenCodeRunRequest = {
   readonly workspace: string
   readonly model: string
@@ -15,7 +34,9 @@ export type OpenCodeRunRequest = {
 }
 
 export interface OpenCodeRunnerShape {
-  readonly run: (request: OpenCodeRunRequest) => Effect.Effect<string, OpenCodeInvocationError | OpenCodeOutputError>
+  readonly run: (
+    request: OpenCodeRunRequest,
+  ) => Effect.Effect<OpenCodeRunResult, OpenCodeInvocationError | OpenCodeOutputError>
 }
 
 export class OpenCodeRunner extends ServiceMap.Service<OpenCodeRunner, OpenCodeRunnerShape>()(
