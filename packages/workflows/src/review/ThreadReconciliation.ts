@@ -238,6 +238,7 @@ const formatReviewTimestamp = (entry: ReviewHistoryEntry) => {
   return new Intl.DateTimeFormat("en-US", {
     dateStyle: "medium",
     timeStyle: "short",
+    hour12: false,
     timeZone: "UTC",
   }).format(date)
 }

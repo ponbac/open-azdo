@@ -60,7 +60,7 @@ describe("thread reconciliation", () => {
     expect(summaryContent).toContain("| Review | Reviewed At (UTC) | Mode | Model | Tokens | Cost |")
     expect(summaryContent).toContain("$0.1234")
     expect(summaryContent).toContain("$0.0456")
-    expect(summaryContent).toContain("Mar 21, 2026, 4:45 PM")
+    expect(summaryContent).toContain("Mar 21, 2026, 16:45")
     expect(summaryContent).toContain("input 900, output 120, reasoning 50, cache read 10")
     const historyRows = summaryContent.split("\n").filter((line) => line.startsWith("| [Build "))
 
