@@ -9,6 +9,7 @@ import {
   findManagedSummaryThread,
   fingerprintFinding,
   type ManagedReviewState,
+  type ReviewHistoryEntry,
 } from "../src/review/ThreadReconciliation"
 import type { NormalizedReviewResult, ReviewFinding } from "../src/review/ReviewOutput"
 
@@ -62,6 +63,25 @@ export const makeManagedReviewState = (overrides: Partial<ManagedReviewState> = 
     }),
     ...overrides,
   }) satisfies ManagedReviewState
+
+export const makeReviewHistoryEntry = (overrides: Partial<ReviewHistoryEntry> = {}): ReviewHistoryEntry => ({
+  reviewedCommit: "reviewed-sha",
+  reviewedAt: "2026-03-20T15:30:00.000Z",
+  reviewMode: "full",
+  model: "openai/gpt-5.4",
+  buildNumber: "99",
+  buildId: "99",
+  buildLink: "https://dev.azure.com/acme/project/_build/results?buildId=99",
+  costUsd: 0.1234,
+  tokens: {
+    input: 1200,
+    output: 345,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  },
+  ...overrides,
+})
 
 export const makeSummarySnapshot = (
   overrides: Record<string, unknown> = {},

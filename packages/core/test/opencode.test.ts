@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import * as Duration from "effect/Duration"
 
-import { OpenCodeRunner, extractFinalResponse } from "@open-azdo/core/opencode"
+import { OpenCodeRunner, extractFinalResponse, extractOpenCodeRunResult } from "@open-azdo/core/opencode"
 import { makeOpenCodeLiveLayer, makeOpenCodeRunRequest, makeProcessRunner, withSilentLogs } from "./helpers"
 
 const runOpenCode = (
@@ -61,6 +61,142 @@ describe("opencode", () => {
     ].join("\n")
 
     expect(extractFinalResponse(output)).toBe('{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}')
+  })
+
+  test("extracts usage metadata from a step-finish part", () => {
+    const output = [
+      JSON.stringify({
+        type: "message.part.updated",
+        sessionID: "ses_usage",
+        part: {
+          id: "prt_finish",
+          sessionID: "ses_usage",
+          messageID: "msg_usage",
+          type: "step-finish",
+          cost: 0.1234,
+          tokens: {
+            input: 1200,
+            output: 345,
+            reasoning: 67,
+            cacheRead: 890,
+            cacheWrite: 12,
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "text",
+        sessionID: "ses_usage",
+        part: {
+          id: "prt_text",
+          sessionID: "ses_usage",
+          messageID: "msg_usage",
+          type: "text",
+          text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+        },
+      }),
+    ].join("\n")
+
+    expect(extractOpenCodeRunResult(output)).toEqual({
+      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      sessionId: "ses_usage",
+      usage: {
+        costUsd: 0.1234,
+        tokens: {
+          input: 1200,
+          output: 345,
+          reasoning: 67,
+          cacheRead: 890,
+          cacheWrite: 12,
+        },
+      },
+    })
+  })
+
+  test("falls back to assistant info usage when no step-finish part is present", () => {
+    const output = [
+      JSON.stringify({
+        type: "message.updated",
+        sessionID: "ses_assistant",
+        info: {
+          role: "assistant",
+          cost: 0.0456,
+          tokens: {
+            input: 900,
+            output: 120,
+            reasoning: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        },
+        text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      }),
+    ].join("\n")
+
+    expect(extractOpenCodeRunResult(output)).toEqual({
+      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      sessionId: "ses_assistant",
+      usage: {
+        costUsd: 0.0456,
+        tokens: {
+          input: 900,
+          output: 120,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      },
+    })
+  })
+
+  test("extracts nested cache token metadata from OpenCode usage payloads", () => {
+    const output = [
+      JSON.stringify({
+        type: "message.part.updated",
+        sessionID: "ses_nested_usage",
+        part: {
+          id: "prt_finish",
+          sessionID: "ses_nested_usage",
+          messageID: "msg_usage",
+          type: "step-finish",
+          cost: 0.0789,
+          tokens: {
+            input: 700,
+            output: 80,
+            reasoning: 5,
+            cache: {
+              read: 123,
+              write: 45,
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "text",
+        sessionID: "ses_nested_usage",
+        part: {
+          id: "prt_text",
+          sessionID: "ses_nested_usage",
+          messageID: "msg_usage",
+          type: "text",
+          text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+        },
+      }),
+    ].join("\n")
+
+    expect(extractOpenCodeRunResult(output)).toEqual({
+      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      sessionId: "ses_nested_usage",
+      usage: {
+        costUsd: 0.0789,
+        tokens: {
+          input: 700,
+          output: 80,
+          reasoning: 5,
+          cacheRead: 123,
+          cacheWrite: 45,
+        },
+      },
+    })
   })
 
   test("fails on empty output", () => {
@@ -121,7 +257,7 @@ describe("opencode", () => {
       ),
     )
 
-    expect(result).toContain('"summary":"Summary"')
+    expect(result.response).toContain('"summary":"Summary"')
     expect(configDir).not.toBe("")
     expect(existsSync(configDir)).toBe(false)
   })
@@ -208,7 +344,7 @@ describe("opencode", () => {
     )
 
     expect(maxOutputBytes).toBe(10_000_000)
-    expect(result).toBe('{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}')
+    expect(result.response).toBe('{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}')
   })
 
   test("keeps the large review prompt out of the command-line arguments", async () => {

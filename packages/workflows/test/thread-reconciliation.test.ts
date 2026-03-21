@@ -13,6 +13,7 @@ import {
   makeManagedFindingThread,
   makeManagedSummaryThread,
   makeReviewFinding,
+  makeReviewHistoryEntry,
   makeSummarySnapshot,
 } from "./helpers"
 
@@ -32,6 +33,53 @@ describe("thread reconciliation", () => {
 
     expect(summaryContent).toContain("Verdict: **concerns**")
     expect(summaryContent).toContain("<!-- open-azdo-review:")
+  })
+
+  test("renders a review cost history table when present", () => {
+    const reviewState = makeManagedReviewState({
+      reviewHistory: [
+        makeReviewHistoryEntry(),
+        makeReviewHistoryEntry({
+          reviewedAt: "2026-03-21T16:45:00.000Z",
+          reviewedCommit: "follow-up-sha",
+          reviewMode: "follow-up",
+          costUsd: 0.0456,
+          tokens: {
+            input: 900,
+            output: 120,
+            reasoning: 50,
+            cacheRead: 10,
+            cacheWrite: 0,
+          },
+        }),
+      ],
+    })
+
+    const summaryContent = buildSummaryComment(makeSummarySnapshot({}, reviewState))
+
+    expect(summaryContent).toContain("| Review | Reviewed At (UTC) | Mode | Model | Tokens | Cost |")
+    expect(summaryContent).toContain("$0.1234")
+    expect(summaryContent).toContain("$0.0456")
+    expect(summaryContent).toContain("Mar 21, 2026, 4:45 PM")
+    expect(summaryContent).toContain("input 900, output 120, reasoning 50, cache read 10")
+    const historyRows = summaryContent.split("\n").filter((line) => line.startsWith("| [Build "))
+
+    expect(historyRows[0]).toContain("follow-up-sh")
+    expect(historyRows[1]).toContain("reviewed-sha")
+  })
+
+  test("decodes legacy v1 summary comments without review history", () => {
+    const legacyReviewState = {
+      ...makeManagedReviewState(),
+      schemaVersion: 1,
+    }
+    delete legacyReviewState.reviewHistory
+
+    const thread = makeManagedSummaryThread(legacyReviewState)
+
+    const decoded = findManagedSummaryThread([thread])?.reviewState
+    expect(decoded?.schemaVersion).toBe(1)
+    expect(decoded?.reviewHistory).toBeUndefined()
   })
 
   test("renders markdown-friendly inline comments with fenced suggestions", () => {

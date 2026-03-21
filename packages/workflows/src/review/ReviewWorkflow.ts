@@ -14,7 +14,7 @@ import {
 } from "@open-azdo/core/git"
 import { parseJsonUnknown, stringifyJson } from "@open-azdo/core/json"
 import { logError, logInfo, withLogAnnotations } from "@open-azdo/core/logging"
-import { OpenCodeRunner } from "@open-azdo/core/opencode"
+import { OpenCodeRunner, type OpenCodeRunUsage } from "@open-azdo/core/opencode"
 
 import { publishFailureSummary, publishReview } from "./ReviewPublisher"
 import { buildReviewContext, type ReviewMode } from "./ReviewContext"
@@ -26,6 +26,8 @@ import {
   findManagedSummaryThread,
   type ManagedReviewState,
   mergeFollowUpReviewResult,
+  type ReviewHistoryEntry,
+  type ReviewHistoryTokens,
 } from "./ThreadReconciliation"
 
 export type ReviewWorkflowConfig = AzureContext & {
@@ -180,6 +182,71 @@ const decodeOpenCodeResult = (rawResult: string) =>
     }),
   )
 
+const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryTokens | undefined =>
+  usage?.tokens
+    ? {
+        input: usage.tokens.input,
+        output: usage.tokens.output,
+        reasoning: usage.tokens.reasoning,
+        cacheRead: usage.tokens.cacheRead,
+        cacheWrite: usage.tokens.cacheWrite,
+      }
+    : undefined
+
+const buildReviewHistoryEntry = ({
+  reviewedCommit,
+  reviewMode,
+  config,
+  buildLink,
+  usage,
+}: {
+  readonly reviewedCommit: string
+  readonly reviewMode: Exclude<ReviewMode, "skipped">
+  readonly config: ReviewWorkflowConfig
+  readonly buildLink?: string | undefined
+  readonly usage?: OpenCodeRunUsage | undefined
+}): ReviewHistoryEntry => {
+  const tokens = mapUsageTokens(usage)
+
+  return {
+    reviewedCommit,
+    reviewedAt: new Date().toISOString(),
+    reviewMode,
+    model: config.model,
+    ...(config.opencodeVariant ? { variant: config.opencodeVariant } : {}),
+    ...(config.buildNumber ? { buildNumber: config.buildNumber } : {}),
+    ...(config.buildId ? { buildId: config.buildId } : {}),
+    ...(buildLink ? { buildLink } : {}),
+    ...(usage?.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+    ...(tokens ? { tokens } : {}),
+  }
+}
+
+const appendReviewHistoryEntry = ({
+  previousSummaryState,
+  reviewedCommit,
+  reviewMode,
+  config,
+  buildLink,
+  usage,
+}: {
+  readonly previousSummaryState: ManagedReviewState | undefined
+  readonly reviewedCommit: string
+  readonly reviewMode: Exclude<ReviewMode, "skipped">
+  readonly config: ReviewWorkflowConfig
+  readonly buildLink?: string | undefined
+  readonly usage?: OpenCodeRunUsage | undefined
+}): ReadonlyArray<ReviewHistoryEntry> => [
+  ...(previousSummaryState?.reviewHistory ?? []),
+  buildReviewHistoryEntry({
+    reviewedCommit,
+    reviewMode,
+    config,
+    buildLink,
+    usage,
+  }),
+]
+
 const writeReviewWorkflowOutput = (config: ReviewWorkflowConfig, output: ReviewWorkflowOutput) => {
   if (config.json) {
     return writeStdout(
@@ -317,7 +384,7 @@ const runReviewWithResolvedConfig = (
       promptChars: prompt.length,
     })
 
-    const rawResult = yield* openCodeRunner.run({
+    const openCodeResult = yield* openCodeRunner.run({
       workspace: config.workspace,
       model: config.model,
       agent: config.agent,
@@ -327,10 +394,14 @@ const runReviewWithResolvedConfig = (
       inheritedEnv: config.inheritedEnv,
     })
     yield* logInfo("Received OpenCode response.", {
-      responseChars: rawResult.length,
+      responseChars: openCodeResult.response.length,
+      sessionId: openCodeResult.sessionId,
+      costUsd: openCodeResult.usage?.costUsd,
+      inputTokens: openCodeResult.usage?.tokens?.input,
+      outputTokens: openCodeResult.usage?.tokens?.output,
     })
 
-    const reviewResult = yield* decodeOpenCodeResult(rawResult).pipe(
+    const reviewResult = yield* decodeOpenCodeResult(openCodeResult.response).pipe(
       Effect.flatMap((decodedJson) => decodeReviewResult(decodedJson, scopedDiff.changedLinesByFile)),
     )
     yield* logInfo("Decoded review result.", {
@@ -352,10 +423,20 @@ const runReviewWithResolvedConfig = (
           })
         : reviewResult
 
+    const reviewHistory = appendReviewHistoryEntry({
+      previousSummaryState,
+      reviewedCommit: reviewedSourceCommit,
+      reviewMode: reviewMode as Exclude<ReviewMode, "skipped">,
+      config,
+      buildLink,
+      usage: openCodeResult.usage,
+    })
+
     const summaryState = buildManagedReviewState({
       reviewedCommit: reviewedSourceCommit,
       pullRequestBaseRef: fullPullRequestDiff.baseRef,
       reviewResult: outstandingReviewResult,
+      reviewHistory,
     })
     const summaryContent = buildSummaryComment({
       verdict: summaryState.verdict,
