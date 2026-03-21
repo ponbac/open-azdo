@@ -18,6 +18,7 @@ export const makeAzureContext = () =>
 export const makePullRequestMetadata = (overrides: Partial<PullRequestMetadata> = {}): PullRequestMetadata => ({
   title: "Feature PR",
   description: "Adds a new export",
+  workItemRefs: [],
   ...overrides,
 })
 

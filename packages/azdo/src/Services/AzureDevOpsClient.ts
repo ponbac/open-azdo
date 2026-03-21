@@ -3,7 +3,7 @@ import type { Effect, Redacted } from "effect"
 
 import type { AzureContext } from "../context"
 import type { AzureDevOpsDecodeError, AzureDevOpsHttpError } from "../errors"
-import type { ExistingThread, PullRequestMetadata } from "../Schemas"
+import type { ExistingThread, PullRequestMetadata, PullRequestWorkItem, PullRequestWorkItemRef } from "../Schemas"
 
 export type AzureRequestContext = {
   readonly context: AzureContext
@@ -30,6 +30,11 @@ export interface AzureDevOpsClientShape {
   readonly getPullRequestMetadata: (
     input: AzureRequestContext,
   ) => Effect.Effect<PullRequestMetadata, AzureDevOpsHttpError | AzureDevOpsDecodeError>
+  readonly getPullRequestWorkItems: (
+    input: AzureRequestContext & {
+      readonly workItemRefs: ReadonlyArray<PullRequestWorkItemRef>
+    },
+  ) => Effect.Effect<ReadonlyArray<PullRequestWorkItem>, AzureDevOpsHttpError | AzureDevOpsDecodeError>
   readonly listThreads: (
     input: AzureRequestContext,
   ) => Effect.Effect<ReadonlyArray<ExistingThread>, AzureDevOpsHttpError | AzureDevOpsDecodeError>

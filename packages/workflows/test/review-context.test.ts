@@ -128,4 +128,75 @@ describe("review context", () => {
     expect(serialized).not.toContain("--- a/src/huge.ts")
     expect(serialized).not.toContain("+++ b/src/huge.ts")
   })
+
+  test("includes bounded connected work item context", () => {
+    const context = buildReviewContext({
+      metadata: {
+        title: "Feature PR",
+        description: "Adds a new export",
+        workItemRefs: [{ id: "123" }, { id: "456" }],
+      },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        diffText: "",
+        changedFiles: [],
+        changedLinesByFile: new Map(),
+        deletedLinesByFile: new Map(),
+      },
+      connectedWorkItems: [
+        {
+          id: 123,
+          title: "Bug",
+          workItemType: "Bug",
+          state: "Active",
+          tags: ["one"],
+          descriptionMarkdown: "d".repeat(810),
+          recentComments: [
+            {
+              author: "Reviewer",
+              createdAt: "2026-03-21T10:00:00.000Z",
+              markdown: "c".repeat(410),
+            },
+          ],
+          related: [
+            { id: 10, title: "A" },
+            { id: 11, title: "B" },
+            { id: 12, title: "C" },
+            { id: 13, title: "D" },
+            { id: 14, title: "E" },
+          ],
+        },
+      ],
+    })
+
+    expect(context.connectedWorkItems).toEqual({
+      omittedCount: 1,
+      items: [
+        {
+          id: 123,
+          title: "Bug",
+          workItemType: "Bug",
+          state: "Active",
+          tags: ["one"],
+          descriptionMarkdown: `${"d".repeat(800)}... [truncated]`,
+          related: [
+            { id: 10, title: "A" },
+            { id: 11, title: "B" },
+            { id: 12, title: "C" },
+            { id: 13, title: "D" },
+          ],
+          recentComments: [
+            {
+              author: "Reviewer",
+              createdAt: "2026-03-21T10:00:00.000Z",
+              markdown: `${"c".repeat(400)}... [truncated]`,
+            },
+          ],
+        },
+      ],
+    })
+  })
 })
