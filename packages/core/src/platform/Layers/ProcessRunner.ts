@@ -5,6 +5,7 @@ import { Effect, Layer, Option, Stream } from "effect"
 import * as Duration from "effect/Duration"
 
 import { CommandExecutionError } from "../../errors"
+import { formatUnknownDetail } from "../../format-unknown"
 import { logError, logInfo, truncateForLog } from "../../Logging"
 import { ProcessRunner, type CommandExecutionResult, type ExecuteCommandInput } from "../Services/ProcessRunner"
 
@@ -125,7 +126,7 @@ const makeProcessRunner = Effect.gen(function* () {
         .spawn(command)
         .pipe(
           Effect.mapError((error) =>
-            toCommandExecutionError(input, `Failed to start ${commandLabel(input)}: ${String(error)}`),
+            toCommandExecutionError(input, `Failed to start ${commandLabel(input)}: ${formatUnknownDetail(error)}`),
           ),
         )
 

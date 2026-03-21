@@ -21,7 +21,8 @@
   },
   "scripts": {
     "build": "bun run build.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck:tsc": "tsc --noEmit",
     "test": "bun test",
     "prepublishOnly": "bun install --cwd ../.. --frozen-lockfile && bun run --cwd ../.. check && bun run build"
   },

@@ -4,6 +4,7 @@ import * as Path from "effect/Path"
 import { Effect, Layer } from "effect"
 
 import { OpenCodeInvocationError, OpenCodeOutputError } from "../../errors"
+import { formatUnknownDetail } from "../../format-unknown"
 import { stringifyJson } from "../../Json"
 import { logError, logInfo, truncateForLog } from "../../Logging"
 import { ProcessRunner } from "../../process-runner"
@@ -81,8 +82,12 @@ export const extractFinalResponse = (output: string) => {
       return trimmed.length > 0 ? trimmed : undefined
     }
 
-    if (typeof value !== "object" || Array.isArray(value)) {
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
       return String(value)
+    }
+
+    if (typeof value !== "object" || Array.isArray(value)) {
+      return undefined
     }
 
     const record = value as Record<string, unknown>
@@ -232,7 +237,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
           (error) =>
             new OpenCodeOutputError({
               message: "Failed to create OpenCode temp directory.",
-              output: String(error),
+              output: formatUnknownDetail(error),
             }),
         ),
       )
@@ -251,7 +256,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
           (error) =>
             new OpenCodeOutputError({
               message: "Failed to write temporary OpenCode configuration.",
-              output: String(error),
+              output: formatUnknownDetail(error),
             }),
         ),
       )
@@ -314,7 +319,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
             ? error
             : new OpenCodeOutputError({
                 message: "OpenCode did not return a valid final response.",
-                output: String(error),
+                output: formatUnknownDetail(error),
               }),
       }).pipe(
         Effect.tapError((error) =>

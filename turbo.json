@@ -11,6 +11,11 @@
       "inputs": ["$TURBO_DEFAULT$", "!.turbo/**", "!dist/**", "!coverage/**", "!tsconfig.tsbuildinfo"],
       "outputs": []
     },
+    "typecheck:tsc": {
+      "dependsOn": ["^typecheck:tsc"],
+      "inputs": ["$TURBO_DEFAULT$", "!.turbo/**", "!dist/**", "!coverage/**", "!tsconfig.tsbuildinfo"],
+      "outputs": []
+    },
     "test": {
       "dependsOn": ["^test"],
       "inputs": ["$TURBO_DEFAULT$", "!.turbo/**", "!dist/**", "!coverage/**", "!tsconfig.tsbuildinfo"],

@@ -13,7 +13,8 @@
     "./opencode": "./src/opencode.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck:tsc": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {

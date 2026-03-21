@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node"],
-  "ignorePatterns": [".reference/**", "node_modules/**", ".turbo/**", "dist/**", "coverage/**", "tmp/**"],
+  "ignorePatterns": [".reference/**", "node_modules/**", ".turbo/**", "dist/**", "coverage/**", "tmp/**", "**/*.js", "**/*.d.ts"],
   "rules": {
     "typescript/consistent-type-imports": "error",
     "import/no-cycle": "error",

@@ -20,6 +20,10 @@ bun install
 bun run check
 bun run build
 bun run test
+bun run typecheck
+bun run typecheck:tsc
+bun run lint
+bun run lint:syntax
 bun run publish:dry
 bun run publish:npm
 ```
@@ -27,10 +31,40 @@ bun run publish:npm
 Focused iteration is fine during development:
 
 ```bash
-bun run --cwd apps/open-azdo test
 bun run --cwd packages/core typecheck
+bun run --cwd packages/core typecheck:tsc
+bun run --cwd apps/open-azdo test
 bun run --cwd packages/workflows test
 ```
+
+## TypeScript Tooling
+
+This repo uses two TypeScript lanes:
+
+- Default command lane: TS7 via `@typescript/native-preview` and `tsgo`.
+- Editor and fallback lane: regular `typescript`, pinned to the v6 prerelease workspace SDK.
+
+Current defaults:
+
+```bash
+bun run typecheck      # TS7 via tsgo across workspaces
+bun run lint           # TS7-backed Oxlint type-aware linting
+bun run check          # fmt + TS7-backed lint + test
+```
+
+Fallback commands:
+
+```bash
+bun run typecheck:tsc
+bun run --cwd packages/core typecheck:tsc
+bun run lint:syntax
+```
+
+The workspace editor TypeScript SDK remains `node_modules/typescript/lib`, so Effect language-service continues to run against the installed `typescript` package rather than TS7 `tsgo`.
+
+Generated `**/*.js` and `**/*.d.ts` files are intentionally excluded from linting so Oxlint's type-aware mode only reports on source TypeScript.
+
+The TS6/TS7 migration helpers `ts5to6` and `ts-fix-baseurl` were researched, but this repo's current `tsconfig` shape does not require them.
 
 To publish the CLI package from the repo root, use Bun's built-in publish command with the app workspace as the working directory:
 

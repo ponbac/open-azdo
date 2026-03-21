@@ -28,10 +28,25 @@
 - `bun run check`
 - `bun run build`
 - `bun run test`
+- `bun run typecheck`
+- `bun run typecheck:tsc`
+- `bun run lint`
+- `bun run lint:syntax`
 - `bun run --cwd apps/open-azdo test`
 - `bun run --cwd packages/core typecheck`
+- `bun run --cwd packages/core typecheck:tsc`
 - `bun run --cwd packages/azdo test`
 - `bun run --cwd packages/workflows test`
+
+# TypeScript Tooling Policy
+
+- Default command lane is TS7 via `@typescript/native-preview` and `tsgo`.
+- Explicit fallback lane is regular `typescript`, exposed through `typecheck:tsc`.
+- Root `lint` is TS7-backed Oxlint type-aware linting.
+- Root `check` relies on TS7-backed linting rather than a separate `tsc` gate.
+- Workspace editor TypeScript remains `node_modules/typescript/lib`, so Effect language-service continues using the installed `typescript` package.
+- Generated `**/*.js` and `**/*.d.ts` files are intentionally excluded from linting.
+- `ts5to6` and related migration helpers were researched but are not needed for the current `tsconfig` shape.
 
 # Task Completion Requirements
 
