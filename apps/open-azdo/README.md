@@ -9,10 +9,11 @@ This package is the published-package path for secure PR review automation. Unli
 - edit the repository
 - commit or push changes
 - expose command-triggered execution modes
-- run a long-lived OpenCode server
+- rely on a persistent or shared OpenCode server
 - rely on tokenized clone URLs
 
 The CLI consumes the Azure Pipeline checkout workspace directly and uses the built-in `System.AccessToken` for the minimal Azure DevOps REST surface.
+Each review run starts a short-lived localhost OpenCode server, prompts it through the SDK v2 client with JSON-schema structured output, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
 
 ## Install And Run
 

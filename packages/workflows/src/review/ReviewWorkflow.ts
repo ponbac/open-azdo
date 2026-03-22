@@ -1,3 +1,5 @@
+import { jsonrepair } from "jsonrepair"
+
 import * as Stdio from "effect/Stdio"
 import * as Stream from "effect/Stream"
 import { Cause, Effect, Exit, type Redacted } from "effect"
@@ -12,13 +14,13 @@ import {
   resolveReviewedSourceCommit,
   type PullRequestDiff,
 } from "@open-azdo/core/git"
-import { parseJsonUnknown, stringifyJson } from "@open-azdo/core/json"
+import { stringifyJson } from "@open-azdo/core/json"
 import { logError, logInfo, withLogAnnotations } from "@open-azdo/core/logging"
-import { OpenCodeRunner, type OpenCodeRunUsage } from "@open-azdo/core/opencode"
+import { OpenCodeRunner, type OpenCodeRunResult, type OpenCodeRunUsage } from "@open-azdo/core/opencode"
 
 import { publishFailureSummary, publishReview } from "./ReviewPublisher"
 import { buildReviewContext, type ReviewMode } from "./ReviewContext"
-import { decodeReviewResult } from "./ReviewOutput"
+import { decodeReviewResult, ReviewResultJsonSchema } from "./ReviewOutput"
 import { buildReviewPrompt } from "./ReviewPrompt"
 import {
   buildManagedReviewState,
@@ -59,6 +61,14 @@ type ResolvedReviewScope = {
   readonly reviewMode: ReviewMode
   readonly scopedDiff: PullRequestDiff
   readonly previousReviewedCommit: string | undefined
+}
+
+type ReviewResultSource = "structured" | "repaired" | "fallback"
+
+const REVIEW_OUTPUT_FORMAT = {
+  type: "json_schema" as const,
+  schema: ReviewResultJsonSchema,
+  retryCount: 2,
 }
 
 const writeStdout = Effect.fn("ReviewWorkflow.writeStdout")(function* (text: string) {
@@ -169,18 +179,64 @@ const resolveReviewScope = ({
     } satisfies ResolvedReviewScope
   })
 
-const decodeOpenCodeResult = (rawResult: string) =>
-  parseJsonUnknown(rawResult).pipe(
-    Effect.match({
-      onFailure: () => ({
-        summary: rawResult,
-        verdict: "concerns",
-        findings: [],
-        unmappedNotes: [],
-      }),
-      onSuccess: (decodedJson) => decodedJson,
-    }),
-  )
+const decodeStructuredReviewResult = ({
+  openCodeResult,
+  changedLinesByFile,
+}: {
+  readonly openCodeResult: OpenCodeRunResult
+  readonly changedLinesByFile: Map<string, Set<number>>
+}) =>
+  Effect.gen(function* () {
+    const decodeCandidate = (payload: unknown) =>
+      decodeReviewResult(payload, changedLinesByFile).pipe(Effect.orElseSucceed(() => undefined))
+
+    if (openCodeResult.structured !== undefined) {
+      const structuredReviewResult = yield* decodeCandidate(openCodeResult.structured)
+      if (structuredReviewResult) {
+        return {
+          reviewResult: structuredReviewResult,
+          source: "structured" as const,
+        } as const
+      }
+    }
+
+    const repairedPayload = yield* Effect.try({
+      try: () => JSON.parse(jsonrepair(openCodeResult.response)) as unknown,
+      catch: () => undefined,
+    })
+
+    if (repairedPayload !== undefined) {
+      const repairedReviewResult = yield* decodeCandidate(repairedPayload)
+      if (repairedReviewResult) {
+        return {
+          reviewResult: repairedReviewResult,
+          source: "repaired" as const,
+        } as const
+      }
+    }
+
+    return {
+      reviewResult: yield* decodeReviewResult(
+        {
+          summary:
+            openCodeResult.response.trim() ||
+            openCodeResult.modelError?.message ||
+            "OpenCode did not return structured review output.",
+          verdict: "concerns",
+          findings: [],
+          unmappedNotes: [],
+        },
+        changedLinesByFile,
+      ),
+      source: "fallback" as const,
+    } as const
+  })
+
+const reviewResultSourceLogFields = (source: ReviewResultSource) => ({
+  structuredDelivered: source === "structured",
+  structuredRecovered: source === "repaired",
+  structuredFallback: source === "fallback",
+})
 
 const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryTokens | undefined =>
   usage?.tokens
@@ -422,6 +478,7 @@ const runReviewWithResolvedConfig = (
       timeout: config.opencodeTimeout,
       prompt,
       inheritedEnv: config.inheritedEnv,
+      format: REVIEW_OUTPUT_FORMAT,
     })
     yield* logInfo("Received OpenCode response.", {
       responseChars: openCodeResult.response.length,
@@ -429,11 +486,16 @@ const runReviewWithResolvedConfig = (
       costUsd: openCodeResult.usage?.costUsd,
       inputTokens: openCodeResult.usage?.tokens?.input,
       outputTokens: openCodeResult.usage?.tokens?.output,
+      structuredRequested: true,
+      structuredDelivered: openCodeResult.structured !== undefined,
+      structuredErrorName: openCodeResult.modelError?.name,
+      structuredErrorRetries: openCodeResult.modelError?.retries,
     })
 
-    const reviewResult = yield* decodeOpenCodeResult(openCodeResult.response).pipe(
-      Effect.flatMap((decodedJson) => decodeReviewResult(decodedJson, scopedDiff.changedLinesByFile)),
-    )
+    const { reviewResult, source } = yield* decodeStructuredReviewResult({
+      openCodeResult,
+      changedLinesByFile: scopedDiff.changedLinesByFile,
+    })
     yield* logInfo("Decoded review result.", {
       reviewMode,
       verdict: reviewResult.verdict,
@@ -441,6 +503,7 @@ const runReviewWithResolvedConfig = (
       inlineFindings: reviewResult.inlineFindings.length,
       summaryOnlyFindings: reviewResult.summaryOnlyFindings.length,
       unmappedNotes: reviewResult.unmappedNotes.length,
+      ...reviewResultSourceLogFields(source),
     })
 
     const outstandingReviewResult =

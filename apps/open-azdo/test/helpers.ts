@@ -9,7 +9,7 @@ import { Effect, Layer, Logger, Option } from "effect"
 
 import { AzureDevOpsClientLive } from "@open-azdo/azdo/client"
 import { GitExecLive } from "@open-azdo/core/git"
-import { OpenCodeRunnerLive } from "@open-azdo/core/opencode"
+import { OpenCodeRunner, OpenCodeRunnerLive, type OpenCodeRunnerShape } from "@open-azdo/core/opencode"
 import { ProcessRunnerLive } from "@open-azdo/core/process-runner"
 
 import { AppConfig, makeAppConfigLayer, type ReviewCliInput } from "../src/AppConfig"
@@ -78,12 +78,26 @@ const SilentLoggerLayer = Logger.layer([Logger.make(() => undefined)], {
 
 const SilentBaseRuntimeLayer = Layer.mergeAll(BunServices.layer, SilentLoggerLayer)
 
-export const makeSilentRuntimeLayer = (cliInput: ReviewCliInput) => {
+export const makeOpenCodeRunner = (
+  run: OpenCodeRunnerShape["run"] = () =>
+    Effect.die("OpenCodeRunner was used in a test without a configured implementation."),
+): OpenCodeRunner["Service"] => ({
+  run,
+})
+
+export const makeSilentRuntimeLayer = (
+  cliInput: ReviewCliInput,
+  options?: {
+    readonly openCodeRunner?: OpenCodeRunner["Service"]
+  },
+) => {
   const appConfigLayer = makeAppConfigLayer(cliInput)
   const processRunnerLayer = ProcessRunnerLive.pipe(Layer.provide(SilentBaseRuntimeLayer))
   const platformLayer = Layer.mergeAll(SilentBaseRuntimeLayer, processRunnerLayer)
   const gitExecLayer = GitExecLive.pipe(Layer.provide(processRunnerLayer))
-  const openCodeRunnerLayer = OpenCodeRunnerLive.pipe(Layer.provide(platformLayer))
+  const openCodeRunnerLayer = options?.openCodeRunner
+    ? Layer.succeed(OpenCodeRunner, options.openCodeRunner)
+    : OpenCodeRunnerLive.pipe(Layer.provide(platformLayer))
 
   return Layer.mergeAll(platformLayer, appConfigLayer, gitExecLayer, AzureDevOpsClientLive, openCodeRunnerLayer)
 }
