@@ -1,6 +1,12 @@
-import { Effect, Layer, Redacted, Schema } from "effect"
+import { Effect, Layer, Schema, type Redacted } from "effect"
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientError,
+  HttpClientRequest,
+  HttpClientResponse,
+} from "effect/unstable/http"
 
-import { parseJsonUnknown, stringifyJson } from "@open-azdo/core/json"
 import { logInfo } from "@open-azdo/core/logging"
 
 import { normalizeWorkItemMarkdown, renderWorkItemMarkdown } from "../WorkItemMarkdown"
@@ -16,9 +22,7 @@ import {
 import {
   ExistingThreadsResponseSchema,
   PullRequestMetadataResponseSchema,
-  type ExistingThreadsResponse,
-  type WorkItemCommentsResponse,
-  type WorkItemsBatchResponse,
+  PullRequestWorkItemsResponseSchema,
   WorkItemCommentsResponseSchema,
   WorkItemsBatchResponseSchema,
   readAssignedToDisplayName,
@@ -30,7 +34,7 @@ import {
 const MAX_CONNECTED_WORK_ITEMS = 4
 const MAX_WORK_ITEM_COMMENTS = 3
 const MAX_WORK_ITEM_BATCH_IDS = 200
-const MAX_RELATED_TITLES = 4
+const MAX_RELATED_TITLES_PER_WORK_ITEM = 4
 const WORK_ITEM_FIELDS = [
   "System.Id",
   "System.Title",
@@ -46,35 +50,15 @@ const WORK_ITEM_FIELDS = [
   "System.Tags",
 ] as const
 
-const createHeaders = (token: Redacted.Redacted<string>) => ({
-  authorization: `Bearer ${Redacted.value(token)}`,
-  "content-type": "application/json",
-})
+const normalizeCollectionUrl = (collectionUrl: string) => collectionUrl.replace(/\/+$/, "")
 
-const buildPullRequestUrl = (context: AzureContext) =>
-  `${context.collectionUrl.replace(/\/+$/, "")}/${encodeURIComponent(context.project)}/_apis/git/repositories/${encodeURIComponent(
-    context.repositoryId,
-  )}/pullRequests/${context.pullRequestId}`
+const buildProjectApiBaseUrl = (context: AzureContext) =>
+  `${normalizeCollectionUrl(context.collectionUrl)}/${encodeURIComponent(context.project)}/_apis`
 
-type WorkItemEndpoint = {
-  readonly collectionUrl: string
-  readonly project: string
-}
+const buildPullRequestPath = (context: AzureContext) =>
+  `/git/repositories/${encodeURIComponent(context.repositoryId)}/pullRequests/${context.pullRequestId}`
 
-type WorkItemRequestTarget = WorkItemEndpoint & {
-  readonly workItemId: number
-}
-
-const buildDefaultWorkItemEndpoint = (context: AzureContext): WorkItemEndpoint => ({
-  collectionUrl: context.collectionUrl.replace(/\/+$/, ""),
-  project: context.project,
-})
-
-const buildWorkItemsBatchUrl = (endpoint: WorkItemEndpoint) =>
-  `${endpoint.collectionUrl}/${encodeURIComponent(endpoint.project)}/_apis/wit/workitemsbatch?api-version=7.1`
-
-const buildWorkItemCommentsUrl = (target: WorkItemRequestTarget) =>
-  `${target.collectionUrl}/${encodeURIComponent(target.project)}/_apis/wit/workItems/${target.workItemId}/comments?$top=20&$expand=renderedText&api-version=7.1-preview.4`
+const buildPullRequestWorkItemsPath = (context: AzureContext) => `${buildPullRequestPath(context)}/workitems`
 
 const normalizeOptionalString = (value: string | null | undefined) => {
   const trimmed = value?.trim()
@@ -99,14 +83,7 @@ const parseIntegerLike = (value: unknown) => {
   return undefined
 }
 
-const readNumberField = (fields: Record<string, unknown> | undefined, key: string) => {
-  return parseIntegerLike(fields?.[key])
-}
-
-const toWorkItemRequestTarget = (endpoint: WorkItemEndpoint, workItemId: number): WorkItemRequestTarget => ({
-  ...endpoint,
-  workItemId,
-})
+const readNumberField = (fields: Record<string, unknown> | undefined, key: string) => parseIntegerLike(fields?.[key])
 
 const splitTags = (tags: string | undefined) =>
   tags
@@ -128,12 +105,7 @@ const parseWorkItemIdFromUrl = (url: string | undefined): number | undefined => 
       return undefined
     }
 
-    const workItemId = parseIntegerLike(segments[apisIndex + 3])
-    if (workItemId === undefined) {
-      return undefined
-    }
-
-    return workItemId
+    return parseIntegerLike(segments[apisIndex + 3])
   } catch {
     return undefined
   }
@@ -152,52 +124,22 @@ const readRelationWorkItemIds = (
     .map(readRelationWorkItemId)
     .filter((id): id is number => id !== undefined)
 
-const isTitleRelationType = (relationType: string | null | undefined) =>
-  relationType === "System.LinkTypes.Hierarchy-Reverse" || relationType === "System.LinkTypes.Related"
+const selectRelationTitleIds = (workItem: WorkItemBatchItem) => [
+  ...readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Hierarchy-Reverse").slice(0, 1),
+  ...readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Related").slice(0, MAX_RELATED_TITLES_PER_WORK_ITEM),
+]
 
-const extractRelationTargets = (
-  items: ReadonlyArray<WorkItemBatchItem>,
-  defaultEndpoint: WorkItemEndpoint,
-): ReadonlyArray<WorkItemRequestTarget> => {
-  const relatedTargets = new Map<string, WorkItemRequestTarget>()
+const extractRelationTitleIds = (items: ReadonlyArray<WorkItemBatchItem>) => {
+  const ids = new Set<number>()
 
   for (const item of items) {
-    for (const relation of item.relations ?? []) {
-      if (!isTitleRelationType(relation.rel)) {
-        continue
-      }
-
-      const relationId = readRelationWorkItemId(relation)
-
-      if (relationId !== undefined) {
-        const relationTarget = toWorkItemRequestTarget(defaultEndpoint, relationId)
-        relatedTargets.set(
-          `${relationTarget.collectionUrl}::${relationTarget.project}::${relationTarget.workItemId}`,
-          relationTarget,
-        )
-      }
+    for (const relationId of selectRelationTitleIds(item)) {
+      ids.add(relationId)
     }
   }
 
-  return [...relatedTargets.values()]
+  return [...ids]
 }
-
-const extractRenderedRelations = (relations: WorkItemBatchItem["relations"]) => [
-  ...(relations ?? []).filter((relation) => relation.rel === "System.LinkTypes.Hierarchy-Reverse").slice(0, 1),
-  ...(relations ?? []).filter((relation) => relation.rel === "System.LinkTypes.Related").slice(0, MAX_RELATED_TITLES),
-]
-
-const extractRenderedRelationTargets = (
-  items: ReadonlyArray<WorkItemBatchItem>,
-  defaultEndpoint: WorkItemEndpoint,
-): ReadonlyArray<WorkItemRequestTarget> =>
-  extractRelationTargets(
-    items.map((item) => ({
-      ...item,
-      relations: extractRenderedRelations(item.relations),
-    })),
-    defaultEndpoint,
-  )
 
 const chunkIds = (ids: ReadonlyArray<number>, size: number) => {
   const chunks: number[][] = []
@@ -209,60 +151,74 @@ const chunkIds = (ids: ReadonlyArray<number>, size: number) => {
   return chunks
 }
 
-const groupTargetsByEndpoint = <T extends WorkItemRequestTarget>(targets: ReadonlyArray<T>) => {
-  const groups = new Map<string, { endpoint: WorkItemEndpoint; targets: T[] }>()
+const makeProjectClient = (
+  context: AzureContext,
+  token: Redacted.Redacted<string>,
+  httpClient: HttpClient.HttpClient,
+) =>
+  httpClient.pipe(
+    HttpClient.mapRequest((request) =>
+      request.pipe(
+        HttpClientRequest.prependUrl(buildProjectApiBaseUrl(context)),
+        HttpClientRequest.bearerToken(token),
+        HttpClientRequest.acceptJson,
+      ),
+    ),
+  )
 
-  for (const target of targets) {
-    const key = `${target.collectionUrl}::${target.project}`
-    const group = groups.get(key)
-    if (group) {
-      group.targets.push(target)
-      continue
+const toAzureDevOpsClientError =
+  (request: HttpClientRequest.HttpClientRequest) =>
+  (error: unknown): AzureDevOpsHttpError | AzureDevOpsDecodeError => {
+    if (Schema.isSchemaError(error)) {
+      return new AzureDevOpsDecodeError({
+        message: "Azure DevOps response did not match the expected schema.",
+        url: request.url,
+        body: error.message,
+        issues: [error.message],
+      })
     }
 
-    groups.set(key, {
-      endpoint: {
-        collectionUrl: target.collectionUrl,
-        project: target.project,
-      },
-      targets: [target],
+    if (HttpClientError.isHttpClientError(error)) {
+      return new AzureDevOpsHttpError({
+        message: error.message,
+        url: request.url,
+        status: error.response?.status ?? -1,
+        body: error.message,
+      })
+    }
+
+    return new AzureDevOpsHttpError({
+      message: "Azure DevOps request failed before a valid response was received.",
+      url: request.url,
+      status: -1,
+      body: String(error),
     })
   }
 
-  return [...groups.values()]
-}
+const executeJson = <A>(
+  client: HttpClient.HttpClient,
+  request: HttpClientRequest.HttpClientRequest,
+  schema: Schema.Codec<A, unknown, never, never>,
+): Effect.Effect<A, AzureDevOpsHttpError | AzureDevOpsDecodeError> =>
+  client
+    .execute(request)
+    .pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
+      Effect.mapError(toAzureDevOpsClientError(request)),
+    )
 
-const parseSelectedWorkItemTargets = Effect.fn("AzureDevOpsClient.parseSelectedWorkItemTargets")(function* ({
-  context,
-  workItemRefs,
-}: {
-  readonly context: AzureContext
-  readonly workItemRefs: ReadonlyArray<PullRequestWorkItemRef>
-}) {
-  const defaultEndpoint = buildDefaultWorkItemEndpoint(context)
-  const selectedTargets: WorkItemRequestTarget[] = []
-
-  for (const workItemRef of workItemRefs.slice(0, MAX_CONNECTED_WORK_ITEMS)) {
-    const parsed = Number.parseInt(workItemRef.id, 10)
-
-    if (Number.isFinite(parsed)) {
-      selectedTargets.push(
-        toWorkItemRequestTarget(
-          defaultEndpoint,
-          parseWorkItemIdFromUrl(normalizeOptionalString(workItemRef.url)) ?? parsed,
-        ),
-      )
-      continue
-    }
-
-    yield* logInfo("Ignoring pull-request work item ref with a non-numeric id.", {
-      pullRequestId: context.pullRequestId,
-      workItemId: workItemRef.id,
-    })
-  }
-
-  return selectedTargets
-})
+const executeOk = (
+  client: HttpClient.HttpClient,
+  request: HttpClientRequest.HttpClientRequest,
+): Effect.Effect<void, AzureDevOpsHttpError | AzureDevOpsDecodeError> =>
+  client
+    .execute(request)
+    .pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.mapError(toAzureDevOpsClientError(request)),
+      Effect.asVoid,
+    )
 
 const withLoggedEmptyFallback = <A>(
   effect: Effect.Effect<A, AzureDevOpsHttpError | AzureDevOpsDecodeError>,
@@ -294,6 +250,44 @@ const withLoggedEmptyFallback = <A>(
     }),
   )
 
+const parseWorkItemIds = Effect.fn("AzureDevOpsClient.parseWorkItemIds")(function* ({
+  context,
+  workItemRefs,
+}: {
+  readonly context: AzureContext
+  readonly workItemRefs: ReadonlyArray<PullRequestWorkItemRef>
+}) {
+  const workItemIds: number[] = []
+
+  for (const workItemRef of workItemRefs) {
+    const parsedId = parseIntegerLike(workItemRef.id)
+    const workItemId = parseWorkItemIdFromUrl(normalizeOptionalString(workItemRef.url)) ?? parsedId
+
+    if (workItemId !== undefined) {
+      workItemIds.push(workItemId)
+      continue
+    }
+
+    yield* logInfo("Ignoring pull-request work item ref with a non-numeric id.", {
+      pullRequestId: context.pullRequestId,
+      workItemId: workItemRef.id,
+    })
+  }
+
+  return workItemIds
+})
+
+const mapPullRequestWorkItemRefs = (
+  workItemRefs: ReadonlyArray<{
+    readonly id: string
+    readonly url?: string | null | undefined
+  }>,
+): PullRequestWorkItemRef[] =>
+  workItemRefs.map((workItemRef) => ({
+    id: workItemRef.id,
+    ...(workItemRef.url ? { url: workItemRef.url } : {}),
+  }))
+
 const toPullRequestWorkItem = Effect.fn("AzureDevOpsClient.toPullRequestWorkItem")(function* ({
   workItem,
   titleMap,
@@ -313,7 +307,6 @@ const toPullRequestWorkItem = Effect.fn("AzureDevOpsClient.toPullRequestWorkItem
 
   const parentRelations = readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Hierarchy-Reverse")
   const relatedRelations = readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Related")
-
   const priority = readNumberField(workItem.fields, "Microsoft.VSTS.Common.Priority")
   const assignedTo = readAssignedToDisplayName(workItem.fields?.["System.AssignedTo"])
   const iterationPath = readStringField(workItem.fields, "System.IterationPath")
@@ -349,106 +342,16 @@ const toPullRequestWorkItem = Effect.fn("AzureDevOpsClient.toPullRequestWorkItem
   } satisfies PullRequestWorkItem
 })
 
-const requestUnknown = Effect.fn("AzureDevOpsClient.requestUnknown")(function* (url: string, init: RequestInit) {
-  const text = yield* Effect.tryPromise({
-    try: async () => {
-      const response = await globalThis.fetch(url, init)
-      const responseText = await response.text()
-
-      if (!response.ok) {
-        throw new AzureDevOpsHttpError({
-          message: `Azure DevOps request failed with status ${response.status}.`,
-          url,
-          status: response.status,
-          body: responseText,
-        })
-      }
-
-      return responseText
-    },
-    catch: (error) => {
-      if (error instanceof AzureDevOpsHttpError) {
-        return error
-      }
-
-      return new AzureDevOpsHttpError({
-        message: "Azure DevOps request failed before a valid response was received.",
-        url,
-        status: -1,
-        body: String(error),
-      })
-    },
-  })
-
-  if (!text) {
-    return {}
-  }
-
-  return yield* parseJsonUnknown(text).pipe(
-    Effect.mapError(
-      (error) =>
-        new AzureDevOpsDecodeError({
-          message: error.message,
-          url,
-          body: text,
-          issues: [error.message],
-        }),
-    ),
-  )
-})
-
-const toDecodeError = (url: string, payload: unknown, error: unknown) =>
-  new AzureDevOpsDecodeError({
-    message: "Azure DevOps response did not match the expected schema.",
-    url,
-    body: stringifyJson(payload),
-    issues: [String(error)],
-  })
-
-const requestSchemaWithBody = <A>(
-  url: string,
-  init: RequestInit,
-  schema: Schema.Schema<A>,
-): Effect.Effect<A, AzureDevOpsHttpError | AzureDevOpsDecodeError> =>
-  requestUnknown(url, init).pipe(
-    Effect.flatMap((payload) =>
-      Effect.try({
-        try: () => Schema.decodeUnknownSync(schema as never)(payload) as A,
-        catch: (error) => toDecodeError(url, payload, error),
-      }),
-    ),
-  )
-
-const makeAzureDevOpsClient = Effect.sync(() => {
-  const getPullRequestMetadata: AzureDevOpsClient["Service"]["getPullRequestMetadata"] = Effect.fn(
-    "AzureDevOpsClient.getPullRequestMetadata",
-  )(function* ({ context, token }: AzureRequestContext) {
-    const url = `${buildPullRequestUrl(context)}?includeWorkItemRefs=true&api-version=7.1`
-    const metadata: Schema.Schema.Type<typeof PullRequestMetadataResponseSchema> = yield* requestSchemaWithBody(
-      url,
-      { method: "GET", headers: createHeaders(token) },
-      PullRequestMetadataResponseSchema,
-    )
-
-    return {
-      title: metadata.title,
-      description: metadata.description ?? "",
-      ...(metadata.url ? { url: metadata.url } : {}),
-      workItemRefs: (metadata.workItemRefs ?? []).map((workItemRef) => ({
-        id: workItemRef.id,
-        ...(workItemRef.url ? { url: workItemRef.url } : {}),
-      })),
-    }
-  })
+const makeAzureDevOpsClient = Effect.gen(function* () {
+  const httpClient = yield* HttpClient.HttpClient
 
   const fetchWorkItemsBatch = Effect.fn("AzureDevOpsClient.fetchWorkItemsBatch")(function* ({
+    context,
     token,
-    endpoint,
     ids,
     fields,
     includeRelations,
-  }: Pick<AzureRequestContext, "token"> & {
-    readonly endpoint: WorkItemEndpoint
+  }: AzureRequestContext & {
     readonly ids: ReadonlyArray<number>
     readonly fields: ReadonlyArray<string>
     readonly includeRelations: boolean
@@ -457,50 +360,46 @@ const makeAzureDevOpsClient = Effect.sync(() => {
       return [] as WorkItemBatchItem[]
     }
 
-    const response: WorkItemsBatchResponse = yield* requestSchemaWithBody(
-      buildWorkItemsBatchUrl(endpoint),
-      {
-        method: "POST",
-        headers: createHeaders(token),
-        body: stringifyJson({
-          ids,
-          fields,
-          errorPolicy: "omit",
-          ...(includeRelations ? { $expand: "Relations" } : {}),
-        }),
-      },
-      WorkItemsBatchResponseSchema,
+    const client = makeProjectClient(context, token, httpClient)
+    const request = HttpClientRequest.post("/wit/workitemsbatch").pipe(
+      HttpClientRequest.setUrlParams({
+        "api-version": "7.1",
+      }),
     )
+    const requestWithBody = yield* HttpClientRequest.bodyJson(request, {
+      ids,
+      fields,
+      errorPolicy: "omit",
+      ...(includeRelations ? { $expand: "Relations" } : {}),
+    }).pipe(Effect.mapError(toAzureDevOpsClientError(request)))
+    const response = yield* executeJson(client, requestWithBody, WorkItemsBatchResponseSchema)
 
     return response.value ?? []
   })
 
   const fetchWorkItemTitleMap = Effect.fn("AzureDevOpsClient.fetchWorkItemTitleMap")(function* ({
+    context,
     token,
-    targets,
-  }: Pick<AzureRequestContext, "token"> & {
-    readonly targets: ReadonlyArray<WorkItemRequestTarget>
+    ids,
+  }: AzureRequestContext & {
+    readonly ids: ReadonlyArray<number>
   }) {
+    if (ids.length === 0) {
+      return new Map<number, string>()
+    }
+
     const items = yield* Effect.forEach(
-      groupTargetsByEndpoint(targets),
-      ({ endpoint, targets: endpointTargets }) =>
-        Effect.forEach(
-          chunkIds(
-            endpointTargets.map((target) => target.workItemId),
-            MAX_WORK_ITEM_BATCH_IDS,
-          ),
-          (chunk) =>
-            fetchWorkItemsBatch({
-              token,
-              endpoint,
-              ids: chunk,
-              fields: ["System.Title"],
-              includeRelations: false,
-            }),
-          { concurrency: "unbounded" },
-        ),
+      chunkIds(ids, MAX_WORK_ITEM_BATCH_IDS),
+      (chunk) =>
+        fetchWorkItemsBatch({
+          context,
+          token,
+          ids: chunk,
+          fields: ["System.Title"],
+          includeRelations: false,
+        }),
       { concurrency: "unbounded" },
-    ).pipe(Effect.map((chunks) => chunks.flat(2)))
+    ).pipe(Effect.map((chunks) => chunks.flat()))
 
     return new Map(
       items
@@ -510,17 +409,22 @@ const makeAzureDevOpsClient = Effect.sync(() => {
   })
 
   const fetchWorkItemComments = Effect.fn("AzureDevOpsClient.fetchWorkItemComments")(function* ({
+    context,
     token,
-    target,
-  }: Pick<AzureRequestContext, "token"> & {
-    readonly target: WorkItemRequestTarget
+    workItemId,
+  }: AzureRequestContext & {
+    readonly workItemId: number
   }) {
-    const response: WorkItemCommentsResponse = yield* requestSchemaWithBody(
-      buildWorkItemCommentsUrl(target),
-      { method: "GET", headers: createHeaders(token) },
-      WorkItemCommentsResponseSchema,
+    const client = makeProjectClient(context, token, httpClient)
+    const request = HttpClientRequest.get(`/wit/workItems/${workItemId}/comments`).pipe(
+      HttpClientRequest.setUrlParams({
+        $top: "20",
+        order: "desc",
+        $expand: "renderedText",
+        "api-version": "7.1-preview.4",
+      }),
     )
-
+    const response = yield* executeJson(client, request, WorkItemCommentsResponseSchema)
     const comments = yield* Effect.forEach(
       response.comments ?? [],
       Effect.fn("AzureDevOpsClient.fetchWorkItemComments.map")(function* (comment) {
@@ -550,6 +454,95 @@ const makeAzureDevOpsClient = Effect.sync(() => {
       .slice(0, MAX_WORK_ITEM_COMMENTS)
   })
 
+  const fetchSelectedWorkItems = Effect.fn("AzureDevOpsClient.fetchSelectedWorkItems")(function* ({
+    context,
+    token,
+    ids,
+  }: AzureRequestContext & {
+    readonly ids: ReadonlyArray<number>
+  }) {
+    if (ids.length === 0) {
+      return [] as WorkItemBatchItem[]
+    }
+
+    const selectedWorkItems: WorkItemBatchItem[] = []
+    let index = 0
+
+    while (index < ids.length && selectedWorkItems.length < MAX_CONNECTED_WORK_ITEMS) {
+      const remainingSlots = MAX_CONNECTED_WORK_ITEMS - selectedWorkItems.length
+      const chunk = ids.slice(index, index + remainingSlots)
+      index += chunk.length
+
+      const workItems = yield* fetchWorkItemsBatch({
+        context,
+        token,
+        ids: chunk,
+        fields: WORK_ITEM_FIELDS,
+        includeRelations: true,
+      })
+      const workItemsById = new Map(workItems.map((workItem) => [workItem.id, workItem] as const))
+
+      for (const workItemId of chunk) {
+        const workItem = workItemsById.get(workItemId)
+
+        if (!workItem) {
+          continue
+        }
+
+        selectedWorkItems.push(workItem)
+
+        if (selectedWorkItems.length >= MAX_CONNECTED_WORK_ITEMS) {
+          break
+        }
+      }
+    }
+
+    return selectedWorkItems
+  })
+
+  const getPullRequestMetadata: AzureDevOpsClient["Service"]["getPullRequestMetadata"] = Effect.fn(
+    "AzureDevOpsClient.getPullRequestMetadata",
+  )(function* ({ context, token }: AzureRequestContext) {
+    const client = makeProjectClient(context, token, httpClient)
+    const request = HttpClientRequest.get(buildPullRequestPath(context)).pipe(
+      HttpClientRequest.setUrlParams({
+        includeWorkItemRefs: "true",
+        "api-version": "7.1",
+      }),
+    )
+    const metadata = yield* executeJson(client, request, PullRequestMetadataResponseSchema)
+    const rawWorkItemRefs =
+      metadata.workItemRefs ??
+      (yield* withLoggedEmptyFallback(
+        executeJson(
+          client,
+          HttpClientRequest.get(buildPullRequestWorkItemsPath(context)).pipe(
+            HttpClientRequest.setUrlParams({
+              "api-version": "7.1-preview.1",
+            }),
+          ),
+          PullRequestWorkItemsResponseSchema,
+        ),
+        {
+          onHttpMessage:
+            "Failed to fetch linked pull-request work items from the fallback endpoint. Continuing without work items.",
+          onDecodeMessage:
+            "Failed to decode linked pull-request work items from the fallback endpoint. Continuing without work items.",
+          fields: {
+            pullRequestId: context.pullRequestId,
+          },
+          empty: [],
+        },
+      ))
+
+    return {
+      title: metadata.title,
+      description: metadata.description ?? "",
+      ...(metadata.url ? { url: metadata.url } : {}),
+      workItemRefs: mapPullRequestWorkItemRefs(rawWorkItemRefs),
+    }
+  })
+
   const getPullRequestWorkItems: AzureDevOpsClient["Service"]["getPullRequestWorkItems"] = Effect.fn(
     "AzureDevOpsClient.getPullRequestWorkItems",
   )(function* ({
@@ -561,75 +554,71 @@ const makeAzureDevOpsClient = Effect.sync(() => {
       return []
     }
 
-    const selectedTargets = yield* parseSelectedWorkItemTargets({
+    const workItemIds = yield* parseWorkItemIds({
       context,
       workItemRefs,
     })
 
-    if (selectedTargets.length === 0) {
+    if (workItemIds.length === 0) {
       return []
     }
 
-    const workItems = yield* Effect.forEach(
-      groupTargetsByEndpoint(selectedTargets),
-      ({ endpoint, targets }) =>
-        fetchWorkItemsBatch({
-          token,
-          endpoint,
-          ids: targets.map((target) => target.workItemId),
-          fields: WORK_ITEM_FIELDS,
-          includeRelations: true,
-        }),
-      { concurrency: "unbounded" },
-    ).pipe(Effect.map((chunks) => chunks.flat()))
+    const workItems = yield* fetchSelectedWorkItems({
+      context,
+      token,
+      ids: workItemIds,
+    })
 
+    if (workItems.length === 0) {
+      return []
+    }
+
+    const selectedIds = workItems.map((workItem) => workItem.id)
     const workItemsById = new Map(workItems.map((workItem) => [workItem.id, workItem] as const))
-    const relatedTargets = extractRenderedRelationTargets(workItems, buildDefaultWorkItemEndpoint(context))
+    const relatedIds = extractRelationTitleIds(workItems)
     const titleMap = yield* withLoggedEmptyFallback(
       fetchWorkItemTitleMap({
+        context,
         token,
-        targets: relatedTargets,
+        ids: relatedIds,
       }),
       {
         onHttpMessage: "Failed to fetch linked work item titles. Continuing without relation titles.",
         onDecodeMessage: "Failed to decode linked work item titles. Continuing without relation titles.",
-        fields: { referencedWorkItems: relatedTargets.length },
+        fields: { referencedWorkItems: relatedIds.length },
         empty: new Map<number, string>(),
       },
     )
-
     const commentsByWorkItem = new Map(
       yield* Effect.forEach(
-        selectedTargets,
-        Effect.fn("AzureDevOpsClient.getPullRequestWorkItems.comments")(function* (target) {
-          const comments = yield* withLoggedEmptyFallback(
+        selectedIds,
+        (workItemId) =>
+          withLoggedEmptyFallback(
             fetchWorkItemComments({
+              context,
               token,
-              target,
+              workItemId,
             }),
             {
               onHttpMessage: "Failed to fetch work item comments. Continuing without comments for this work item.",
               onDecodeMessage: "Failed to decode work item comments. Continuing without comments for this work item.",
-              fields: { workItemId: target.workItemId, project: target.project },
+              fields: { workItemId },
               empty: [],
             },
-          )
-
-          return [target.workItemId, comments] as const
-        }),
+          ).pipe(Effect.map((comments) => [workItemId, comments] as const)),
         { concurrency: "unbounded" },
       ),
     )
 
-    const pullRequestWorkItems: PullRequestWorkItem[] = []
+    const items: PullRequestWorkItem[] = []
 
-    for (const { workItemId } of selectedTargets) {
+    for (const workItemId of selectedIds) {
       const workItem = workItemsById.get(workItemId)
       if (!workItem) {
         continue
       }
 
-      pullRequestWorkItems.push(
+      items.push(
         yield* toPullRequestWorkItem({
           workItem,
           titleMap,
@@ -638,16 +627,18 @@ const makeAzureDevOpsClient = Effect.sync(() => {
       )
     }
 
-    return pullRequestWorkItems
+    return items
   })
 
   const listThreads: AzureDevOpsClient["Service"]["listThreads"] = Effect.fn("AzureDevOpsClient.listThreads")(
     function* ({ context, token }: AzureRequestContext) {
-      const response: ExistingThreadsResponse = yield* requestSchemaWithBody(
-        `${buildPullRequestUrl(context)}/threads?api-version=7.1`,
-        { method: "GET", headers: createHeaders(token) },
-        ExistingThreadsResponseSchema,
+      const client = makeProjectClient(context, token, httpClient)
+      const request = HttpClientRequest.get(`${buildPullRequestPath(context)}/threads`).pipe(
+        HttpClientRequest.setUrlParams({
+          "api-version": "7.1",
+        }),
       )
+      const response = yield* executeJson(client, request, ExistingThreadsResponseSchema)
 
       return response.value ?? []
     },
@@ -656,43 +647,58 @@ const makeAzureDevOpsClient = Effect.sync(() => {
   const updateThreadStatus: AzureDevOpsClient["Service"]["updateThreadStatus"] = Effect.fn(
     "AzureDevOpsClient.updateThreadStatus",
   )(function* ({ context, token, threadId, status }: UpdateThreadStatusInput) {
-    yield* requestUnknown(`${buildPullRequestUrl(context)}/threads/${threadId}?api-version=7.1`, {
-      method: "PATCH",
-      headers: createHeaders(token),
-      body: stringifyJson({ status }),
-    })
+    const client = makeProjectClient(context, token, httpClient)
+    const request = HttpClientRequest.patch(`${buildPullRequestPath(context)}/threads/${threadId}`).pipe(
+      HttpClientRequest.setUrlParams({
+        "api-version": "7.1",
+      }),
+    )
+    const requestWithBody = yield* HttpClientRequest.bodyJson(request, { status }).pipe(
+      Effect.mapError(toAzureDevOpsClientError(request)),
+    )
+
+    yield* executeOk(client, requestWithBody)
   })
 
   const updateComment: AzureDevOpsClient["Service"]["updateComment"] = Effect.fn("AzureDevOpsClient.updateComment")(
     function* ({ context, token, threadId, commentId, content }: UpdateCommentInput) {
-      yield* requestUnknown(
-        `${buildPullRequestUrl(context)}/threads/${threadId}/comments/${commentId}?api-version=7.1`,
-        {
-          method: "PATCH",
-          headers: createHeaders(token),
-          body: stringifyJson({ content }),
-        },
+      const client = makeProjectClient(context, token, httpClient)
+      const request = HttpClientRequest.patch(
+        `${buildPullRequestPath(context)}/threads/${threadId}/comments/${commentId}`,
+      ).pipe(
+        HttpClientRequest.setUrlParams({
+          "api-version": "7.1",
+        }),
       )
+      const requestWithBody = yield* HttpClientRequest.bodyJson(request, { content }).pipe(
+        Effect.mapError(toAzureDevOpsClientError(request)),
+      )
+
+      yield* executeOk(client, requestWithBody)
     },
   )
 
   const createThread: AzureDevOpsClient["Service"]["createThread"] = Effect.fn("AzureDevOpsClient.createThread")(
     function* ({ context, token, content, threadContext }: CreateThreadInput) {
-      yield* requestUnknown(`${buildPullRequestUrl(context)}/threads?api-version=7.1`, {
-        method: "POST",
-        headers: createHeaders(token),
-        body: stringifyJson({
-          comments: [
-            {
-              parentCommentId: 0,
-              content,
-              commentType: 1,
-            },
-          ],
-          status: 1,
-          threadContext,
+      const client = makeProjectClient(context, token, httpClient)
+      const request = HttpClientRequest.post(`${buildPullRequestPath(context)}/threads`).pipe(
+        HttpClientRequest.setUrlParams({
+          "api-version": "7.1",
         }),
-      })
+      )
+      const requestWithBody = yield* HttpClientRequest.bodyJson(request, {
+        comments: [
+          {
+            parentCommentId: 0,
+            content,
+            commentType: 1,
+          },
+        ],
+        status: 1,
+        threadContext,
+      }).pipe(Effect.mapError(toAzureDevOpsClientError(request)))
+
+      yield* executeOk(client, requestWithBody)
     },
   )
 
@@ -706,4 +712,6 @@ const makeAzureDevOpsClient = Effect.sync(() => {
   }
 })
 
-export const AzureDevOpsClientLive = Layer.effect(AzureDevOpsClient, makeAzureDevOpsClient)
+export const AzureDevOpsClientLive = Layer.effect(AzureDevOpsClient, makeAzureDevOpsClient).pipe(
+  Layer.provide(Layer.fresh(FetchHttpClient.layer)),
+)

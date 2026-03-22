@@ -22,34 +22,6 @@ export type PullRequestMetadata = {
 
 export type ReviewMode = "full" | "follow-up" | "skipped"
 
-export type ConnectedWorkItemContext = {
-  readonly id: number
-  readonly title: string
-  readonly workItemType: string
-  readonly state: string
-  readonly priority?: number
-  readonly assignedTo?: string
-  readonly iterationPath?: string
-  readonly areaPath?: string
-  readonly tags: ReadonlyArray<string>
-  readonly descriptionMarkdown?: string
-  readonly acceptanceCriteriaMarkdown?: string
-  readonly reproStepsMarkdown?: string
-  readonly parent?: {
-    readonly id: number
-    readonly title?: string
-  }
-  readonly related: ReadonlyArray<{
-    readonly id: number
-    readonly title?: string
-  }>
-  readonly recentComments: ReadonlyArray<{
-    readonly author: string
-    readonly createdAt: string
-    readonly markdown: string
-  }>
-}
-
 export type ReviewContext = {
   readonly pullRequest: {
     readonly title: string
@@ -67,7 +39,7 @@ export type ReviewContext = {
   }>
   readonly connectedWorkItems?: {
     readonly omittedCount: number
-    readonly items: ReadonlyArray<ConnectedWorkItemContext>
+    readonly items: ReadonlyArray<PullRequestWorkItem>
   }
 }
 
@@ -80,16 +52,8 @@ export type BuildReviewContextInput = {
   readonly connectedWorkItems?: ReadonlyArray<PullRequestWorkItem>
 }
 
-const buildConnectedWorkItemContext = (workItem: PullRequestWorkItem): ConnectedWorkItemContext => ({
-  id: workItem.id,
-  title: workItem.title,
-  workItemType: workItem.workItemType,
-  state: workItem.state,
-  ...(workItem.priority !== undefined ? { priority: workItem.priority } : {}),
-  ...(workItem.assignedTo ? { assignedTo: workItem.assignedTo } : {}),
-  ...(workItem.iterationPath ? { iterationPath: workItem.iterationPath } : {}),
-  ...(workItem.areaPath ? { areaPath: workItem.areaPath } : {}),
-  tags: workItem.tags,
+const truncateWorkItemForPrompt = (workItem: PullRequestWorkItem): PullRequestWorkItem => ({
+  ...workItem,
   ...(workItem.descriptionMarkdown
     ? { descriptionMarkdown: truncateText(workItem.descriptionMarkdown, MAX_WORK_ITEM_SECTION_CHARS) }
     : {}),
@@ -99,18 +63,7 @@ const buildConnectedWorkItemContext = (workItem: PullRequestWorkItem): Connected
   ...(workItem.reproStepsMarkdown
     ? { reproStepsMarkdown: truncateText(workItem.reproStepsMarkdown, MAX_WORK_ITEM_SECTION_CHARS) }
     : {}),
-  ...(workItem.parent
-    ? {
-        parent: {
-          id: workItem.parent.id,
-          ...(workItem.parent.title ? { title: workItem.parent.title } : {}),
-        },
-      }
-    : {}),
-  related: workItem.related.slice(0, MAX_RELATED_ITEMS).map((relatedItem) => ({
-    id: relatedItem.id,
-    ...(relatedItem.title ? { title: relatedItem.title } : {}),
-  })),
+  related: workItem.related.slice(0, MAX_RELATED_ITEMS),
   recentComments: workItem.recentComments.map((comment) => ({
     author: comment.author,
     createdAt: comment.createdAt,
@@ -144,7 +97,7 @@ export const buildReviewContext = ({
     ? {
         connectedWorkItems: {
           omittedCount: Math.max((metadata.workItemRefs?.length ?? 0) - connectedWorkItems.length, 0),
-          items: connectedWorkItems.map(buildConnectedWorkItemContext),
+          items: connectedWorkItems.map(truncateWorkItemForPrompt),
         },
       }
     : {}),

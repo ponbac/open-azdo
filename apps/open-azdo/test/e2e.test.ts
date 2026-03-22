@@ -4,12 +4,13 @@ import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Option } from "effect"
 import * as ConfigProvider from "effect/ConfigProvider"
+import { FetchHttpClient } from "effect/unstable/http"
 
 import { executeReview } from "../src/Cli"
 import {
   createFixtureRepo,
-  createMockFetch,
   createTempDir,
+  type FetchLike,
   makeBaseEnv,
   makeFetchMock,
   makeReviewCliInput,
@@ -212,14 +213,34 @@ const makeManagedFindingThread = (finding: ManagedFinding) => ({
   },
 })
 
-const parseRequestBody = (body: BodyInit | null | undefined) => JSON.parse(typeof body === "string" ? body : "{}")
+const parseRequestBody = (body: BodyInit | null | undefined) => {
+  if (typeof body === "string") {
+    return JSON.parse(body)
+  }
+
+  if (body instanceof Uint8Array) {
+    return JSON.parse(new TextDecoder().decode(body))
+  }
+
+  return {}
+}
+
+const isWorkItemCommentsUrl = (url: string) => {
+  const parsed = new URL(url)
+  return (
+    parsed.pathname === "/acme/project/_apis/wit/workItems/123/comments" &&
+    parsed.searchParams.get("$top") === "20" &&
+    parsed.searchParams.get("$expand") === "renderedText" &&
+    parsed.searchParams.get("api-version") === "7.1-preview.4"
+  )
+}
 
 const extractCommentContent = (body: BodyInit | null | undefined) => {
   const parsed = parseRequestBody(body)
   return parsed.content ?? parsed.comments?.[0]?.content ?? ""
 }
 
-const runReview = (repoDir: string, env: Record<string, string>) => {
+const runReview = (repoDir: string, env: Record<string, string>, fetchMock: FetchLike) => {
   const cliInput = makeReviewCliInput({
     model: Option.some("openai/gpt-5.4"),
     workspace: Option.some(repoDir),
@@ -229,20 +250,22 @@ const runReview = (repoDir: string, env: Record<string, string>) => {
     pullRequestId: Option.some(42),
   })
 
-  return Effect.runPromise(
-    executeReview.pipe(
-      Effect.provide(
-        makeSilentRuntimeLayer(cliInput).pipe(
-          Layer.provide(
-            ConfigProvider.layer(
-              ConfigProvider.fromEnv({
-                env,
-              }),
-            ),
+  const effect = executeReview.pipe(
+    Effect.provide(
+      makeSilentRuntimeLayer(cliInput).pipe(
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env,
+            }),
           ),
         ),
       ),
     ),
+  )
+
+  return Effect.runPromise(
+    effect.pipe(Effect.provideService(FetchHttpClient.Fetch, fetchMock as typeof globalThis.fetch)),
   )
 }
 
@@ -298,7 +321,6 @@ const runReviewScenario = async ({
     return Response.json({ id: calls.length })
   })
 
-  const originalFetch = globalThis.fetch
   const originalPath = process.env.PATH
   const configEnv = {
     ...makeBaseEnv(),
@@ -306,11 +328,10 @@ const runReviewScenario = async ({
     ...(typeof envOverrides === "function" ? envOverrides(fixture) : envOverrides),
   }
 
-  globalThis.fetch = createMockFetch(fetchMock, originalFetch)
   process.env.PATH = `${binDir}:${originalPath ?? ""}`
 
   try {
-    const exitCode = await runReview(fixture.repoDir, configEnv)
+    const exitCode = await runReview(fixture.repoDir, configEnv, fetchMock)
     return {
       calls,
       exitCode,
@@ -318,8 +339,6 @@ const runReviewScenario = async ({
       prompt: promptCapturePath ? await readFile(promptCapturePath, "utf8").catch(() => undefined) : undefined,
     }
   } finally {
-    globalThis.fetch = originalFetch
-
     if (originalPath === undefined) {
       delete process.env.PATH
     } else {
@@ -399,7 +418,7 @@ describe("e2e", () => {
           })
         }
 
-        if (url.endsWith("/_apis/wit/workItems/123/comments?$top=20&$expand=renderedText&api-version=7.1-preview.4")) {
+        if (isWorkItemCommentsUrl(url)) {
           return Response.json({
             comments: [
               {

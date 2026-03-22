@@ -2,7 +2,7 @@ import { Schema } from "effect"
 
 export const PullRequestWorkItemRefSchema = Schema.Struct({
   id: Schema.String,
-  url: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  url: Schema.optionalKey(Schema.NullOr(Schema.String)),
 })
 export type PullRequestWorkItemRef = {
   readonly id: string
@@ -11,10 +11,12 @@ export type PullRequestWorkItemRef = {
 
 export const PullRequestMetadataResponseSchema = Schema.Struct({
   title: Schema.String,
-  description: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  url: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+  description: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  url: Schema.optionalKey(Schema.NullOr(Schema.String)),
   workItemRefs: Schema.optionalKey(Schema.Array(PullRequestWorkItemRefSchema)),
 })
+
+export const PullRequestWorkItemsResponseSchema = Schema.Array(PullRequestWorkItemRefSchema)
 
 export type PullRequestMetadata = {
   readonly title: string
@@ -33,19 +35,19 @@ const ExistingThreadStatusSchema = Schema.Union([
   Schema.Literal("pending"),
 ])
 
-const NullableIntSchema = Schema.Union([Schema.Int, Schema.Null])
+const NullableIntSchema = Schema.NullOr(Schema.Int)
 
 export const ExistingThreadSchema = Schema.Struct({
   id: Schema.Int,
-  status: Schema.optionalKey(Schema.Union([ExistingThreadStatusSchema, Schema.Null])),
+  status: Schema.optionalKey(Schema.NullOr(ExistingThreadStatusSchema)),
   comments: Schema.Array(
     Schema.Struct({
       id: Schema.Int,
-      content: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+      content: Schema.optionalKey(Schema.NullOr(Schema.String)),
     }),
   ),
   threadContext: Schema.optionalKey(
-    Schema.Union([
+    Schema.NullOr(
       Schema.Struct({
         filePath: Schema.optionalKey(Schema.String),
         rightFileStart: Schema.optionalKey(
@@ -61,8 +63,7 @@ export const ExistingThreadSchema = Schema.Struct({
           }),
         ),
       }),
-      Schema.Null,
-    ]),
+    ),
   ),
 })
 export type ExistingThread = Schema.Schema.Type<typeof ExistingThreadSchema>
@@ -75,26 +76,21 @@ export type ExistingThreadsResponse = Schema.Schema.Type<typeof ExistingThreadsR
 const WorkItemAssignedToSchema = Schema.Union([
   Schema.String,
   Schema.Struct({
-    displayName: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
+    displayName: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
   Schema.Null,
 ])
 
+const WorkItemRelationSchema = Schema.Struct({
+  rel: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  url: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  attributes: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown))),
+})
+
 export const WorkItemBatchItemSchema = Schema.Struct({
   id: Schema.Int,
   fields: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  relations: Schema.optionalKey(
-    Schema.Union([
-      Schema.Array(
-        Schema.Struct({
-          rel: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-          url: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-          attributes: Schema.optionalKey(Schema.Union([Schema.Record(Schema.String, Schema.Unknown), Schema.Null])),
-        }),
-      ),
-      Schema.Null,
-    ]),
-  ),
+  relations: Schema.optionalKey(Schema.NullOr(Schema.Array(WorkItemRelationSchema))),
 })
 export type WorkItemBatchItem = Schema.Schema.Type<typeof WorkItemBatchItemSchema>
 
@@ -103,19 +99,16 @@ export const WorkItemsBatchResponseSchema = Schema.Struct({
 })
 export type WorkItemsBatchResponse = Schema.Schema.Type<typeof WorkItemsBatchResponseSchema>
 
+const WorkItemIdentitySchema = Schema.Struct({
+  displayName: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
+
 export const WorkItemCommentSchema = Schema.Struct({
-  text: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  renderedText: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  createdDate: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-  isDeleted: Schema.optionalKey(Schema.Union([Schema.Boolean, Schema.Null])),
-  createdBy: Schema.optionalKey(
-    Schema.Union([
-      Schema.Struct({
-        displayName: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      }),
-      Schema.Null,
-    ]),
-  ),
+  text: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  renderedText: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  createdDate: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  isDeleted: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  createdBy: Schema.optionalKey(Schema.NullOr(WorkItemIdentitySchema)),
 })
 export type WorkItemComment = Schema.Schema.Type<typeof WorkItemCommentSchema>
 
