@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./base-runtime": "./src/BaseRuntimeLayer.ts",
+    "./errors": "./src/errors.ts",
     "./json": "./src/Json.ts",
     "./logging": "./src/Logging.ts",
     "./paths": "./src/paths.ts",
@@ -19,7 +20,7 @@
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-beta.33",
-    "@opencode-ai/sdk": "^1.2.27",
+    "@opencode-ai/sdk": "^1.3.3",
     "effect": "4.0.0-beta.33"
   }
 }

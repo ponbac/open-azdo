@@ -134,8 +134,8 @@ const waitForServerUrl = (handle: ChildProcessHandle, timeout: Duration.Duration
     ),
   )
 
-const collectTextResponse = (parts: ReadonlyArray<Part>) =>
-  parts
+const collectTextResponse = (parts: ReadonlyArray<Part> | undefined) =>
+  (parts ?? [])
     .filter((part): part is Extract<Part, { readonly type: "text" }> => part.type === "text")
     .map((part) => part.text.trim())
     .filter((text) => text.length > 0)
@@ -191,12 +191,96 @@ const failForAssistantError = (error: NonNullable<AssistantMessage["error"]>) =>
     }),
   )
 
+const selectLatestAssistantReply = (
+  messages: ReadonlyArray<{
+    readonly info:
+      | AssistantMessage
+      | { readonly role: string; readonly time?: { readonly created?: number | undefined } | undefined }
+    readonly parts: ReadonlyArray<Part>
+  }>,
+) =>
+  messages
+    .filter(
+      (message): message is { readonly info: AssistantMessage; readonly parts: ReadonlyArray<Part> } =>
+        message.info.role === "assistant",
+    )
+    .sort((left, right) => (right.info.time.created ?? 0) - (left.info.time.created ?? 0))[0]
+
+const loadLatestAssistantReply = ({
+  client,
+  sessionId,
+}: {
+  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly sessionId: string
+}) =>
+  Effect.tryPromise({
+    try: async () => {
+      const [messagesResult, statusResult] = await Promise.all([
+        client.session.messages<true>({
+          sessionID: sessionId,
+          limit: 20,
+        }),
+        client.session.status<true>(),
+      ])
+      const assistantReply =
+        messagesResult.response.status === 200 && messagesResult.data
+          ? selectLatestAssistantReply(
+              messagesResult.data as ReadonlyArray<{ info: AssistantMessage; parts: ReadonlyArray<Part> }>,
+            )
+          : undefined
+
+      return {
+        assistantReply,
+        status: statusResult.response.status === 200 && statusResult.data ? statusResult.data[sessionId] : undefined,
+      }
+    },
+    catch: (error) => toOutputError("Failed to resolve the OpenCode assistant reply.", formatUnknownDetail(error)),
+  })
+
+const resolveAssistantReply = ({
+  client,
+  sessionId,
+  response,
+}: {
+  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly sessionId: string
+  readonly response: { readonly info?: AssistantMessage; readonly parts?: ReadonlyArray<Part> }
+}): Effect.Effect<
+  { readonly info: AssistantMessage; readonly parts: ReadonlyArray<Part> | undefined },
+  OpenCodeOutputError
+> =>
+  response.info
+    ? Effect.succeed({
+        info: response.info,
+        parts: response.parts,
+      })
+    : Effect.gen(function* () {
+        while (true) {
+          const { assistantReply, status } = yield* loadLatestAssistantReply({
+            client,
+            sessionId,
+          })
+
+          if (assistantReply) {
+            return assistantReply
+          }
+
+          if (status?.type !== "busy" && status?.type !== "retry") {
+            return yield* Effect.fail(
+              toOutputError("OpenCode returned no assistant reply payload.", stringifyJson(response)),
+            )
+          }
+
+          yield* Effect.sleep(Duration.millis(250))
+        }
+      })
+
 export const decodePromptResult = ({
   info,
   parts,
 }: {
   readonly info: AssistantMessage
-  readonly parts: ReadonlyArray<Part>
+  readonly parts: ReadonlyArray<Part> | undefined
 }): Effect.Effect<OpenCodeSdkPromptResult, OpenCodeOutputError> => {
   const response = collectTextResponse(parts)
   const modelError = toModelError(info.error)
@@ -273,6 +357,63 @@ const createSession = (
     ),
   )
 
+const validatePromptModel = ({
+  client,
+  request,
+}: {
+  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly request: OpenCodeSdkPromptRequest
+}): Effect.Effect<void, OpenCodeInvocationError | OpenCodeOutputError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const result = await client.provider.list<true>()
+
+      if (result.response.status !== 200 || !result.data) {
+        throw new Error(`Unexpected OpenCode provider list status: ${result.response.status}`)
+      }
+
+      const provider = result.data.all.find((entry) => entry.id === request.model.providerID)
+      const providerDefaultModel = result.data.default[request.model.providerID]
+
+      if (!provider) {
+        throw toOutputError(
+          `OpenCode provider "${request.model.providerID}" is not available.`,
+          stringifyJson({
+            providerID: request.model.providerID,
+            connectedProviders: result.data.connected,
+          }),
+        )
+      }
+
+      if (request.model.modelID in provider.models) {
+        return
+      }
+
+      throw toOutputError(
+        `OpenCode provider "${request.model.providerID}" does not expose model "${request.model.modelID}".`,
+        stringifyJson({
+          providerID: request.model.providerID,
+          requestedModelID: request.model.modelID,
+          defaultModelID: providerDefaultModel,
+          availableModelIDs: Object.keys(provider.models).slice(0, 20),
+        }),
+      )
+    },
+    catch: (error) =>
+      error instanceof OpenCodeOutputError
+        ? error
+        : toInvocationError({
+            message: "Failed while resolving available OpenCode provider models.",
+            detail: formatUnknownDetail(error),
+          }),
+  }).pipe((effect) =>
+    awaitWithin(effect, request.timeout, () =>
+      toInvocationError({
+        message: `Timed out resolving OpenCode provider models after ${Duration.format(request.timeout)}.`,
+      }),
+    ),
+  )
+
 const promptSession = ({
   client,
   sessionId,
@@ -282,36 +423,42 @@ const promptSession = ({
   readonly sessionId: string
   readonly request: OpenCodeSdkPromptRequest
 }): Effect.Effect<OpenCodeSdkPromptResult, OpenCodeInvocationError | OpenCodeOutputError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const result = await client.session.prompt<true>({
-        sessionID: sessionId,
-        model: request.model,
-        agent: request.agent,
-        ...(request.variant ? { variant: request.variant } : {}),
-        ...(request.format ? { format: request.format } : {}),
-        parts: [
-          {
-            type: "text",
-            text: request.prompt,
-          },
-        ],
-      })
-
-      if (result.response.status !== 200 || !result.data) {
-        throw new Error(`Unexpected OpenCode prompt status: ${result.response.status}`)
-      }
-
-      return result.data
-    },
-    catch: (error) =>
-      error instanceof OpenCodeOutputError
-        ? error
-        : toInvocationError({
-            message: "Failed while prompting OpenCode.",
-            detail: formatUnknownDetail(error),
-          }),
+  validatePromptModel({
+    client,
+    request,
   }).pipe(
+    Effect.flatMap(() =>
+      Effect.tryPromise({
+        try: async () => {
+          const result = await client.session.prompt<true>({
+            sessionID: sessionId,
+            model: request.model,
+            agent: request.agent,
+            ...(request.variant ? { variant: request.variant } : {}),
+            ...(request.format ? { format: request.format } : {}),
+            parts: [
+              {
+                type: "text",
+                text: request.prompt,
+              },
+            ],
+          })
+
+          if (result.response.status !== 200 || !result.data) {
+            throw new Error(`Unexpected OpenCode prompt status: ${result.response.status}`)
+          }
+
+          return result.data
+        },
+        catch: (error) =>
+          error instanceof OpenCodeOutputError
+            ? error
+            : toInvocationError({
+                message: "Failed while prompting OpenCode.",
+                detail: formatUnknownDetail(error),
+              }),
+      }),
+    ),
     (effect) =>
       awaitWithin(effect, request.timeout, () =>
         toInvocationError({
@@ -319,11 +466,13 @@ const promptSession = ({
         }),
       ),
     Effect.flatMap((response) =>
-      decodePromptResult({
-        info: response.info as AssistantMessage,
-        parts: response.parts,
+      resolveAssistantReply({
+        client,
+        sessionId,
+        response: response as { readonly info?: AssistantMessage; readonly parts?: ReadonlyArray<Part> },
       }),
     ),
+    Effect.flatMap(decodePromptResult),
   )
 
 const makeOpenCodeSdkRuntime = Effect.gen(function* () {

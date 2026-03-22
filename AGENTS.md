@@ -38,6 +38,12 @@
 - `bun run --cwd packages/azdo test`
 - `bun run --cwd packages/workflows test`
 
+# Live Validation
+
+- Opt-in real-environment validation is available through `bun run sandbox:capture` and `bun test ./apps/open-azdo/test/live.integration.test.ts` with `.env.integration.local` loaded.
+- The sandbox app can be used to inspect a real captured review locally on `http://127.0.0.1:4317`.
+- For this repo, `openai/gpt-5.4-mini` is supported in the OpenCode SDK lane via the internal `openai-direct` fallback in `packages/core`; raw upstream `opencode run -m openai/gpt-5.4-mini` still does not work on OpenCode `1.2.27`.
+
 # TypeScript Tooling Policy
 
 - Default command lane is TS7 via `@typescript/native-preview` and `tsgo`.
@@ -52,4 +58,7 @@
 
 - Always run `bun run check` from the repo root before considering a task done.
 - If `bun run check` rewrites files, run it again until it finishes cleanly.
+- Make sure that only absolutely necessary test cases are written, cover the critical paths only.
+- For changed code, add doc comments to non-trivial, non-self-explanatory shared functions, explaining what they do and how they work.
+- For changed code, add inline comments inside functions for non-obvious code paths, data-shaping, ranking/merging logic, or other behavior that would otherwise require careful reconstruction by the reader.
 - Workspace-local validation is fine during iteration, but final validation is the root `bun run check`.

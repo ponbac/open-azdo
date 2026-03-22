@@ -9,19 +9,51 @@ export type PullRequestWorkItemRef = {
   readonly url?: string | undefined
 }
 
+const IdentityRefSchema = Schema.Struct({
+  displayName: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
+
+const PullRequestRepositorySchema = Schema.Struct({
+  id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  remoteUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  webUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
+
+const PullRequestCommitRefSchema = Schema.Struct({
+  commitId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
+
 export const PullRequestMetadataResponseSchema = Schema.Struct({
+  pullRequestId: Schema.optionalKey(Schema.NullOr(Schema.Int)),
   title: Schema.String,
   description: Schema.optionalKey(Schema.NullOr(Schema.String)),
   url: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  sourceRefName: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  targetRefName: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  createdBy: Schema.optionalKey(Schema.NullOr(IdentityRefSchema)),
+  repository: Schema.optionalKey(Schema.NullOr(PullRequestRepositorySchema)),
+  lastMergeSourceCommit: Schema.optionalKey(Schema.NullOr(PullRequestCommitRefSchema)),
   workItemRefs: Schema.optionalKey(Schema.Array(PullRequestWorkItemRefSchema)),
 })
 
 export const PullRequestWorkItemsResponseSchema = Schema.Array(PullRequestWorkItemRefSchema)
 
 export type PullRequestMetadata = {
+  readonly pullRequestId?: number | undefined
   readonly title: string
   readonly description: string
   readonly url?: string | undefined
+  readonly sourceRefName?: string | undefined
+  readonly targetRefName?: string | undefined
+  readonly createdByDisplayName?: string | undefined
+  readonly repository?: {
+    readonly id?: string | undefined
+    readonly name?: string | undefined
+    readonly remoteUrl?: string | undefined
+    readonly webUrl?: string | undefined
+  }
+  readonly sourceCommitId?: string | undefined
   readonly workItemRefs: ReadonlyArray<PullRequestWorkItemRef>
 }
 
@@ -35,6 +67,13 @@ const ExistingThreadStatusSchema = Schema.Union([
   Schema.Literal("pending"),
 ])
 
+const ThreadCommentTypeSchema = Schema.Union([
+  Schema.Int,
+  Schema.Literal("text"),
+  Schema.Literal("codeChange"),
+  Schema.Literal("system"),
+])
+
 const NullableIntSchema = Schema.NullOr(Schema.Int)
 
 export const ExistingThreadSchema = Schema.Struct({
@@ -44,6 +83,10 @@ export const ExistingThreadSchema = Schema.Struct({
     Schema.Struct({
       id: Schema.Int,
       content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      publishedDate: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      isDeleted: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+      commentType: Schema.optionalKey(Schema.NullOr(ThreadCommentTypeSchema)),
+      author: Schema.optionalKey(Schema.NullOr(IdentityRefSchema)),
     }),
   ),
   threadContext: Schema.optionalKey(
@@ -116,6 +159,40 @@ export const WorkItemCommentsResponseSchema = Schema.Struct({
   comments: Schema.optionalKey(Schema.Array(WorkItemCommentSchema)),
 })
 export type WorkItemCommentsResponse = Schema.Schema.Type<typeof WorkItemCommentsResponseSchema>
+
+export const PullRequestWorkItemCommentSchema = Schema.Struct({
+  author: Schema.String,
+  createdAt: Schema.String,
+  markdown: Schema.String,
+})
+
+export const PullRequestWorkItemRelationSchema = Schema.Struct({
+  id: Schema.Int,
+  title: Schema.optionalKey(Schema.String),
+})
+
+export const PullRequestWorkItemSchema = Schema.Struct({
+  id: Schema.Int,
+  title: Schema.String,
+  workItemType: Schema.String,
+  state: Schema.String,
+  priority: Schema.optionalKey(Schema.Int),
+  assignedTo: Schema.optionalKey(Schema.String),
+  iterationPath: Schema.optionalKey(Schema.String),
+  areaPath: Schema.optionalKey(Schema.String),
+  tags: Schema.Array(Schema.String),
+  descriptionMarkdown: Schema.optionalKey(Schema.String),
+  acceptanceCriteriaMarkdown: Schema.optionalKey(Schema.String),
+  reproStepsMarkdown: Schema.optionalKey(Schema.String),
+  parent: Schema.optionalKey(
+    Schema.Struct({
+      id: Schema.Int,
+      title: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  related: Schema.Array(PullRequestWorkItemRelationSchema),
+  recentComments: Schema.Array(PullRequestWorkItemCommentSchema),
+})
 
 export type PullRequestWorkItem = {
   readonly id: number

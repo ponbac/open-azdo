@@ -9,7 +9,9 @@ import { runReviewWorkflow } from "@open-azdo/workflows/review"
 
 import { AppConfig, type ReviewCliInput } from "./AppConfig"
 import { OperationalError } from "./errors"
-import { makeRuntimeLayer } from "./Runtime"
+import { executeSandboxCapture } from "./SandboxCapture"
+import { type SandboxCaptureCliInput } from "./SandboxCaptureConfig"
+import { makeRuntimeLayer, makeSandboxCaptureRuntimeLayer } from "./Runtime"
 
 const PositiveIntSchema = Schema.Int.check(Schema.isGreaterThan(0))
 
@@ -23,6 +25,9 @@ export const executeReview = Effect.gen(function* () {
 
 export const executeReviewWithInput = (input: ReviewCliInput) =>
   executeReview.pipe(Effect.provide(makeRuntimeLayer(input)))
+
+export const executeSandboxCaptureWithInput = (input: SandboxCaptureCliInput) =>
+  executeSandboxCapture.pipe(Effect.provide(makeSandboxCaptureRuntimeLayer(input)))
 
 const runReviewCommand = (input: ReviewCliInput) =>
   Effect.gen(function* () {
@@ -45,6 +50,30 @@ const runReviewCommand = (input: ReviewCliInput) =>
 
     return yield* new OperationalError({
       message: "open-azdo exited with a non-zero status.",
+    })
+  })
+
+const runSandboxCaptureCommand = (input: SandboxCaptureCliInput) =>
+  Effect.gen(function* () {
+    const exit = yield* Effect.exit(executeSandboxCaptureWithInput(input))
+
+    if (!Exit.isSuccess(exit)) {
+      const failureReason = Cause.pretty(exit.cause)
+      yield* logError("open-azdo failed during sandbox capture.", {
+        cause: failureReason,
+      }).pipe(Effect.provide(BaseRuntimeLayer))
+
+      return yield* new OperationalError({
+        message: "open-azdo failed during sandbox capture.",
+      })
+    }
+
+    if (exit.value === 0) {
+      return
+    }
+
+    return yield* new OperationalError({
+      message: "open-azdo sandbox capture exited with a non-zero status.",
     })
   })
 
@@ -85,7 +114,44 @@ export const reviewCommand = Command.make("review", reviewCommandConfig).pipe(
   Command.withHandler((input) => runReviewCommand(input)),
 )
 
+const sandboxCaptureCommandConfig = {
+  model: Flag.string("model").pipe(Flag.optional, Flag.withDescription("Model id, for example openai/gpt-5.4.")),
+  opencodeVariant: Flag.string("opencode-variant").pipe(
+    Flag.optional,
+    Flag.withDescription("Provider-specific variant or reasoning level."),
+  ),
+  opencodeTimeout: Flag.string("opencode-timeout").pipe(
+    Flag.optional,
+    Flag.withDescription('OpenCode timeout, for example "5 minutes" or "1 hour".'),
+  ),
+  workspace: Flag.string("workspace").pipe(Flag.optional, Flag.withDescription("Workspace path.")),
+  organization: Flag.string("organization").pipe(Flag.optional, Flag.withDescription("Azure DevOps organization.")),
+  project: Flag.string("project").pipe(Flag.optional, Flag.withDescription("Azure DevOps project.")),
+  repositoryId: Flag.string("repository-id").pipe(Flag.optional, Flag.withDescription("Azure DevOps repository id.")),
+  pullRequestId: Flag.integer("pull-request-id").pipe(
+    Flag.withSchema(PositiveIntSchema),
+    Flag.optional,
+    Flag.withDescription("Azure DevOps pull request id."),
+  ),
+  collectionUrl: Flag.string("collection-url").pipe(
+    Flag.optional,
+    Flag.withDescription("Azure DevOps collection url."),
+  ),
+  output: Flag.string("output").pipe(Flag.optional, Flag.withDescription("Output path for the sandbox capture JSON.")),
+  json: Flag.boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Emit machine-readable JSON.")),
+} as const
+
+export const sandboxCaptureCommand = Command.make("capture", sandboxCaptureCommandConfig).pipe(
+  Command.withDescription("Capture a real Azure DevOps PR review run into a local sandbox artifact."),
+  Command.withHandler((input) => runSandboxCaptureCommand(input)),
+)
+
+export const sandboxCommand = Command.make("sandbox").pipe(
+  Command.withDescription("Sandbox tooling for live capture and local preview."),
+  Command.withSubcommands([sandboxCaptureCommand]),
+)
+
 export const openAzdoCli = Command.make("open-azdo").pipe(
   Command.withDescription("Secure Azure DevOps pull-request review CLI powered by OpenCode."),
-  Command.withSubcommands([reviewCommand]),
+  Command.withSubcommands([reviewCommand, sandboxCommand]),
 )

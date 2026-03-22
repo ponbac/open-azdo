@@ -51,6 +51,50 @@ Optional flags:
 - `--dry-run`
 - `--json`
 
+## Sandbox Capture
+
+Use the live capture command when you want to validate changes against a real Azure DevOps pull request without mutating PR threads:
+
+```bash
+bun run ./bin/open-azdo.ts sandbox capture --model "openai/gpt-5.4"
+```
+
+The command is intentionally opt-in and uses a separate env namespace:
+
+- `OPEN_AZDO_LIVE_MODEL`
+- `OPEN_AZDO_LIVE_OPENCODE_VARIANT`
+- `OPEN_AZDO_LIVE_OPENCODE_TIMEOUT`
+- `OPEN_AZDO_LIVE_WORKSPACE`
+- `OPEN_AZDO_LIVE_COLLECTION_URL`
+- `OPEN_AZDO_LIVE_ORGANIZATION`
+- `OPEN_AZDO_LIVE_PROJECT`
+- `OPEN_AZDO_LIVE_REPOSITORY_ID`
+- `OPEN_AZDO_LIVE_PULL_REQUEST_ID`
+- `OPEN_AZDO_LIVE_ACCESS_TOKEN`
+
+Provider API keys remain provider-native, for example `OPENAI_API_KEY`.
+
+Behavior:
+
+- if `OPEN_AZDO_LIVE_WORKSPACE` or `--workspace` is set, `open-azdo` validates that checkout and does not mutate it
+- otherwise it creates a temporary checkout, fetches the PR source and target refs, runs the review, and deletes the temp checkout on exit
+- Azure DevOps stays read-only for this command
+- the same short-lived localhost OpenCode server behavior used by `review` is reused here
+
+Default output path:
+
+```text
+.captures/<org>-<project>-pr-<id>.json
+```
+
+From the monorepo root you can use:
+
+```bash
+bun run sandbox:capture
+```
+
+Start with [`.env.integration.example`](../../.env.integration.example) and write your local secrets to `.env.integration.local`.
+
 Exit behavior:
 
 - successful review runs return `0`, even when findings are posted
@@ -115,3 +159,12 @@ bun install
 bun run check
 bun run build
 ```
+
+For local sandbox validation:
+
+```bash
+bun run sandbox:capture
+bun run sandbox:dev
+```
+
+The sandbox app runs on `http://127.0.0.1:4317`, not port `3000`. The expected UI smoke path is manual validation with the `playwriter` skill.
