@@ -8,3 +8,4 @@ export {
   type UpdateThreadStatusInput,
 } from "./Services/AzureDevOpsClient"
 export { AzureDevOpsClientLive } from "./Layers/AzureDevOpsClient"
+export type { PullRequestMetadata, PullRequestWorkItem, PullRequestWorkItemRef } from "./Schemas"

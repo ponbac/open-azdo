@@ -132,7 +132,9 @@ export const makeAzureDevOpsClient = (
     Effect.succeed({
       title: "Feature PR",
       description: "Adds a new export",
+      workItemRefs: [],
     }),
+  getPullRequestWorkItems: () => Effect.succeed([]),
   listThreads: () => Effect.succeed([]),
   updateThreadStatus: () => Effect.void,
   updateComment: () => Effect.void,

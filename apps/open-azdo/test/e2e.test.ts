@@ -1,15 +1,16 @@
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Option } from "effect"
 import * as ConfigProvider from "effect/ConfigProvider"
+import { FetchHttpClient } from "effect/unstable/http"
 
 import { executeReview } from "../src/Cli"
 import {
   createFixtureRepo,
-  createMockFetch,
   createTempDir,
+  type FetchLike,
   makeBaseEnv,
   makeFetchMock,
   makeReviewCliInput,
@@ -61,7 +62,7 @@ type ManagedFinding = {
 }
 
 type ReviewScript =
-  | { readonly type: "success"; readonly output?: string }
+  | { readonly type: "success"; readonly output?: string; readonly capturePromptPath?: string }
   | { readonly type: "failure"; readonly message: string }
 
 type FixtureRepo = Awaited<ReturnType<typeof createFixtureRepo>>
@@ -150,6 +151,7 @@ const writeReviewScript = (path: string, script: ReviewScript) =>
     ? writeExecutable(
         path,
         `#!/usr/bin/env bash
+${script.capturePromptPath ? `cp "$OPENCODE_CONFIG_DIR/agent-prompt.md" "${script.capturePromptPath}"\n` : ""}\
 printf '%s\n' '${script.output ?? successfulReviewOutput}'
 `,
       )
@@ -211,14 +213,34 @@ const makeManagedFindingThread = (finding: ManagedFinding) => ({
   },
 })
 
-const parseRequestBody = (body: BodyInit | null | undefined) => JSON.parse(typeof body === "string" ? body : "{}")
+const parseRequestBody = (body: BodyInit | null | undefined) => {
+  if (typeof body === "string") {
+    return JSON.parse(body)
+  }
+
+  if (body instanceof Uint8Array) {
+    return JSON.parse(new TextDecoder().decode(body))
+  }
+
+  return {}
+}
+
+const isWorkItemCommentsUrl = (url: string) => {
+  const parsed = new URL(url)
+  return (
+    parsed.pathname === "/acme/project/_apis/wit/workItems/123/comments" &&
+    parsed.searchParams.get("$top") === "20" &&
+    parsed.searchParams.get("$expand") === "renderedText" &&
+    parsed.searchParams.get("api-version") === "7.1-preview.4"
+  )
+}
 
 const extractCommentContent = (body: BodyInit | null | undefined) => {
   const parsed = parseRequestBody(body)
   return parsed.content ?? parsed.comments?.[0]?.content ?? ""
 }
 
-const runReview = (repoDir: string, env: Record<string, string>) => {
+const runReview = (repoDir: string, env: Record<string, string>, fetchMock: FetchLike) => {
   const cliInput = makeReviewCliInput({
     model: Option.some("openai/gpt-5.4"),
     workspace: Option.some(repoDir),
@@ -228,20 +250,22 @@ const runReview = (repoDir: string, env: Record<string, string>) => {
     pullRequestId: Option.some(42),
   })
 
-  return Effect.runPromise(
-    executeReview.pipe(
-      Effect.provide(
-        makeSilentRuntimeLayer(cliInput).pipe(
-          Layer.provide(
-            ConfigProvider.layer(
-              ConfigProvider.fromEnv({
-                env,
-              }),
-            ),
+  const effect = executeReview.pipe(
+    Effect.provide(
+      makeSilentRuntimeLayer(cliInput).pipe(
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env,
+            }),
           ),
         ),
       ),
     ),
+  )
+
+  return Effect.runPromise(
+    effect.pipe(Effect.provideService(FetchHttpClient.Fetch, fetchMock as typeof globalThis.fetch)),
   )
 }
 
@@ -249,34 +273,54 @@ const runReviewScenario = async ({
   opencode,
   envOverrides = {},
   buildThreadsResponse = () => Response.json({ value: [] }),
+  buildPullRequestResponse = () =>
+    Response.json({
+      title: "Feature PR",
+      description: "Adds a new export",
+      workItemRefs: [],
+    }),
+  buildExtraResponse,
+  capturePrompt = false,
 }: {
   readonly opencode: ReviewScript
   readonly envOverrides?: Record<string, string> | ((fixture: FixtureRepo) => Record<string, string>)
   readonly buildThreadsResponse?: (fixture: FixtureRepo) => Response
+  readonly buildPullRequestResponse?: (fixture: FixtureRepo) => Response
+  readonly buildExtraResponse?: (
+    url: string,
+    init: RequestInit | undefined,
+    fixture: FixtureRepo,
+  ) => Response | undefined
+  readonly capturePrompt?: boolean
 }) => {
   const fixture = await createFixtureRepo()
   const binDir = await createTempDir("open-azdo-bin-")
   const opencodePath = join(binDir, "opencode")
+  const promptCapturePath = capturePrompt ? join(binDir, "prompt.txt") : undefined
 
   await mkdir(binDir, { recursive: true })
-  await writeReviewScript(opencodePath, opencode)
+  await writeReviewScript(
+    opencodePath,
+    opencode.type === "success" && promptCapturePath ? { ...opencode, capturePromptPath: promptCapturePath } : opencode,
+  )
 
   const { fetchMock, calls } = makeFetchMock((url, init) => {
-    if (url.endsWith("/pullRequests/42") && init?.method === "GET") {
-      return Response.json({
-        title: "Feature PR",
-        description: "Adds a new export",
-      })
+    if (url.includes("/pullRequests/42?includeWorkItemRefs=true&api-version=7.1") && init?.method === "GET") {
+      return buildPullRequestResponse(fixture)
     }
 
     if (url.endsWith("/threads?api-version=7.1") && init?.method === "GET") {
       return buildThreadsResponse(fixture)
     }
 
+    const extraResponse = buildExtraResponse?.(url, init, fixture)
+    if (extraResponse) {
+      return extraResponse
+    }
+
     return Response.json({ id: calls.length })
   })
 
-  const originalFetch = globalThis.fetch
   const originalPath = process.env.PATH
   const configEnv = {
     ...makeBaseEnv(),
@@ -284,15 +328,17 @@ const runReviewScenario = async ({
     ...(typeof envOverrides === "function" ? envOverrides(fixture) : envOverrides),
   }
 
-  globalThis.fetch = createMockFetch(fetchMock, originalFetch)
   process.env.PATH = `${binDir}:${originalPath ?? ""}`
 
   try {
-    const exitCode = await runReview(fixture.repoDir, configEnv)
-    return { calls, exitCode, fixture }
+    const exitCode = await runReview(fixture.repoDir, configEnv, fetchMock)
+    return {
+      calls,
+      exitCode,
+      fixture,
+      prompt: promptCapturePath ? await readFile(promptCapturePath, "utf8").catch(() => undefined) : undefined,
+    }
   } finally {
-    globalThis.fetch = originalFetch
-
     if (originalPath === undefined) {
       delete process.env.PATH
     } else {
@@ -321,6 +367,80 @@ describe("e2e", () => {
     expect(result.exitCode).toBe(0)
     expect(result.calls.filter((call) => call.init?.method === "POST")).toHaveLength(2)
     expect(summaryContent).toContain("$0.1234")
+  })
+
+  test("includes connected work item context in the generated prompt", async () => {
+    const result = await runReviewScenario({
+      opencode: { type: "success" },
+      capturePrompt: true,
+      buildPullRequestResponse: () =>
+        Response.json({
+          title: "Feature PR",
+          description: "Adds a new export",
+          workItemRefs: [{ id: "123" }],
+        }),
+      buildExtraResponse: (url, init) => {
+        if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
+          const body = parseRequestBody(init.body)
+
+          if (body.fields.includes("System.Title") && body.fields.length === 1) {
+            return Response.json({
+              value: [
+                {
+                  id: 456,
+                  fields: {
+                    "System.Title": "Parent title",
+                  },
+                },
+              ],
+            })
+          }
+
+          return Response.json({
+            value: [
+              {
+                id: 123,
+                fields: {
+                  "System.Title": "Fix regression",
+                  "System.WorkItemType": "Bug",
+                  "System.State": "Active",
+                  "System.Description": "<p>Hello world</p>",
+                  "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>Do the thing</li></ul>",
+                },
+                relations: [
+                  {
+                    rel: "System.LinkTypes.Hierarchy-Reverse",
+                    url: "https://dev.azure.com/acme/project/_apis/wit/workItems/456",
+                  },
+                ],
+              },
+            ],
+          })
+        }
+
+        if (isWorkItemCommentsUrl(url)) {
+          return Response.json({
+            comments: [
+              {
+                renderedText: "<p>Rendered comment</p>",
+                createdDate: "2026-03-21T10:00:00.000Z",
+                isDeleted: false,
+                createdBy: {
+                  displayName: "Reviewer",
+                },
+              },
+            ],
+          })
+        }
+
+        return undefined
+      },
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.prompt).toContain('"title":"Fix regression"')
+    expect(result.prompt).toContain('"acceptanceCriteriaMarkdown":"-   Do the thing"')
+    expect(result.prompt).toContain('"markdown":"Rendered comment"')
   })
 
   test("skips same-commit reruns and only updates the managed summary thread", async () => {

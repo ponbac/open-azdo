@@ -366,12 +366,42 @@ const runReviewWithResolvedConfig = (
       return 0
     }
 
+    const connectedWorkItems = yield* azureClient
+      .getPullRequestWorkItems({
+        context: azureContext,
+        token: config.systemAccessToken,
+        workItemRefs: metadata.workItemRefs,
+      })
+      .pipe(
+        Effect.tap((workItems) =>
+          logInfo("Loaded connected work item context.", {
+            workItemRefs: metadata.workItemRefs.length,
+            connectedWorkItems: workItems.length,
+            omittedConnectedWorkItems: Math.max(metadata.workItemRefs.length - workItems.length, 0),
+          }),
+        ),
+        Effect.catchTags({
+          AzureDevOpsHttpError: (error) =>
+            logInfo("Failed to load connected work item context. Continuing without work item enrichment.", {
+              workItemRefs: metadata.workItemRefs.length,
+              status: error.status,
+              url: error.url,
+            }).pipe(Effect.as(undefined)),
+          AzureDevOpsDecodeError: (error) =>
+            logInfo("Failed to decode connected work item context. Continuing without work item enrichment.", {
+              workItemRefs: metadata.workItemRefs.length,
+              url: error.url,
+            }).pipe(Effect.as(undefined)),
+        }),
+      )
+
     const reviewContext = buildReviewContext({
       metadata,
       reviewMode,
       previousReviewedCommit,
       pullRequestBaseRef: fullPullRequestDiff.baseRef,
       gitDiff: scopedDiff,
+      ...(connectedWorkItems ? { connectedWorkItems } : {}),
     })
     yield* logInfo("Built review context.", {
       reviewMode,
