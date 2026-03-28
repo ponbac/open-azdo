@@ -18,14 +18,16 @@
     },
     "apps/open-azdo": {
       "name": "open-azdo",
-      "version": "0.2.9",
+      "version": "0.3.1",
       "bin": {
         "open-azdo": "./dist/open-azdo.js",
       },
       "dependencies": {
         "@effect/platform-bun": "4.0.0-beta.33",
-        "@open-azdo/sandbox": "workspace:*",
         "effect": "4.0.0-beta.33",
+      },
+      "devDependencies": {
+        "@open-azdo/sandbox": "workspace:*",
       },
     },
     "apps/sandbox": {

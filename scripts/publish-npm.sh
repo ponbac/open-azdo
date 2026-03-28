@@ -16,10 +16,4 @@ if [[ -z "${NPM_CONFIG_TOKEN:-}" ]]; then
   exit 1
 fi
 
-args=(publish --cwd apps/open-azdo)
-
-if [[ "${mode}" == "dry-run" ]]; then
-  args+=(--dry-run)
-fi
-
-bun "${args[@]}"
+bun run ./scripts/publish-npm.ts "${mode}"
