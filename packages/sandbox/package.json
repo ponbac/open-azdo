@@ -1,0 +1,19 @@
+{
+  "name": "@open-azdo/sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./capture": "./src/capture.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck:tsc": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@open-azdo/azdo": "workspace:*",
+    "@open-azdo/workflows": "workspace:*",
+    "effect": "4.0.0-beta.33"
+  }
+}

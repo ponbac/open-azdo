@@ -9,6 +9,7 @@
 Inputs are treated as untrusted:
 
 - pull-request title and description
+- pull-request thread comments
 - repository contents
 - generated diffs and file excerpts
 - model output

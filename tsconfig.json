@@ -6,10 +6,16 @@
       "path": "./apps/open-azdo"
     },
     {
+      "path": "./apps/sandbox"
+    },
+    {
       "path": "./packages/core"
     },
     {
       "path": "./packages/azdo"
+    },
+    {
+      "path": "./packages/sandbox"
     },
     {
       "path": "./packages/workflows"

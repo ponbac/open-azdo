@@ -61,6 +61,30 @@ describe("opencode", () => {
     })
   })
 
+  test("passes through native openai gpt-5.4-mini models without provider overrides", async () => {
+    let receivedRequest: OpenCodeSdkPromptRequest | undefined
+    const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
+      receivedRequest = request
+
+      return Effect.succeed({
+        response: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      })
+    })
+
+    const request = makeOpenCodeRunRequest({
+      workspace: process.cwd(),
+      model: "openai/gpt-5.4-mini",
+    })
+
+    await Effect.runPromise(runOpenCode(request, sdkRuntime))
+
+    expect(receivedRequest?.model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5.4-mini",
+    })
+    expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
+  })
+
   test("returns structured output and model error metadata from the sdk runtime", async () => {
     const result = await Effect.runPromise(
       runOpenCode(
@@ -294,6 +318,69 @@ describe("opencode", () => {
       modelError: {
         name: "ContextOverflowError",
         message: "Context window exceeded.",
+      },
+    })
+  })
+
+  test("handles prompt responses that omit parts when structured output is present", async () => {
+    const result = await Effect.runPromise(
+      decodePromptResult({
+        info: {
+          id: "msg_missing_parts",
+          sessionID: "ses_missing_parts",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          parentID: "msg_parent",
+          modelID: "gpt-5.4-nano",
+          providerID: "openai",
+          mode: "primary",
+          agent: "azdo-review",
+          path: {
+            cwd: "/tmp/workspace",
+            root: "/tmp/workspace",
+          },
+          cost: 0.01,
+          tokens: {
+            input: 10,
+            output: 5,
+            reasoning: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          structured: {
+            summary: "Structured only",
+            verdict: "pass",
+            findings: [],
+            unmappedNotes: [],
+          },
+        } satisfies AssistantMessage,
+        parts: undefined,
+      }),
+    )
+
+    expect(result).toEqual({
+      response: "",
+      structured: {
+        summary: "Structured only",
+        verdict: "pass",
+        findings: [],
+        unmappedNotes: [],
+      },
+      sessionId: "ses_missing_parts",
+      usage: {
+        costUsd: 0.01,
+        tokens: {
+          input: 10,
+          output: 5,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
       },
     })
   })

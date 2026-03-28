@@ -10,6 +10,11 @@ import { OpenCodeSdkRuntime } from "../internal/Services/OpenCodeSdkRuntime"
 
 const OPEN_CODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
 
+type ParsedModel = {
+  readonly providerID: string
+  readonly modelID: string
+}
+
 const openCodePermission = {
   edit: "deny",
   read: "allow",
@@ -55,7 +60,7 @@ export const buildOpenCodeConfig = (agentName: string): Config => ({
   },
 })
 
-const parseModel = (model: string) => {
+const parseModel = (model: string): Effect.Effect<ParsedModel, OpenCodeOutputError> => {
   const separatorIndex = model.indexOf("/")
   if (separatorIndex <= 0 || separatorIndex === model.length - 1) {
     return Effect.fail(
