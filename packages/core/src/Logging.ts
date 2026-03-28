@@ -2,11 +2,19 @@ import { Effect, Redacted } from "effect"
 
 const REDACTED = "<redacted>"
 const DEFAULT_PREVIEW_LENGTH = 400
+const SECRET_STRING_PATTERNS = [
+  /authorization:\s*(?:basic|bearer)\s+[^\s"']+/gi,
+  /https?:\/\/[^/\s:@]+:[^@\s]+@/gi,
+  /open_azdo_live_access_token=[^\s"']+/gi,
+] as const
 
 const sanitizeKey = (key: string) => {
   const normalized = key.toLowerCase()
   return normalized.includes("token") || normalized.includes("secret") || normalized.includes("password")
 }
+
+const sanitizeString = (value: string) =>
+  SECRET_STRING_PATTERNS.reduce((current, pattern) => current.replace(pattern, REDACTED), value)
 
 export function sanitizeForLog(value: Record<string, unknown>): Record<string, unknown>
 export function sanitizeForLog(value: ReadonlyArray<unknown>): ReadonlyArray<unknown>
@@ -35,6 +43,10 @@ export function sanitizeForLog(value: unknown): unknown {
     }
 
     return Object.fromEntries(sanitizedEntries)
+  }
+
+  if (typeof value === "string") {
+    return sanitizeString(value)
   }
 
   return value

@@ -8,13 +8,15 @@ import * as Duration from "effect/Duration"
 
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { GitExec, GitExecLive, type GitExecShape, type PullRequestDiff } from "@open-azdo/core/git"
-import { OpenCodeRunnerLive, type OpenCodeRunRequest } from "@open-azdo/core/opencode"
+import { ProcessRunnerLive } from "@open-azdo/core/process-runner"
+
+import { type OpenCodeRunRequest } from "../src/opencode/Services/OpenCodeRunner"
+import { OpenCodeRunnerLayer } from "../src/opencode/Layers/OpenCodeRunner"
 import {
-  ProcessRunner,
-  ProcessRunnerLive,
-  type CommandExecutionResult,
-  type ExecuteCommandInput,
-} from "@open-azdo/core/process-runner"
+  OpenCodeSdkRuntime,
+  type OpenCodeSdkPromptRequest,
+  type OpenCodeSdkPromptResult,
+} from "../src/opencode/internal/Services/OpenCodeSdkRuntime"
 
 export const createTempDir = async (prefix: string) => mkdtemp(join(tmpdir(), prefix))
 
@@ -127,11 +129,13 @@ const SilentLoggerLayer = Logger.layer([Logger.make(() => undefined)], {
 export const withSilentLogs = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.provide(SilentLoggerLayer))
 
-export const makeProcessRunner = (
-  execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, never>,
-): ProcessRunner["Service"] => ({
-  execute,
-})
+export function makeOpenCodeSdkRuntime(
+  prompt: (input: OpenCodeSdkPromptRequest) => Effect.Effect<OpenCodeSdkPromptResult, never>,
+): OpenCodeSdkRuntime["Service"] {
+  return {
+    prompt,
+  }
+}
 
 export const makeGitExec = (execute: GitExecShape["execute"]): GitExec["Service"] => ({
   execute,
@@ -142,8 +146,11 @@ export const makeGitExecLayer = (service: GitExec["Service"]) => Layer.succeed(G
 export const makeRealGitExecLayer = () =>
   GitExecLive.pipe(Layer.provide(ProcessRunnerLive.pipe(Layer.provide(BaseRuntimeLayer))))
 
-export const makeOpenCodeLiveLayer = (runner: ProcessRunner["Service"]) =>
-  OpenCodeRunnerLive.pipe(Layer.provide(Layer.mergeAll(BaseRuntimeLayer, Layer.succeed(ProcessRunner, runner))))
+export function makeOpenCodeLiveLayer(sdkRuntime: OpenCodeSdkRuntime["Service"]) {
+  return OpenCodeRunnerLayer.pipe(
+    Layer.provide(Layer.mergeAll(BaseRuntimeLayer, Layer.succeed(OpenCodeSdkRuntime, sdkRuntime))),
+  )
+}
 
 export const makeOpenCodeRunRequest = (overrides: Partial<OpenCodeRunRequest> = {}): OpenCodeRunRequest => ({
   workspace: "/tmp/workspace",

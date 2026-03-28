@@ -1,5 +1,7 @@
 .reference/
 .turbo/
+.captures/
+.open-azdo/
 *.tsbuildinfo
 coverage/
 dist/
@@ -7,3 +9,4 @@ apps/*/dist/
 packages/*/dist/
 node_modules/
 tmp/
+.env.integration.local

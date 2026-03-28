@@ -1,3 +1,4 @@
+import type { OutputFormat } from "@opencode-ai/sdk/v2"
 import { ServiceMap } from "effect"
 import type { Duration } from "effect/Duration"
 import type { Effect } from "effect"
@@ -17,8 +18,20 @@ export type OpenCodeRunUsage = {
   readonly tokens?: OpenCodeRunTokens | undefined
 }
 
+export type OpenCodeJsonSchemaOutputFormat = Extract<OutputFormat, { readonly type: "json_schema" }>
+
+export type OpenCodeOutputFormat = OutputFormat
+
+export type OpenCodeModelError = {
+  readonly name: string
+  readonly message: string
+  readonly retries?: number | undefined
+}
+
 export type OpenCodeRunResult = {
   readonly response: string
+  readonly structured?: unknown
+  readonly modelError?: OpenCodeModelError | undefined
   readonly sessionId?: string | undefined
   readonly usage?: OpenCodeRunUsage | undefined
 }
@@ -31,6 +44,7 @@ export type OpenCodeRunRequest = {
   readonly timeout: Duration
   readonly prompt: string
   readonly inheritedEnv: NodeJS.ProcessEnv
+  readonly format?: OpenCodeOutputFormat | undefined
 }
 
 export interface OpenCodeRunnerShape {

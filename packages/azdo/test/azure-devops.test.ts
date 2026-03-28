@@ -43,8 +43,23 @@ describe("azure devops", () => {
   test("decodes pull request metadata from the live client", async () => {
     const { fetchMock } = makeFetchMock(() =>
       Response.json({
+        pullRequestId: 42,
         title: "Feature PR",
         description: "Adds a new export",
+        sourceRefName: "refs/heads/feature",
+        targetRefName: "refs/heads/main",
+        createdBy: {
+          displayName: "Annie Case",
+        },
+        repository: {
+          id: "repo-1",
+          name: "open-azdo",
+          remoteUrl: "https://dev.azure.com/acme/project/_git/repo-1",
+          webUrl: "https://dev.azure.com/acme/project/_git/repo-1",
+        },
+        lastMergeSourceCommit: {
+          commitId: "abc123",
+        },
         workItemRefs: [
           {
             id: "123",
@@ -62,6 +77,12 @@ describe("azure devops", () => {
     )
 
     expect(metadata.title).toBe("Feature PR")
+    expect(metadata.pullRequestId).toBe(42)
+    expect(metadata.sourceRefName).toBe("refs/heads/feature")
+    expect(metadata.targetRefName).toBe("refs/heads/main")
+    expect(metadata.createdByDisplayName).toBe("Annie Case")
+    expect(metadata.repository?.name).toBe("open-azdo")
+    expect(metadata.sourceCommitId).toBe("abc123")
     expect(metadata.workItemRefs).toEqual([
       {
         id: "123",
@@ -202,6 +223,12 @@ describe("azure devops", () => {
               {
                 id: 456,
                 content: null,
+                publishedDate: "2026-03-22T09:00:00.000Z",
+                isDeleted: false,
+                commentType: 1,
+                author: {
+                  displayName: "Annie Case",
+                },
               },
             ],
             threadContext: {
@@ -230,6 +257,8 @@ describe("azure devops", () => {
     expect(threads).toHaveLength(1)
     expect(threads[0]?.status).toBe("active")
     expect(threads[0]?.comments[0]?.content).toBeNull()
+    expect(threads[0]?.comments[0]?.author?.displayName).toBe("Annie Case")
+    expect(threads[0]?.comments[0]?.publishedDate).toBe("2026-03-22T09:00:00.000Z")
   })
 
   test("decodes system threads without status and with null thread context", async () => {

@@ -1,145 +1,382 @@
-import { existsSync } from "node:fs"
-
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import * as Duration from "effect/Duration"
+import type { AssistantMessage, Part } from "@opencode-ai/sdk/v2"
 
-import { OpenCodeRunner, extractFinalResponse, extractOpenCodeRunResult } from "@open-azdo/core/opencode"
-import { makeOpenCodeLiveLayer, makeOpenCodeRunRequest, makeProcessRunner, withSilentLogs } from "./helpers"
+import { OpenCodeRunner, buildOpenCodeConfig } from "@open-azdo/core/opencode"
+
+import { makeOpenCodeLiveLayer, makeOpenCodeRunRequest, makeOpenCodeSdkRuntime, withSilentLogs } from "./helpers"
+import { decodePromptResult } from "../src/opencode/internal/Layers/OpenCodeSdkRuntime"
+import type { OpenCodeSdkPromptRequest } from "../src/opencode/internal/Services/OpenCodeSdkRuntime"
 
 const runOpenCode = (
   request = makeOpenCodeRunRequest(),
-  runner = makeProcessRunner(() => Effect.die("runner not configured")),
+  sdkRuntime = makeOpenCodeSdkRuntime(() => Effect.die("sdk runtime not configured")),
 ) =>
   Effect.gen(function* () {
     const service = yield* OpenCodeRunner
     return yield* service.run(request)
-  }).pipe(Effect.provide(makeOpenCodeLiveLayer(runner)), withSilentLogs)
+  }).pipe(Effect.provide(makeOpenCodeLiveLayer(sdkRuntime)), withSilentLogs)
 
 describe("opencode", () => {
-  test("extracts the final JSON response from line-delimited events", () => {
-    const output = [
-      JSON.stringify({ text: "ignored prelude" }),
-      JSON.stringify({
-        content: [
-          {
-            text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-          },
-        ],
-      }),
-    ].join("\n")
+  test("passes parsed model, prompt, config, format, and variant to the sdk runtime", async () => {
+    let receivedRequest: OpenCodeSdkPromptRequest | undefined
+    const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
+      receivedRequest = request
 
-    expect(extractFinalResponse(output)).toContain('"summary":"Summary"')
+      return Effect.succeed({
+        response: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      })
+    })
+
+    const request = makeOpenCodeRunRequest({
+      workspace: process.cwd(),
+      model: "azure/deployments/gpt-5.4-mini",
+      variant: "high",
+      format: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+        },
+        retryCount: 2,
+      },
+    })
+
+    const result = await Effect.runPromise(runOpenCode(request, sdkRuntime))
+
+    expect(result.response).toContain('"summary":"Summary"')
+    expect(receivedRequest).toEqual({
+      workspace: process.cwd(),
+      model: {
+        providerID: "azure",
+        modelID: "deployments/gpt-5.4-mini",
+      },
+      agent: request.agent,
+      variant: "high",
+      timeout: request.timeout,
+      prompt: request.prompt,
+      inheritedEnv: {},
+      format: request.format,
+      config: buildOpenCodeConfig(request.agent),
+    })
   })
 
-  test("extracts the final response from OpenCode raw json events", () => {
-    const output = [
-      JSON.stringify({
-        type: "step_start",
-        timestamp: 1773751774585,
-        sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-        part: {
-          id: "prt_cfbd82d76001DlbMToMI154Vrz",
-          sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-          messageID: "msg_cfbd82a0c001eivo5hX596tjMN",
-          type: "step-start",
-          snapshot: "5047b7d33fe0f338f7a45ece74a710d7dc4c884e",
-        },
-      }),
-      JSON.stringify({
-        type: "text",
-        timestamp: 1773751778187,
-        sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-        part: {
-          id: "prt_cfbd83af8001cgVvBXN5I4M2WT",
-          sessionID: "ses_30427d661ffeOlnN5iZYsvbARB",
-          messageID: "msg_cfbd82a0c001eivo5hX596tjMN",
-          type: "text",
-          text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-        },
-      }),
-    ].join("\n")
+  test("passes through native openai gpt-5.4-mini models without provider overrides", async () => {
+    let receivedRequest: OpenCodeSdkPromptRequest | undefined
+    const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
+      receivedRequest = request
 
-    expect(extractFinalResponse(output)).toBe('{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}')
+      return Effect.succeed({
+        response: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
+      })
+    })
+
+    const request = makeOpenCodeRunRequest({
+      workspace: process.cwd(),
+      model: "openai/gpt-5.4-mini",
+    })
+
+    await Effect.runPromise(runOpenCode(request, sdkRuntime))
+
+    expect(receivedRequest?.model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5.4-mini",
+    })
+    expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
-  test("extracts usage metadata from a step-finish part", () => {
-    const output = [
-      JSON.stringify({
-        type: "message.part.updated",
-        sessionID: "ses_usage",
-        part: {
-          id: "prt_finish",
-          sessionID: "ses_usage",
-          messageID: "msg_usage",
-          type: "step-finish",
-          cost: 0.1234,
-          tokens: {
-            input: 1200,
-            output: 345,
-            reasoning: 67,
-            cacheRead: 890,
-            cacheWrite: 12,
-          },
-        },
-      }),
-      JSON.stringify({
-        type: "text",
-        sessionID: "ses_usage",
-        part: {
-          id: "prt_text",
-          sessionID: "ses_usage",
-          messageID: "msg_usage",
-          type: "text",
-          text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-        },
-      }),
-    ].join("\n")
+  test("returns structured output and model error metadata from the sdk runtime", async () => {
+    const result = await Effect.runPromise(
+      runOpenCode(
+        makeOpenCodeRunRequest(),
+        makeOpenCodeSdkRuntime(() =>
+          Effect.succeed({
+            response: '{"summary":"Summary"}',
+            structured: {
+              summary: "Summary",
+              verdict: "pass",
+              findings: [],
+              unmappedNotes: [],
+            },
+            sessionId: "ses_123",
+            usage: {
+              costUsd: 0.12,
+              tokens: {
+                input: 100,
+                output: 20,
+                reasoning: 5,
+                cacheRead: 10,
+                cacheWrite: 2,
+              },
+            },
+            modelError: {
+              name: "StructuredOutputError",
+              message: "schema mismatch",
+              retries: 2,
+            },
+          }),
+        ),
+      ),
+    )
 
-    expect(extractOpenCodeRunResult(output)).toEqual({
-      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-      sessionId: "ses_usage",
+    expect(result).toEqual({
+      response: '{"summary":"Summary"}',
+      structured: {
+        summary: "Summary",
+        verdict: "pass",
+        findings: [],
+        unmappedNotes: [],
+      },
+      sessionId: "ses_123",
       usage: {
-        costUsd: 0.1234,
+        costUsd: 0.12,
         tokens: {
-          input: 1200,
-          output: 345,
-          reasoning: 67,
-          cacheRead: 890,
-          cacheWrite: 12,
+          input: 100,
+          output: 20,
+          reasoning: 5,
+          cacheRead: 10,
+          cacheWrite: 2,
         },
+      },
+      modelError: {
+        name: "StructuredOutputError",
+        message: "schema mismatch",
+        retries: 2,
       },
     })
   })
 
-  test("falls back to assistant info usage when no step-finish part is present", () => {
-    const output = [
-      JSON.stringify({
-        type: "message.updated",
-        sessionID: "ses_assistant",
-        info: {
-          role: "assistant",
-          cost: 0.0456,
-          tokens: {
-            input: 900,
-            output: 120,
-            reasoning: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-          },
-        },
-        text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-      }),
-    ].join("\n")
+  test("fails when the model has no provider separator", async () => {
+    const exit = await Effect.runPromiseExit(
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          model: "gpt-5.4",
+        }),
+      ),
+    )
 
-    expect(extractOpenCodeRunResult(output)).toEqual({
-      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-      sessionId: "ses_assistant",
+    expect(exit._tag).toBe("Failure")
+  })
+
+  test("fails when the model provider segment is empty", async () => {
+    const exit = await Effect.runPromiseExit(
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          model: "/gpt-5.4",
+        }),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
+  })
+
+  test("fails when the model id segment is empty", async () => {
+    const exit = await Effect.runPromiseExit(
+      runOpenCode(
+        makeOpenCodeRunRequest({
+          model: "openai/",
+        }),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
+  })
+
+  test("salvages partial text for assistant output errors", async () => {
+    const result = await Effect.runPromise(
+      decodePromptResult({
+        info: {
+          id: "msg_123",
+          sessionID: "ses_123",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          parentID: "msg_parent",
+          modelID: "gpt-5.4",
+          providerID: "openai",
+          mode: "primary",
+          agent: "azdo-review",
+          path: {
+            cwd: "/tmp/workspace",
+            root: "/tmp/workspace",
+          },
+          cost: 0.12,
+          tokens: {
+            input: 100,
+            output: 20,
+            reasoning: 5,
+            cache: {
+              read: 10,
+              write: 2,
+            },
+          },
+          error: {
+            name: "MessageOutputLengthError",
+            data: {},
+          },
+        } satisfies AssistantMessage,
+        parts: [
+          {
+            id: "prt_123",
+            sessionID: "ses_123",
+            messageID: "msg_123",
+            type: "text",
+            text: '{"summary":"Partial summary","verdict":"concerns","findings":[],"unmappedNotes":[]}',
+          },
+        ] satisfies Part[],
+      }),
+    )
+
+    expect(result).toEqual({
+      response: '{"summary":"Partial summary","verdict":"concerns","findings":[],"unmappedNotes":[]}',
+      sessionId: "ses_123",
       usage: {
-        costUsd: 0.0456,
+        costUsd: 0.12,
         tokens: {
-          input: 900,
-          output: 120,
+          input: 100,
+          output: 20,
+          reasoning: 5,
+          cacheRead: 10,
+          cacheWrite: 2,
+        },
+      },
+      modelError: {
+        name: "MessageOutputLengthError",
+        message: "MessageOutputLengthError",
+      },
+    })
+  })
+
+  test("salvages structured payloads for assistant errors without text", async () => {
+    const result = await Effect.runPromise(
+      decodePromptResult({
+        info: {
+          id: "msg_456",
+          sessionID: "ses_456",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          parentID: "msg_parent",
+          modelID: "gpt-5.4",
+          providerID: "openai",
+          mode: "primary",
+          agent: "azdo-review",
+          path: {
+            cwd: "/tmp/workspace",
+            root: "/tmp/workspace",
+          },
+          cost: 0.34,
+          tokens: {
+            input: 150,
+            output: 0,
+            reasoning: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          structured: {
+            summary: "Structured fallback",
+            verdict: "concerns",
+            findings: [],
+            unmappedNotes: [],
+          },
+          error: {
+            name: "ContextOverflowError",
+            data: {
+              message: "Context window exceeded.",
+            },
+          },
+        } satisfies AssistantMessage,
+        parts: [],
+      }),
+    )
+
+    expect(result).toEqual({
+      response: "",
+      structured: {
+        summary: "Structured fallback",
+        verdict: "concerns",
+        findings: [],
+        unmappedNotes: [],
+      },
+      sessionId: "ses_456",
+      usage: {
+        costUsd: 0.34,
+        tokens: {
+          input: 150,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      },
+      modelError: {
+        name: "ContextOverflowError",
+        message: "Context window exceeded.",
+      },
+    })
+  })
+
+  test("handles prompt responses that omit parts when structured output is present", async () => {
+    const result = await Effect.runPromise(
+      decodePromptResult({
+        info: {
+          id: "msg_missing_parts",
+          sessionID: "ses_missing_parts",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          parentID: "msg_parent",
+          modelID: "gpt-5.4-nano",
+          providerID: "openai",
+          mode: "primary",
+          agent: "azdo-review",
+          path: {
+            cwd: "/tmp/workspace",
+            root: "/tmp/workspace",
+          },
+          cost: 0.01,
+          tokens: {
+            input: 10,
+            output: 5,
+            reasoning: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          structured: {
+            summary: "Structured only",
+            verdict: "pass",
+            findings: [],
+            unmappedNotes: [],
+          },
+        } satisfies AssistantMessage,
+        parts: undefined,
+      }),
+    )
+
+    expect(result).toEqual({
+      response: "",
+      structured: {
+        summary: "Structured only",
+        verdict: "pass",
+        findings: [],
+        unmappedNotes: [],
+      },
+      sessionId: "ses_missing_parts",
+      usage: {
+        costUsd: 0.01,
+        tokens: {
+          input: 10,
+          output: 5,
           reasoning: 0,
           cacheRead: 0,
           cacheWrite: 0,
@@ -148,249 +385,69 @@ describe("opencode", () => {
     })
   })
 
-  test("extracts nested cache token metadata from OpenCode usage payloads", () => {
-    const output = [
-      JSON.stringify({
-        type: "message.part.updated",
-        sessionID: "ses_nested_usage",
-        part: {
-          id: "prt_finish",
-          sessionID: "ses_nested_usage",
-          messageID: "msg_usage",
-          type: "step-finish",
-          cost: 0.0789,
+  test("fails assistant errors that return no usable payload", async () => {
+    const exit = await Effect.runPromiseExit(
+      decodePromptResult({
+        info: {
+          id: "msg_789",
+          sessionID: "ses_789",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          parentID: "msg_parent",
+          modelID: "gpt-5.4",
+          providerID: "openai",
+          mode: "primary",
+          agent: "azdo-review",
+          path: {
+            cwd: "/tmp/workspace",
+            root: "/tmp/workspace",
+          },
+          cost: 0,
           tokens: {
-            input: 700,
-            output: 80,
-            reasoning: 5,
+            input: 100,
+            output: 0,
+            reasoning: 0,
             cache: {
-              read: 123,
-              write: 45,
+              read: 0,
+              write: 0,
             },
           },
-        },
-      }),
-      JSON.stringify({
-        type: "text",
-        sessionID: "ses_nested_usage",
-        part: {
-          id: "prt_text",
-          sessionID: "ses_nested_usage",
-          messageID: "msg_usage",
-          type: "text",
-          text: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-        },
-      }),
-    ].join("\n")
-
-    expect(extractOpenCodeRunResult(output)).toEqual({
-      response: '{"summary":"ok","verdict":"pass","findings":[],"unmappedNotes":[]}',
-      sessionId: "ses_nested_usage",
-      usage: {
-        costUsd: 0.0789,
-        tokens: {
-          input: 700,
-          output: 80,
-          reasoning: 5,
-          cacheRead: 123,
-          cacheWrite: 45,
-        },
-      },
-    })
-  })
-
-  test("fails on empty output", () => {
-    expect(() => extractFinalResponse("")).toThrow("OpenCode did not return a final response.")
-  })
-
-  test("surfaces the embedded OpenCode error event message", () => {
-    const output = [
-      JSON.stringify({
-        type: "step_start",
-        timestamp: 1774010510111,
-        sessionID: "ses_test",
-        part: {
-          id: "prt_test",
-          sessionID: "ses_test",
-          messageID: "msg_test",
-          type: "step-start",
-          snapshot: "snap",
-        },
-      }),
-      JSON.stringify({
-        type: "error",
-        timestamp: 1774010510115,
-        sessionID: "ses_test",
-        error: {
-          name: "ProviderAuthError",
-          data: {
-            message: "Missing OpenAI API key.",
+          error: {
+            name: "APIError",
+            data: {
+              message: "Provider request failed.",
+              isRetryable: false,
+            },
           },
-        },
+        } satisfies AssistantMessage,
+        parts: [],
       }),
-    ].join("\n")
-
-    expect(() => extractFinalResponse(output)).toThrow("ProviderAuthError: Missing OpenAI API key.")
-  })
-
-  test("cleans up temp config directories after a run", async () => {
-    let configDir = ""
-
-    const result = await Effect.runPromise(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          workspace: process.cwd(),
-          prompt: "prompt",
-        }),
-        makeProcessRunner((input) => {
-          configDir = input.env?.OPENCODE_CONFIG_DIR ?? ""
-          expect(input.command).toBe("opencode")
-
-          return Effect.succeed({
-            exitCode: 0,
-            stdout: JSON.stringify({
-              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-            }),
-            stderr: "",
-          })
-        }),
-      ),
     )
 
-    expect(result.response).toContain('"summary":"Summary"')
-    expect(configDir).not.toBe("")
-    expect(existsSync(configDir)).toBe(false)
+    expect(exit._tag).toBe("Failure")
   })
 
-  test("passes the configured timeout to the OpenCode process", async () => {
+  test("passes the configured timeout through to the sdk runtime", async () => {
     let timeout: Duration.Duration | undefined
 
     await Effect.runPromise(
       runOpenCode(
         makeOpenCodeRunRequest({
-          workspace: process.cwd(),
           timeout: Duration.seconds(450),
         }),
-        makeProcessRunner((input) => {
-          timeout = input.timeout
+        makeOpenCodeSdkRuntime((request) => {
+          timeout = request.timeout
 
           return Effect.succeed({
-            exitCode: 0,
-            stdout: JSON.stringify({
-              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-            }),
-            stderr: "",
+            response: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
           })
         }),
       ),
     )
 
     expect(timeout === undefined ? undefined : Duration.toMillis(timeout)).toBe(450_000)
-  })
-
-  test("passes the configured OpenCode variant to the process", async () => {
-    let args: ReadonlyArray<string> = []
-
-    await Effect.runPromise(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          workspace: process.cwd(),
-          variant: "high",
-        }),
-        makeProcessRunner((input) => {
-          args = input.args
-
-          return Effect.succeed({
-            exitCode: 0,
-            stdout: JSON.stringify({
-              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-            }),
-            stderr: "",
-          })
-        }),
-      ),
-    )
-
-    expect(args).toContain("--variant")
-    expect(args).toContain("high")
-  })
-
-  test("raises the process output cap for large OpenCode event streams", async () => {
-    let maxOutputBytes: number | undefined
-    const largePrelude = "x".repeat(1_100_000)
-
-    const result = await Effect.runPromise(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          workspace: process.cwd(),
-        }),
-        makeProcessRunner((input) => {
-          maxOutputBytes = input.maxOutputBytes
-
-          return Effect.succeed({
-            exitCode: 0,
-            stdout: [
-              JSON.stringify({
-                text: largePrelude,
-              }),
-              JSON.stringify({
-                text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-              }),
-            ].join("\n"),
-            stderr: "",
-          })
-        }),
-      ),
-    )
-
-    expect(maxOutputBytes).toBe(10_000_000)
-    expect(result.response).toBe('{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}')
-  })
-
-  test("keeps the large review prompt out of the command-line arguments", async () => {
-    let args: ReadonlyArray<string> = []
-    const prompt = "review context ".repeat(20_000)
-
-    await Effect.runPromise(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          workspace: process.cwd(),
-          prompt,
-        }),
-        makeProcessRunner((input) => {
-          args = input.args
-
-          return Effect.succeed({
-            exitCode: 0,
-            stdout: JSON.stringify({
-              text: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-            }),
-            stderr: "",
-          })
-        }),
-      ),
-    )
-
-    expect(args).not.toContain(prompt)
-    expect(args.at(-1)).toBe("Review the pull request using your configured instructions and return strict JSON only.")
-  })
-
-  test("fails when OpenCode exits non-zero", async () => {
-    const exit = await Effect.runPromiseExit(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          workspace: process.cwd(),
-        }),
-        makeProcessRunner(() =>
-          Effect.succeed({
-            exitCode: 1,
-            stdout: "",
-            stderr: "boom",
-          }),
-        ),
-      ),
-    )
-
-    expect(exit._tag).toBe("Failure")
   })
 })

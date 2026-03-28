@@ -9,10 +9,11 @@ This package is the published-package path for secure PR review automation. Unli
 - edit the repository
 - commit or push changes
 - expose command-triggered execution modes
-- run a long-lived OpenCode server
+- rely on a persistent or shared OpenCode server
 - rely on tokenized clone URLs
 
 The CLI consumes the Azure Pipeline checkout workspace directly and uses the built-in `System.AccessToken` for the minimal Azure DevOps REST surface.
+Each review run starts a short-lived localhost OpenCode server, prompts it through the SDK v2 client with JSON-schema structured output, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
 
 ## Install And Run
 
@@ -49,6 +50,50 @@ Optional flags:
 - `--prompt-file <path>`
 - `--dry-run`
 - `--json`
+
+## Sandbox Capture
+
+Use the live capture command when you want to validate changes against a real Azure DevOps pull request without mutating PR threads:
+
+```bash
+bun run ./bin/open-azdo.ts sandbox capture --model "openai/gpt-5.4"
+```
+
+The command is intentionally opt-in and uses a separate env namespace:
+
+- `OPEN_AZDO_LIVE_MODEL`
+- `OPEN_AZDO_LIVE_OPENCODE_VARIANT`
+- `OPEN_AZDO_LIVE_OPENCODE_TIMEOUT`
+- `OPEN_AZDO_LIVE_WORKSPACE`
+- `OPEN_AZDO_LIVE_COLLECTION_URL`
+- `OPEN_AZDO_LIVE_ORGANIZATION`
+- `OPEN_AZDO_LIVE_PROJECT`
+- `OPEN_AZDO_LIVE_REPOSITORY_ID`
+- `OPEN_AZDO_LIVE_PULL_REQUEST_ID`
+- `OPEN_AZDO_LIVE_ACCESS_TOKEN`
+
+Provider API keys remain provider-native, for example `OPENAI_API_KEY`.
+
+Behavior:
+
+- if `OPEN_AZDO_LIVE_WORKSPACE` or `--workspace` is set, `open-azdo` validates that checkout and does not mutate it
+- otherwise it creates a temporary checkout, fetches the PR source and target refs, runs the review, and deletes the temp checkout on exit
+- Azure DevOps stays read-only for this command
+- the same short-lived localhost OpenCode server behavior used by `review` is reused here
+
+Default output path:
+
+```text
+.captures/<org>-<project>-pr-<id>.json
+```
+
+From the monorepo root you can use:
+
+```bash
+bun run sandbox:capture
+```
+
+Start with [`.env.integration.example`](../../.env.integration.example) and write your local secrets to `.env.integration.local`.
 
 Exit behavior:
 
@@ -92,7 +137,7 @@ steps:
       unzip -q bun.zip
       export PATH="$PWD/bun-linux-x64:$PATH"
 
-      curl -fsSL https://github.com/sst/opencode/releases/download/v1.2.27/opencode-linux-x64.tar.gz -o opencode.tar.gz
+      curl -fsSL https://github.com/sst/opencode/releases/download/v1.3.3/opencode-linux-x64.tar.gz -o opencode.tar.gz
       mkdir -p opencode-bin
       tar -xzf opencode.tar.gz -C opencode-bin
       export PATH="$PWD/opencode-bin:$PATH"
@@ -114,3 +159,12 @@ bun install
 bun run check
 bun run build
 ```
+
+For local sandbox validation:
+
+```bash
+bun run sandbox:capture
+bun run sandbox:dev
+```
+
+The sandbox app runs on `http://127.0.0.1:4317`, not port `3000`. The expected UI smoke path is manual validation with the `playwriter` skill.

@@ -7,6 +7,70 @@ import { ReviewOutputValidationError } from "../errors"
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 
+export const ReviewResultJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "verdict", "findings", "unmappedNotes"],
+  properties: {
+    summary: {
+      type: "string",
+      minLength: 1,
+    },
+    verdict: {
+      type: "string",
+      enum: ["pass", "concerns", "fail"],
+    },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["severity", "confidence", "title", "body", "filePath", "line"],
+        properties: {
+          severity: {
+            type: "string",
+            enum: ["low", "medium", "high", "critical"],
+          },
+          confidence: {
+            type: "string",
+            enum: ["low", "medium", "high"],
+          },
+          title: {
+            type: "string",
+            minLength: 1,
+          },
+          body: {
+            type: "string",
+            minLength: 1,
+          },
+          filePath: {
+            type: "string",
+            minLength: 1,
+          },
+          line: {
+            type: "integer",
+            minimum: 1,
+          },
+          endLine: {
+            type: "integer",
+            minimum: 1,
+          },
+          suggestion: {
+            type: "string",
+            minLength: 1,
+          },
+        },
+      },
+    },
+    unmappedNotes: {
+      type: "array",
+      items: {
+        type: "string",
+      },
+    },
+  },
+} as const
+
 export const ReviewSeveritySchema = Schema.Literals(["low", "medium", "high", "critical"])
 export type ReviewSeverity = Schema.Schema.Type<typeof ReviewSeveritySchema>
 

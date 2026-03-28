@@ -1,11 +1,51 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option } from "effect"
+import * as ConfigProvider from "effect/ConfigProvider"
+import { Effect, Layer, Option } from "effect"
 import * as Duration from "effect/Duration"
 
 import { inferOrganizationFromCollectionUrl } from "../src/AppConfig"
+import {
+  SandboxCaptureConfig,
+  makeSandboxCaptureConfigLayer,
+  type SandboxCaptureCliInput,
+} from "../src/SandboxCaptureConfig"
 import { makeBaseEnv, makeReviewCliInput, resolveAppConfig } from "./helpers"
 
 describe("config", () => {
+  const makeSandboxCaptureCliInput = (overrides: Partial<SandboxCaptureCliInput> = {}): SandboxCaptureCliInput => ({
+    model: Option.none(),
+    opencodeVariant: Option.none(),
+    opencodeTimeout: Option.none(),
+    workspace: Option.none(),
+    organization: Option.none(),
+    project: Option.none(),
+    repositoryId: Option.none(),
+    pullRequestId: Option.none(),
+    collectionUrl: Option.none(),
+    output: Option.none(),
+    json: false,
+    ...overrides,
+  })
+
+  const resolveSandboxCaptureConfig = (cliInput: SandboxCaptureCliInput, env: Record<string, string | undefined>) =>
+    Effect.gen(function* () {
+      return yield* SandboxCaptureConfig
+    }).pipe(
+      Effect.provide(
+        makeSandboxCaptureConfigLayer(cliInput).pipe(
+          Layer.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: Object.fromEntries(
+                  Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+                ),
+              }),
+            ),
+          ),
+        ),
+      ),
+    )
+
   test("requires a model and system access token", async () => {
     const exit = await Effect.runPromiseExit(
       resolveAppConfig(makeReviewCliInput(), {
@@ -163,5 +203,21 @@ describe("config", () => {
     )
 
     expect(exit._tag).toBe("Failure")
+  })
+
+  test("writes sandbox captures under the repo-root .captures directory by default", async () => {
+    const config = await Effect.runPromise(
+      resolveSandboxCaptureConfig(makeSandboxCaptureCliInput(), {
+        OPEN_AZDO_LIVE_MODEL: "openai/gpt-5.4",
+        OPEN_AZDO_LIVE_COLLECTION_URL: "https://dev.azure.com/acme",
+        OPEN_AZDO_LIVE_ORGANIZATION: "acme",
+        OPEN_AZDO_LIVE_PROJECT: "project",
+        OPEN_AZDO_LIVE_REPOSITORY_ID: "repo-1",
+        OPEN_AZDO_LIVE_PULL_REQUEST_ID: "42",
+        OPEN_AZDO_LIVE_ACCESS_TOKEN: "system-token",
+      }),
+    )
+
+    expect(config.output.replaceAll("\\", "/")).toEndWith("/.captures/acme-project-pr-42.json")
   })
 })

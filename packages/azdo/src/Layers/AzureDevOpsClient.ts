@@ -536,9 +536,42 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
       ))
 
     return {
+      ...(metadata.pullRequestId !== null && metadata.pullRequestId !== undefined
+        ? { pullRequestId: metadata.pullRequestId }
+        : {}),
       title: metadata.title,
       description: metadata.description ?? "",
       ...(metadata.url ? { url: metadata.url } : {}),
+      ...(normalizeOptionalString(metadata.sourceRefName ?? undefined)
+        ? { sourceRefName: normalizeOptionalString(metadata.sourceRefName ?? undefined) }
+        : {}),
+      ...(normalizeOptionalString(metadata.targetRefName ?? undefined)
+        ? { targetRefName: normalizeOptionalString(metadata.targetRefName ?? undefined) }
+        : {}),
+      ...(normalizeOptionalString(metadata.createdBy?.displayName ?? undefined)
+        ? { createdByDisplayName: normalizeOptionalString(metadata.createdBy?.displayName ?? undefined) }
+        : {}),
+      ...(metadata.repository
+        ? {
+            repository: {
+              ...(normalizeOptionalString(metadata.repository.id ?? undefined)
+                ? { id: normalizeOptionalString(metadata.repository.id ?? undefined) }
+                : {}),
+              ...(normalizeOptionalString(metadata.repository.name ?? undefined)
+                ? { name: normalizeOptionalString(metadata.repository.name ?? undefined) }
+                : {}),
+              ...(normalizeOptionalString(metadata.repository.remoteUrl ?? undefined)
+                ? { remoteUrl: normalizeOptionalString(metadata.repository.remoteUrl ?? undefined) }
+                : {}),
+              ...(normalizeOptionalString(metadata.repository.webUrl ?? undefined)
+                ? { webUrl: normalizeOptionalString(metadata.repository.webUrl ?? undefined) }
+                : {}),
+            },
+          }
+        : {}),
+      ...(normalizeOptionalString(metadata.lastMergeSourceCommit?.commitId ?? undefined)
+        ? { sourceCommitId: normalizeOptionalString(metadata.lastMergeSourceCommit?.commitId ?? undefined) }
+        : {}),
       workItemRefs: mapPullRequestWorkItemRefs(rawWorkItemRefs),
     }
   })

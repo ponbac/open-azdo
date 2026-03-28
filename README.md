@@ -35,6 +35,8 @@ bun run --cwd packages/core typecheck
 bun run --cwd packages/core typecheck:tsc
 bun run --cwd apps/open-azdo test
 bun run --cwd packages/workflows test
+bun run sandbox:dev
+bun run sandbox:capture
 ```
 
 ## TypeScript Tooling
@@ -86,6 +88,23 @@ bun run publish:npm
 ## CLI Package
 
 Package-facing docs and examples live in [`apps/open-azdo/README.md`](./apps/open-azdo/README.md).
+
+## Live Validation And Sandbox
+
+This repo now includes an opt-in live validation lane for real Azure DevOps pull requests plus a local replay app:
+
+- `bun run sandbox:capture`
+  Runs `open-azdo sandbox capture` with `.env.integration.local`, starts the same short-lived local OpenCode server model as production, reads a real AZDO PR, and writes a local capture artifact under `.captures/`.
+- `bun run sandbox:dev`
+  Starts the local replay app on `http://127.0.0.1:4317`.
+- `bun run sandbox:preview`
+  Serves the built sandbox app on `http://127.0.0.1:4318`.
+- `bun run test:integration`
+  Runs the opt-in live integration test for sandbox capture.
+
+Create `.env.integration.local` from [`.env.integration.example`](./.env.integration.example). The live lane stays read-only against Azure DevOps and never publishes comments.
+
+The sandbox app lives in [`apps/sandbox`](./apps/sandbox/README.md). Its expected end-to-end validation path is manual browser smoke with the `playwriter` skill against `127.0.0.1:4317`, not dedicated UI test files.
 
 ## Reference Assets
 
