@@ -1,4 +1,5 @@
 import { Effect, Redacted } from "effect"
+import * as Logger from "effect/Logger"
 
 const REDACTED = "<redacted>"
 const DEFAULT_PREVIEW_LENGTH = 400
@@ -60,12 +61,15 @@ export const truncateForLog = (value: string, maxLength = DEFAULT_PREVIEW_LENGTH
   return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
 }
 
-export const renderLogLine = (level: "info" | "error" | "debug", message: string, fields?: Record<string, unknown>) =>
-  JSON.stringify({
-    level,
-    message,
-    ...sanitizeForLog(fields ?? {}),
-  })
+/**
+ * Selects the runtime logger for human or machine-oriented execution.
+ *
+ * Pretty mode always writes colorized output to stderr so command results can
+ * keep stdout clean. JSON mode preserves the same stderr contract while
+ * emitting structured log events for automation.
+ */
+export const makeRuntimeLogger = (jsonLogs: boolean) =>
+  jsonLogs ? Logger.withConsoleError(Logger.formatJson) : Logger.consolePretty({ colors: true, mode: "tty" })
 
 const withSanitizedAnnotations = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
@@ -88,6 +92,9 @@ export const logInfo = (message: string, fields?: Record<string, unknown>) =>
 
 export const logError = (message: string, fields?: Record<string, unknown>) =>
   withSanitizedAnnotations(Effect.logError(message), fields)
+
+export const logWarning = (message: string, fields?: Record<string, unknown>) =>
+  withSanitizedAnnotations(Effect.logWarning(message), fields)
 
 export const logDebug = (message: string, fields?: Record<string, unknown>) =>
   withSanitizedAnnotations(Effect.logDebug(message), fields)

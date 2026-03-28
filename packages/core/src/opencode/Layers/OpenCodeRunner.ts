@@ -3,7 +3,7 @@ import type { Config } from "@opencode-ai/sdk/v2"
 import { Effect, Layer } from "effect"
 
 import { OpenCodeOutputError } from "../../errors"
-import { logInfo, truncateForLog } from "../../Logging"
+import { logInfo } from "../../Logging"
 import { OpenCodeRunner, type OpenCodeRunRequest, type OpenCodeRunResult } from "../Services/OpenCodeRunner"
 import { OpenCodeSdkRuntimeLive } from "../internal/Layers/OpenCodeSdkRuntime"
 import { OpenCodeSdkRuntime } from "../internal/Services/OpenCodeSdkRuntime"
@@ -85,14 +85,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
     const model = yield* parseModel(request.model)
     const config = buildOpenCodeConfig(request.agent)
 
-    yield* logInfo("Preparing OpenCode execution.", {
-      agent: request.agent,
-      model: request.model,
-      workspace: request.workspace,
-      variant: request.variant,
-      promptChars: request.prompt.length,
-      structuredRequested: request.format?.type === "json_schema",
-    })
+    yield* logInfo(`Preparing OpenCode execution for ${request.model}.`)
 
     const result = yield* sdkRuntime.prompt({
       workspace: request.workspace,
@@ -104,18 +97,6 @@ const makeOpenCodeRunner = Effect.gen(function* () {
       inheritedEnv: request.inheritedEnv,
       format: request.format,
       config,
-    })
-
-    yield* logInfo("Received OpenCode response.", {
-      responseChars: result.response.length,
-      responsePreview: truncateForLog(result.response),
-      sessionId: result.sessionId,
-      costUsd: result.usage?.costUsd,
-      inputTokens: result.usage?.tokens?.input,
-      outputTokens: result.usage?.tokens?.output,
-      structuredDelivered: result.structured !== undefined,
-      structuredErrorName: result.modelError?.name,
-      structuredErrorRetries: result.modelError?.retries,
     })
 
     return {

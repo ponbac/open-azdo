@@ -3,7 +3,7 @@ import * as Flag from "effect/unstable/cli/Flag"
 
 import { Cause, Effect, Exit, Schema } from "effect"
 
-import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
+import { makeBaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { logError } from "@open-azdo/core/logging"
 import { runReviewWorkflow } from "@open-azdo/workflows/review"
 
@@ -14,6 +14,15 @@ import { type SandboxCaptureCliInput } from "./SandboxCaptureConfig"
 import { makeRuntimeLayer, makeSandboxCaptureRuntimeLayer } from "./Runtime"
 
 const PositiveIntSchema = Schema.Int.check(Schema.isGreaterThan(0))
+
+const withCliLogger = <A, E, R>(effect: Effect.Effect<A, E, R>, jsonLogs: boolean) =>
+  effect.pipe(
+    Effect.provide(
+      makeBaseRuntimeLayer({
+        jsonLogs,
+      }),
+    ),
+  )
 
 export const executeReview = Effect.gen(function* () {
   const config = yield* AppConfig
@@ -35,9 +44,12 @@ const runReviewCommand = (input: ReviewCliInput) =>
 
     if (!Exit.isSuccess(exit)) {
       const failureReason = Cause.pretty(exit.cause)
-      yield* logError("open-azdo failed during startup.", {
-        cause: failureReason,
-      }).pipe(Effect.provide(BaseRuntimeLayer))
+      yield* withCliLogger(
+        logError("open-azdo failed during startup.", {
+          cause: failureReason,
+        }),
+        input.json,
+      )
 
       return yield* new OperationalError({
         message: "open-azdo failed during startup.",
@@ -59,9 +71,12 @@ const runSandboxCaptureCommand = (input: SandboxCaptureCliInput) =>
 
     if (!Exit.isSuccess(exit)) {
       const failureReason = Cause.pretty(exit.cause)
-      yield* logError("open-azdo failed during sandbox capture.", {
-        cause: failureReason,
-      }).pipe(Effect.provide(BaseRuntimeLayer))
+      yield* withCliLogger(
+        logError("open-azdo failed during sandbox capture.", {
+          cause: failureReason,
+        }),
+        input.json,
+      )
 
       return yield* new OperationalError({
         message: "open-azdo failed during sandbox capture.",

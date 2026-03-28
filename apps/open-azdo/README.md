@@ -51,6 +51,19 @@ Optional flags:
 - `--dry-run`
 - `--json`
 
+## Output And Logging
+
+Operational logs are pretty, colorized, and written to `stderr` by default so humans can follow the run in local terminals and CI job logs.
+The final command result stays on `stdout`.
+
+Use `--json` when you want fully machine-readable output:
+
+- command results stay on `stdout` as JSON
+- operational logs stay on `stderr` as JSON
+- `review` and `sandbox capture` both follow the same contract
+
+During OpenCode execution, `open-azdo` now emits live progress milestones such as session start, retries, tool start/completion, todo-plan updates, and session errors. Raw assistant text deltas and full tool outputs are intentionally omitted from default logs to keep them readable.
+
 ## Sandbox Capture
 
 Use the live capture command when you want to validate changes against a real Azure DevOps pull request without mutating PR threads:
@@ -99,6 +112,7 @@ Exit behavior:
 
 - successful review runs return `0`, even when findings are posted
 - operational failures return non-zero
+- logs always use `stderr`; results always use `stdout`
 
 ## Azure Pipelines
 

@@ -6,7 +6,7 @@ import * as Duration from "effect/Duration"
 
 import { CommandExecutionError } from "../../errors"
 import { formatUnknownDetail } from "../../format-unknown"
-import { logError, logInfo, truncateForLog } from "../../Logging"
+import { logDebug, logError, truncateForLog } from "../../Logging"
 import { ProcessRunner, type CommandExecutionResult, type ExecuteCommandInput } from "../Services/ProcessRunner"
 
 const DEFAULT_TIMEOUT = Duration.seconds(30)
@@ -111,7 +111,7 @@ const makeProcessRunner = Effect.gen(function* () {
     const encodedStdin =
       input.stdin === undefined ? "ignore" : Stream.fromIterable([new TextEncoder().encode(input.stdin)])
 
-    yield* logInfo("Starting command.", commandLogFields(input, timeout, maxOutputBytes))
+    yield* logDebug("Starting command.", commandLogFields(input, timeout, maxOutputBytes))
 
     const command = ChildProcess.make(input.command, [...input.args], {
       ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -173,7 +173,7 @@ const makeProcessRunner = Effect.gen(function* () {
         }),
       ),
       Effect.tap((result) =>
-        logInfo("Command completed.", commandResultLogFields(input, timeout, maxOutputBytes, result)),
+        logDebug("Command completed.", commandResultLogFields(input, timeout, maxOutputBytes, result)),
       ),
       Effect.tapError((error) =>
         logError("Command failed.", {

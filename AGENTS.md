@@ -1,5 +1,7 @@
 # Open-AZDO Reference Assets
 
+- `.reference/opencode`
+  Role: primary OpenCode upstream reference for CLI, agent, and runtime behavior that `open-azdo` integrates against.
 - `.reference/opencode-azdo-extension`
   Role: workflow reference for Azure DevOps pull-request review automation and a negative security reference for v1 boundaries we intentionally do not copy.
 - `.reference/tailcode`
@@ -8,8 +10,6 @@
   Role: Effect v4 `ServiceMap.Service` construction reference, git workflow/service layering reference, and command/process execution reference.
 - `.reference/effect-smol`
   Role: canonical Effect v4 beta source reference for current APIs and idioms.
-- `.reference/effect-4.0-beta-article/index.html`
-  Role: archived release-context reference for Effect 4.0 beta decisions and terminology.
 
 # Project Snapshot
 

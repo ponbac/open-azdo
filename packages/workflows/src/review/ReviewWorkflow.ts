@@ -4,7 +4,7 @@ import type * as FileSystem from "effect/FileSystem"
 import * as Stdio from "effect/Stdio"
 import * as Stream from "effect/Stream"
 import { Cause, Effect, Exit, type Redacted } from "effect"
-import * as Duration from "effect/Duration"
+import type * as Duration from "effect/Duration"
 
 import { type AzureContext, buildBuildLink, createAzureContext } from "@open-azdo/azdo/context"
 import { AzureDevOpsClient, type PullRequestMetadata, type PullRequestWorkItem } from "@open-azdo/azdo/client"
@@ -18,7 +18,7 @@ import {
   type PullRequestDiff,
 } from "@open-azdo/core/git"
 import { stringifyJson } from "@open-azdo/core/json"
-import { logError, logInfo, withLogAnnotations } from "@open-azdo/core/logging"
+import { logError, logInfo } from "@open-azdo/core/logging"
 import { OpenCodeRunner, type OpenCodeRunResult, type OpenCodeRunUsage } from "@open-azdo/core/opencode"
 
 import { publishFailureSummary, publishReview } from "./ReviewPublisher"
@@ -103,23 +103,6 @@ const REVIEW_OUTPUT_FORMAT = {
 const writeStdout = Effect.fn("ReviewWorkflow.writeStdout")(function* (text: string) {
   const stdio = yield* Stdio.Stdio
   yield* Stream.make(text).pipe(Stream.run(stdio.stdout()))
-})
-
-const reviewLogFields = (config: ReviewWorkflowConfig) => ({
-  command: "review",
-  model: config.model,
-  opencodeVariant: config.opencodeVariant,
-  opencodeTimeout: Duration.format(config.opencodeTimeout),
-  opencodeTimeoutMs: Duration.toMillis(config.opencodeTimeout),
-  workspace: config.workspace,
-  organization: config.organization,
-  project: config.project,
-  repositoryId: config.repositoryId,
-  pullRequestId: config.pullRequestId,
-  collectionUrl: config.collectionUrl,
-  agent: config.agent,
-  dryRun: config.dryRun,
-  json: config.json,
 })
 
 const resolveReviewScope = ({
@@ -276,12 +259,6 @@ const decodeStructuredReviewResult = ({
     } as const
   })
 
-const reviewResultSourceLogFields = (source: ReviewResultSource) => ({
-  structuredDelivered: source === "structured",
-  structuredRecovered: source === "repaired",
-  structuredFallback: source === "fallback",
-})
-
 const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryTokens | undefined =>
   usage?.tokens
     ? {
@@ -388,7 +365,7 @@ export const planReviewWorkflow = (
     const azureClient = yield* AzureDevOpsClient
     const openCodeRunner = yield* OpenCodeRunner
 
-    yield* logInfo("Resolved review configuration.")
+    yield* logInfo(`Resolved review configuration for ${config.model}.`)
     yield* logInfo("Loading pull request metadata, git diff, source commit, and existing threads.")
 
     const [metadata, fullPullRequestDiff, reviewedSourceCommit, existingThreads] = yield* Effect.all(
@@ -413,15 +390,7 @@ export const planReviewWorkflow = (
       { concurrency: "unbounded" },
     )
 
-    yield* logInfo("Loaded review inputs.", {
-      pullRequestTitle: metadata.title,
-      changedFiles: fullPullRequestDiff.changedFiles.length,
-      diffBytes: fullPullRequestDiff.diffText.length,
-      baseRef: fullPullRequestDiff.baseRef,
-      headRef: fullPullRequestDiff.headRef,
-      existingThreads: existingThreads.length,
-      reviewedSourceCommit,
-    })
+    yield* logInfo(`Loaded review inputs for ${fullPullRequestDiff.changedFiles.length} changed file(s).`)
 
     const previousSummaryState = findManagedSummaryThread(existingThreads)?.reviewState
     const { reviewMode, scopedDiff, previousReviewedCommit } = yield* resolveReviewScope({
@@ -449,10 +418,7 @@ export const planReviewWorkflow = (
         scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
       })
 
-      yield* logInfo("Skipped review because no new commits were added since the last managed review.", {
-        reviewedSourceCommit,
-        actions: actions.length,
-      })
+      yield* logInfo("Skipped review because no new commits were added since the last managed review.")
 
       return {
         metadata,
@@ -494,11 +460,11 @@ export const planReviewWorkflow = (
       })
       .pipe(
         Effect.tap((workItems) =>
-          logInfo("Loaded connected work item context.", {
-            workItemRefs: metadata.workItemRefs.length,
-            connectedWorkItems: workItems.length,
-            omittedConnectedWorkItems: Math.max(metadata.workItemRefs.length - workItems.length, 0),
-          }),
+          logInfo(
+            workItems.length > 0
+              ? `Loaded ${workItems.length} connected work item(s).`
+              : "No connected work items found.",
+          ),
         ),
         Effect.catchTags({
           AzureDevOpsHttpError: (error) =>
@@ -524,18 +490,10 @@ export const planReviewWorkflow = (
       existingThreads,
       ...(connectedWorkItems ? { connectedWorkItems } : {}),
     })
-    yield* logInfo("Built review context.", {
-      reviewMode,
-      changedFiles: reviewContext.changedFiles.length,
-      pullRequestThreads: reviewContext.pullRequestThreads?.items.length ?? 0,
-      omittedPullRequestThreads: reviewContext.pullRequestThreads?.omittedCount ?? 0,
-      manifestChars: stringifyJson(reviewContext).length,
-    })
+    yield* logInfo(`Built ${reviewMode} review context.`)
 
     const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext)
-    yield* logInfo("Built review prompt.", {
-      promptChars: prompt.length,
-    })
+    yield* logInfo("Built review prompt.")
 
     const openCodeResult = yield* openCodeRunner.run({
       workspace: config.workspace,
@@ -547,31 +505,13 @@ export const planReviewWorkflow = (
       inheritedEnv: config.inheritedEnv,
       format: REVIEW_OUTPUT_FORMAT,
     })
-    yield* logInfo("Received OpenCode response.", {
-      responseChars: openCodeResult.response.length,
-      sessionId: openCodeResult.sessionId,
-      costUsd: openCodeResult.usage?.costUsd,
-      inputTokens: openCodeResult.usage?.tokens?.input,
-      outputTokens: openCodeResult.usage?.tokens?.output,
-      structuredRequested: true,
-      structuredDelivered: openCodeResult.structured !== undefined,
-      structuredErrorName: openCodeResult.modelError?.name,
-      structuredErrorRetries: openCodeResult.modelError?.retries,
-    })
+    yield* logInfo("Received OpenCode response.")
 
     const { reviewResult, source } = yield* decodeStructuredReviewResult({
       openCodeResult,
       changedLinesByFile: scopedDiff.changedLinesByFile,
     })
-    yield* logInfo("Decoded review result.", {
-      reviewMode,
-      verdict: reviewResult.verdict,
-      findings: reviewResult.findings.length,
-      inlineFindings: reviewResult.inlineFindings.length,
-      summaryOnlyFindings: reviewResult.summaryOnlyFindings.length,
-      unmappedNotes: reviewResult.unmappedNotes.length,
-      ...reviewResultSourceLogFields(source),
-    })
+    yield* logInfo(`Decoded review result: ${reviewResult.verdict} with ${reviewResult.findings.length} finding(s).`)
 
     const outstandingReviewResult =
       reviewMode === "follow-up"
@@ -615,10 +555,7 @@ export const planReviewWorkflow = (
       scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
       scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
     })
-    yield* logInfo("Published review result.", {
-      actions: actions.length,
-      reviewMode,
-    })
+    yield* logInfo(`Prepared ${actions.length} review action(s).`)
 
     return {
       metadata,
@@ -647,7 +584,7 @@ export const planReviewWorkflow = (
         skipped: false,
       },
     } satisfies PlannedReviewWorkflow
-  }).pipe(withLogAnnotations(reviewLogFields(config)), Effect.withLogSpan("open-azdo.review"))
+  }).pipe(Effect.withLogSpan("open-azdo.review"))
 
 export const runReviewWorkflow = (config: ReviewWorkflowConfig) =>
   Effect.gen(function* () {
