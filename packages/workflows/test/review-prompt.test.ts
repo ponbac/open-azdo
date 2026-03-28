@@ -82,9 +82,13 @@ describe("review prompt", () => {
     expect(prompt).toContain(
       "For each scoped changed file, inspect the diff with `git diff <baseRef> <headRef> -- <path>`",
     )
+    expect(prompt).toContain("If LSP access is available for the current file, use it selectively")
+    expect(prompt).toContain("Treat LSP results as supporting evidence, not authority on their own")
     expect(prompt).toContain("Return strict JSON only with the shape:")
     expect(prompt).toContain("Keep the internal checklist private and do not include it in the final JSON output.")
-    expect(prompt).toContain("Ground every finding in the review manifest plus repository evidence")
+    expect(prompt).toContain(
+      "Ground every finding in the review manifest plus repository evidence gathered through the allowed read-only commands and any LSP queries you use.",
+    )
     expect(prompt).toContain("Use a lively review tone with emojis throughout the human-readable text fields.")
     expect(prompt).toContain("Markdown Style For Review Comments:")
     expect(prompt).toContain("Skip snapshot files")

@@ -85,6 +85,16 @@ describe("opencode", () => {
     expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
+  test("allows lsp queries in the generated opencode config", () => {
+    expect(buildOpenCodeConfig("azdo-review")).toEqual(
+      expect.objectContaining({
+        permission: expect.objectContaining({
+          lsp: "allow",
+        }),
+      }),
+    )
+  })
+
   test("returns structured output and model error metadata from the sdk runtime", async () => {
     const result = await Effect.runPromise(
       runOpenCode(

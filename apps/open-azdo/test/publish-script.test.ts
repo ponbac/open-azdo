@@ -9,6 +9,7 @@ type TestSetup = {
   readonly repoRoot: string
   readonly packageManifestPath: string
   readonly debugPipelinePath: string
+  readonly pnpmPipelinePath: string
   readonly lockfilePath: string
 }
 
@@ -30,6 +31,7 @@ const createTestRepo = async (): Promise<TestSetup> => {
 
   const packageManifestPath = join(appDir, "package.json")
   const debugPipelinePath = join(examplesDir, "azure-pipelines.review.debug.yml")
+  const pnpmPipelinePath = join(examplesDir, "azure-pipelines.review.pnpm.yml")
   const lockfilePath = join(repoRoot, "bun.lock")
 
   await writeFile(
@@ -50,12 +52,14 @@ const createTestRepo = async (): Promise<TestSetup> => {
     "utf8",
   )
   await writeFile(debugPipelinePath, ["variables:", "  OpenAzdoVersion: 0.2.9", "steps: []", ""].join("\n"), "utf8")
+  await writeFile(pnpmPipelinePath, ["variables:", "  OpenAzdoVersion: 0.2.9", "steps: []", ""].join("\n"), "utf8")
   await writeFile(lockfilePath, 'apps/open-azdo version = "0.2.9"\n', "utf8")
 
   return {
     repoRoot,
     packageManifestPath,
     debugPipelinePath,
+    pnpmPipelinePath,
     lockfilePath,
   }
 }
@@ -104,6 +108,7 @@ const makeRunner = (
 const readVersionState = async (repo: TestSetup) => ({
   packageManifest: await readFile(repo.packageManifestPath, "utf8"),
   debugPipeline: await readFile(repo.debugPipelinePath, "utf8"),
+  pnpmPipeline: await readFile(repo.pnpmPipelinePath, "utf8"),
   lockfile: await readFile(repo.lockfilePath, "utf8"),
 })
 
@@ -205,6 +210,7 @@ describe("publish release script", () => {
     expect(packageManifest.files).toEqual(["dist", "README.md", "SECURITY.md", "examples"])
     expect(packageManifest.scripts.build).toBe("bun run build.ts")
     expect(await readFile(repo.debugPipelinePath, "utf8")).toContain("OpenAzdoVersion: 0.2.10")
+    expect(await readFile(repo.pnpmPipelinePath, "utf8")).toContain("OpenAzdoVersion: 0.2.10")
     expect(await readFile(repo.lockfilePath, "utf8")).toContain('apps/open-azdo version = "0.2.10"')
     expect(commandCalls).toEqual([
       {
@@ -324,6 +330,7 @@ describe("publish release script", () => {
       stdio: "inherit",
     })
     expect(await readFile(repo.debugPipelinePath, "utf8")).toContain("OpenAzdoVersion: 0.2.10")
+    expect(await readFile(repo.pnpmPipelinePath, "utf8")).toContain("OpenAzdoVersion: 0.2.10")
   })
 
   test("fails before prompting when npm authentication is invalid", async () => {
@@ -370,5 +377,48 @@ describe("publish release script", () => {
       },
     ])
     expect(await readVersionState(repo)).toEqual(initialState)
+  })
+
+  test("fails clearly when a managed example is missing the release version placeholder", async () => {
+    const repo = await createTestRepo()
+    const commandCalls: CommandCall[] = []
+
+    await writeFile(repo.pnpmPipelinePath, ["variables:", "steps: []", ""].join("\n"), "utf8")
+    const stateBeforePublish = await readVersionState(repo)
+
+    let failure: unknown
+
+    try {
+      await runPublishRelease(
+        "publish",
+        makeTestDeps(repo, {
+          commandCalls,
+          latestReleasedVersion: "0.2.9",
+          prompt: async () => "0.2.10",
+        }),
+      )
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toContain(repo.pnpmPipelinePath)
+    expect((failure as Error).message).toContain("Failed to locate OpenAzdoVersion")
+    expect(commandCalls).toEqual([
+      {
+        command: "npm",
+        args: ["whoami"],
+        cwd: repo.repoRoot,
+        stdio: "pipe",
+      },
+      {
+        command: "npm",
+        args: ["view", "open-azdo", "version", "--silent"],
+        cwd: repo.repoRoot,
+        stdio: "pipe",
+      },
+    ])
+    expect(await readVersionState(repo)).toEqual(stateBeforePublish)
+    expect(await readFile(repo.lockfilePath, "utf8")).toContain('apps/open-azdo version = "0.2.9"')
   })
 })

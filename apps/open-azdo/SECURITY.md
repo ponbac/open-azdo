@@ -43,10 +43,12 @@ If required history is missing, `open-azdo` fails with a remediation message ins
 
 Each review run starts a short-lived OpenCode server bound to `127.0.0.1` on a dynamically chosen port and shuts it down on exit. The generated `azdo-review` agent remains read-only:
 
-- read/search/listing tools allowed
+- read/search/listing tools and local LSP queries allowed
 - edit and write denied
 - web fetch and web search denied
 - bash denied by default, with a narrow allowlist for read-style commands
+
+LSP access remains local code-intelligence only and does not broaden edit, network, or general shell execution permissions.
 
 OpenCode is prompted through the SDK v2 client with JSON-schema structured output. If structured output is unavailable or malformed, the workflow attempts JSON repair and then degrades to a summary-only `"concerns"` result instead of trusting arbitrary text as valid findings.
 

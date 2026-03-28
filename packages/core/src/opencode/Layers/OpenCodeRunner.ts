@@ -21,6 +21,7 @@ const openCodePermission = {
   grep: "allow",
   list: "allow",
   glob: "allow",
+  lsp: "allow",
   webfetch: "deny",
   websearch: "deny",
   codesearch: "deny",

@@ -35,8 +35,13 @@ export type PublishReleaseDeps = {
 
 type ReleasePaths = {
   readonly packageManifestPath: string
-  readonly debugPipelinePath: string
+  readonly versionedExamplePaths: ReadonlyArray<string>
   readonly lockfilePath: string
+}
+
+type PendingFileWrite = {
+  readonly path: string
+  readonly content: string
 }
 
 type PackageManifest = Record<string, unknown> & {
@@ -116,7 +121,10 @@ export const validateReplacementVersion = (
 
 const makeReleasePaths = (repoRoot: string): ReleasePaths => ({
   packageManifestPath: join(repoRoot, "apps/open-azdo/package.json"),
-  debugPipelinePath: join(repoRoot, "apps/open-azdo/examples/azure-pipelines.review.debug.yml"),
+  versionedExamplePaths: [
+    join(repoRoot, "apps/open-azdo/examples/azure-pipelines.review.debug.yml"),
+    join(repoRoot, "apps/open-azdo/examples/azure-pipelines.review.pnpm.yml"),
+  ],
   lockfilePath: join(repoRoot, "bun.lock"),
 })
 
@@ -231,20 +239,35 @@ const rewriteReleaseFiles = async (
   packageManifest: PackageManifest,
   nextVersion: string,
 ) => {
-  // Preserve the full manifest so a version bump does not strip publish metadata or scripts.
-  await deps.writeFile(
-    paths.packageManifestPath,
-    `${JSON.stringify({ ...packageManifest, version: nextVersion }, null, 2)}\n`,
-  )
+  const pendingWrites: PendingFileWrite[] = [
+    {
+      path: paths.packageManifestPath,
+      // Preserve the full manifest so a version bump does not strip publish metadata or scripts.
+      content: `${JSON.stringify({ ...packageManifest, version: nextVersion }, null, 2)}\n`,
+    },
+  ]
 
-  const debugPipeline = await deps.readFile(paths.debugPipelinePath)
-  const updatedDebugPipeline = debugPipeline.replace(/^(\s*OpenAzdoVersion:\s*)(\S+)(\s*)$/m, `$1${nextVersion}$3`)
+  // Keep every published example's package pin aligned with the release version.
+  for (const examplePath of paths.versionedExamplePaths) {
+    const examplePipeline = await deps.readFile(examplePath)
+    const updatedExamplePipeline = examplePipeline.replace(
+      /^(\s*OpenAzdoVersion:\s*)(\S+)(\s*)$/m,
+      `$1${nextVersion}$3`,
+    )
 
-  if (updatedDebugPipeline === debugPipeline) {
-    throw new Error(`Failed to locate OpenAzdoVersion in ${paths.debugPipelinePath}.`)
+    if (updatedExamplePipeline === examplePipeline) {
+      throw new Error(`Failed to locate OpenAzdoVersion in ${examplePath}.`)
+    }
+
+    pendingWrites.push({
+      path: examplePath,
+      content: updatedExamplePipeline,
+    })
   }
 
-  await deps.writeFile(paths.debugPipelinePath, updatedDebugPipeline)
+  for (const pendingWrite of pendingWrites) {
+    await deps.writeFile(pendingWrite.path, pendingWrite.content)
+  }
 }
 
 const runBunCommand = async (deps: PublishReleaseDeps, args: ReadonlyArray<string>) => {

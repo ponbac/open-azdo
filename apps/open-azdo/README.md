@@ -104,6 +104,7 @@ Exit behavior:
 
 The canonical example is in [examples/azure-pipelines.review.yml](./examples/azure-pipelines.review.yml).
 For first-time rollout or debugging, use [examples/azure-pipelines.review.debug.yml](./examples/azure-pipelines.review.debug.yml).
+For pnpm-managed repositories that want dependency install, `.NET` provisioning, restore, and experimental LSP access, use [examples/azure-pipelines.review.pnpm.yml](./examples/azure-pipelines.review.pnpm.yml).
 
 Key requirements:
 
@@ -114,6 +115,7 @@ Key requirements:
 - grant repository read and pull request thread read/write permissions
 
 Attach the pipeline as a branch build-validation policy. Findings are posted as PR comments by default and do not fail the build.
+`open-azdo` does not install language-specific prerequisites itself. LSP prerequisites are provided by the pipeline environment, and the pnpm example enables OpenCode's experimental LSP tool while provisioning `.NET` plus `dotnet restore` for C# projects.
 
 ```yaml
 trigger: none
