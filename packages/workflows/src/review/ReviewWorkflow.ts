@@ -466,6 +466,7 @@ export const planReviewWorkflow = (
           previousReviewedCommit,
           pullRequestBaseRef: fullPullRequestDiff.baseRef,
           gitDiff: scopedDiff,
+          existingThreads,
         }),
         summaryState: previousSummaryState,
         summaryContent,
@@ -520,11 +521,14 @@ export const planReviewWorkflow = (
       previousReviewedCommit,
       pullRequestBaseRef: fullPullRequestDiff.baseRef,
       gitDiff: scopedDiff,
+      existingThreads,
       ...(connectedWorkItems ? { connectedWorkItems } : {}),
     })
     yield* logInfo("Built review context.", {
       reviewMode,
       changedFiles: reviewContext.changedFiles.length,
+      pullRequestThreads: reviewContext.pullRequestThreads?.items.length ?? 0,
+      omittedPullRequestThreads: reviewContext.pullRequestThreads?.omittedCount ?? 0,
       manifestChars: stringifyJson(reviewContext).length,
     })
 

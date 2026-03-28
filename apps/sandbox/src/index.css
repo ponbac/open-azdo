@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;500&family=Space+Mono:wght@400;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
 
 * {
@@ -17,64 +17,48 @@ body {
   min-height: 100vh;
 }
 
-/* ─────────────────────────── Brutalist ─────────────────────────── */
-
-[data-theme="brutalist"] {
-  --font-body: "Space Mono", monospace;
-  --font-display: "Instrument Serif", Georgia, serif;
-  --font-mono: "Space Mono", monospace;
-  --bg: #f0ebe0;
-  --bg-raised: #fff;
-  --bg-inset: #e8e0d0;
-  --surface: #fff;
-  --surface-hover: #f5f0e5;
-  --border: #000;
-  --border-strong: #000;
-  --text-primary: #000;
-  --text-secondary: #333;
-  --text-tertiary: #888;
-  --accent: #e63600;
-  --accent-hover: #ff3d00;
-  --accent-muted: rgba(230, 54, 0, 0.08);
-  --danger: #cc0000;
-  --danger-muted: rgba(204, 0, 0, 0.06);
-  --warn: #cc7700;
-  --warn-muted: rgba(204, 119, 0, 0.08);
-  --success: #006600;
-  --success-muted: rgba(0, 102, 0, 0.06);
-  --radius-sm: 0;
-  --radius: 0;
-  --radius-lg: 0;
-  --diff-add-bg: rgba(0, 102, 0, 0.06);
-  --diff-add-text: #006600;
-  --diff-del-bg: rgba(204, 0, 0, 0.06);
-  --diff-del-text: #cc0000;
-  --diff-hunk-text: #e63600;
-}
-
-[data-theme="brutalist"] h1,
-[data-theme="brutalist"] h2,
-[data-theme="brutalist"] h3 {
-  font-family: var(--font-display);
-}
-
-/* ─────────────────────────── Shared base ─────────────────────────── */
-
-[data-theme] {
-  background: var(--bg);
-  color: var(--text-secondary);
-  font-family: var(--font-body);
-}
-
 code,
 pre {
-  font-family: var(--font-mono);
+  font-family: inherit;
 }
 
-/* ─────────────────────────── Brutalist texture ─────────────────────────── */
+.observatory-markdown-fallback,
+.observatory-markdown-shiki pre {
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  border: 1px solid #2a2520;
+  background: #0f0c0a !important;
+  padding: 0.75rem;
+  font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+}
 
-[data-theme="brutalist"] {
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
-  background-repeat: repeat;
-  background-size: 200px 200px;
+.observatory-markdown-shiki pre,
+.observatory-markdown-shiki code {
+  font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+}
+
+.observatory-pierre-diff {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #2a2520;
+  background: #0f0c0a;
+  color: #c4b8a8;
+}
+
+.observatory-pierre-diff pre,
+.observatory-pierre-diff code {
+  font-family: "JetBrains Mono", "IBM Plex Mono", monospace;
+}
+
+.observatory-pierre-diff pre {
+  margin: 0;
+  background: transparent !important;
+  font-size: 0.7rem;
+  line-height: 1.25rem;
+}
+
+.observatory-pierre-diff [data-line-numbers] {
+  color: #6a6050;
 }

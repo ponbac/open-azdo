@@ -11,6 +11,7 @@
     "sandbox:capture": "bun --env-file=../../.env.integration.local run --cwd apps/open-azdo sandbox:capture",
     "sandbox:dev": "bun run --cwd apps/sandbox dev",
     "sandbox:preview": "bun run --cwd apps/sandbox preview",
+    "sync:model-pricing": "bun run ./packages/core/scripts/sync-model-pricing.ts",
     "typecheck": "turbo run typecheck",
     "typecheck:tsc": "turbo run typecheck:tsc",
     "lint": "bun run lint:type-aware",

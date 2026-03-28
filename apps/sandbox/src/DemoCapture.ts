@@ -287,6 +287,117 @@ export const demoCapture: SandboxCapture = {
       "Review this Azure DevOps pull request.",
       "",
       "Prioritize correctness, comment duplication risk, and follow-up review stability.",
+      "",
+      "Pull request context:",
+      JSON.stringify(
+        {
+          pullRequest: {
+            title: "Preview the new managed review flow",
+            description: "Adds sandbox capture output and improves follow-up review state handling.",
+          },
+          reviewMode: "full",
+          pullRequestBaseRef: "9f89ac4b69f90e2e2a57e8dfc32b28a4c68c0f10",
+          baseRef: "9f89ac4b69f90e2e2a57e8dfc32b28a4c68c0f10",
+          headRef: "83f6d4caa7419999d8974cb0350c5ad7b6206c6b",
+          changedFiles: [
+            {
+              path: "src/review/ReviewPanel.tsx",
+              changedLineRanges: [{ start: 31, end: 38 }],
+              hunkHeaders: ["@@ -30,7 +30,15 @@ export function ReviewPanel()"],
+            },
+            {
+              path: "src/review/LegacyGate.ts",
+              changedLineRanges: [{ start: 1, end: 10 }],
+              hunkHeaders: ["@@ -1,10 +0,0 @@"],
+            },
+          ],
+          pullRequestThreads: {
+            omittedCount: 1,
+            items: [
+              {
+                id: 303,
+                status: "active",
+                filePath: "/src/review/LegacyGate.ts",
+                line: 8,
+                updatedAt: "2026-03-19T18:00:00.000Z",
+                managedThread: false,
+                comments: [
+                  {
+                    author: "Reviewer Bot",
+                    publishedAt: "2026-03-19T18:00:00.000Z",
+                    origin: "human" as const,
+                    content: "Stale note on an already-removed branch check.",
+                  },
+                ],
+              },
+              {
+                id: 404,
+                status: "active",
+                filePath: "/src/review/ReviewPanel.tsx",
+                line: 30,
+                updatedAt: "2026-03-21T14:22:00.000Z",
+                managedThread: false,
+                comments: [
+                  {
+                    author: "Annie Case",
+                    publishedAt: "2026-03-21T14:22:00.000Z",
+                    origin: "human" as const,
+                    content:
+                      "We should guard against concurrent mutations here. The shared cache is not thread-safe in SSR scenarios.",
+                  },
+                  {
+                    author: "Pontus Bac",
+                    publishedAt: "2026-03-21T15:10:00.000Z",
+                    origin: "human" as const,
+                    content: "Good call. I'll move it into the Effect pipeline so it runs outside of render.",
+                  },
+                ],
+              },
+            ],
+          },
+          connectedWorkItems: {
+            omittedCount: 0,
+            items: [
+              {
+                id: 913,
+                title: "Allow local validation against a real PR",
+                workItemType: "Feature",
+                state: "Active",
+                priority: 1,
+                assignedTo: "Annie Case",
+                iterationPath: "Platform\\Q1",
+                areaPath: "Platform\\Developer Experience",
+                tags: ["sandbox", "validation", "pr-review"],
+                descriptionMarkdown: "Agents need a safe way to validate review output against a real Azure DevOps PR.",
+                acceptanceCriteriaMarkdown: "- Capture runs stay read-only.\n- Output can be replayed locally.",
+                related: [{ id: 944, title: "Fake PR sandbox shell" }],
+                recentComments: [
+                  {
+                    author: "Product Owner",
+                    createdAt: "2026-03-21T13:15:00.000Z",
+                    markdown: "Please make sure the local preview feels close to the final AZDO experience.",
+                  },
+                ],
+              },
+              {
+                id: 944,
+                title: "Ship a local sandbox app for captures",
+                workItemType: "User Story",
+                state: "Committed",
+                priority: 2,
+                assignedTo: "Pontus Bac",
+                iterationPath: "Platform\\Q1",
+                areaPath: "Platform\\Developer Experience",
+                tags: ["ui", "sandbox"],
+                related: [],
+                recentComments: [],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
     ].join("\n"),
     resultSource: "structured",
     openCodeResult: {

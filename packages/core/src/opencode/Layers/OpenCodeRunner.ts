@@ -9,8 +9,6 @@ import { OpenCodeSdkRuntimeLive } from "../internal/Layers/OpenCodeSdkRuntime"
 import { OpenCodeSdkRuntime } from "../internal/Services/OpenCodeSdkRuntime"
 
 const OPEN_CODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
-const OPENAI_DIRECT_PROVIDER_ID = "openai-direct"
-const OPENAI_DIRECT_MODEL_REGEXP = /^gpt-5(?:\.\d+)?-(?:mini|nano)$/
 
 type ParsedModel = {
   readonly providerID: string
@@ -42,18 +40,7 @@ const openCodePermission = {
   },
 } as const
 
-const usesOpenAIDirectProvider = (model: ParsedModel) =>
-  model.providerID === "openai" && OPENAI_DIRECT_MODEL_REGEXP.test(model.modelID)
-
-const toOpenCodeModel = (model: ParsedModel): ParsedModel =>
-  usesOpenAIDirectProvider(model)
-    ? {
-        providerID: OPENAI_DIRECT_PROVIDER_ID,
-        modelID: model.modelID,
-      }
-    : model
-
-export const buildOpenCodeConfig = (agentName: string, model?: ParsedModel): Config => ({
+export const buildOpenCodeConfig = (agentName: string): Config => ({
   $schema: OPEN_CODE_CONFIG_SCHEMA,
   share: "disabled",
   autoupdate: false,
@@ -71,45 +58,9 @@ export const buildOpenCodeConfig = (agentName: string, model?: ParsedModel): Con
       },
     },
   },
-  ...(model && usesOpenAIDirectProvider(model)
-    ? {
-        provider: {
-          [OPENAI_DIRECT_PROVIDER_ID]: {
-            id: OPENAI_DIRECT_PROVIDER_ID,
-            name: "OpenAI Direct",
-            npm: "@ai-sdk/openai",
-            env: ["OPENAI_API_KEY"],
-            models: {
-              [model.modelID]: {
-                id: model.modelID,
-                name: model.modelID,
-                family: model.modelID,
-                attachment: false,
-                reasoning: true,
-                temperature: true,
-                tool_call: true,
-                release_date: "2025-08-07",
-                modalities: {
-                  input: ["text", "image"],
-                  output: ["text"],
-                },
-                cost: {
-                  input: 0,
-                  output: 0,
-                },
-                limit: {
-                  context: 400_000,
-                  output: 128_000,
-                },
-              },
-            },
-          },
-        },
-      }
-    : {}),
 })
 
-const parseModel = (model: string) => {
+const parseModel = (model: string): Effect.Effect<ParsedModel, OpenCodeOutputError> => {
   const separatorIndex = model.indexOf("/")
   if (separatorIndex <= 0 || separatorIndex === model.length - 1) {
     return Effect.fail(
@@ -131,13 +82,11 @@ const makeOpenCodeRunner = Effect.gen(function* () {
 
   const run = Effect.fn("OpenCodeRunner.run")(function* (request: OpenCodeRunRequest) {
     const model = yield* parseModel(request.model)
-    const effectiveModel = toOpenCodeModel(model)
-    const config = buildOpenCodeConfig(request.agent, model)
+    const config = buildOpenCodeConfig(request.agent)
 
     yield* logInfo("Preparing OpenCode execution.", {
       agent: request.agent,
       model: request.model,
-      effectiveModel: `${effectiveModel.providerID}/${effectiveModel.modelID}`,
       workspace: request.workspace,
       variant: request.variant,
       promptChars: request.prompt.length,
@@ -146,7 +95,7 @@ const makeOpenCodeRunner = Effect.gen(function* () {
 
     const result = yield* sdkRuntime.prompt({
       workspace: request.workspace,
-      model: effectiveModel,
+      model,
       agent: request.agent,
       variant: request.variant,
       timeout: request.timeout,

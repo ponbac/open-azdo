@@ -42,7 +42,7 @@
 
 - Opt-in real-environment validation is available through `bun run sandbox:capture` and `bun test ./apps/open-azdo/test/live.integration.test.ts` with `.env.integration.local` loaded.
 - The sandbox app can be used to inspect a real captured review locally on `http://127.0.0.1:4317`.
-- For this repo, `openai/gpt-5.4-mini` is supported in the OpenCode SDK lane via the internal `openai-direct` fallback in `packages/core`; raw upstream `opencode run -m openai/gpt-5.4-mini` still does not work on OpenCode `1.2.27`.
+- For this repo, `openai/gpt-5.4-mini` is supported natively on OpenCode `1.3.3`.
 
 # TypeScript Tooling Policy
 

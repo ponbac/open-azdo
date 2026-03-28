@@ -66,6 +66,28 @@ type ReviewScript =
   | { readonly type: "failure"; readonly message: string }
 
 type FixtureRepo = Awaited<ReturnType<typeof createFixtureRepo>>
+type TestThread = {
+  readonly id: number
+  readonly status: number
+  readonly comments: ReadonlyArray<{
+    readonly id: number
+    readonly content: string
+    readonly publishedDate?: string
+    readonly commentType?: string
+    readonly author?: {
+      readonly displayName: string
+    }
+  }>
+  readonly threadContext?: {
+    readonly filePath: string
+    readonly rightFileStart: {
+      readonly line: number
+    }
+    readonly rightFileEnd: {
+      readonly line: number
+    }
+  }
+}
 
 const makePromptResponse = (
   payload: unknown,
@@ -178,6 +200,23 @@ const makeManagedFindingThread = (finding: ManagedFinding) => ({
     rightFileStart: { line: finding.line },
     rightFileEnd: { line: finding.endLine ?? finding.line },
   },
+})
+
+const makeHumanThread = (overrides: Partial<TestThread> = {}): TestThread => ({
+  id: 30,
+  status: 1,
+  comments: [
+    {
+      id: 300,
+      content: "Human thread context",
+      publishedDate: "2026-03-24T10:00:00.000Z",
+      commentType: "text",
+      author: {
+        displayName: "Reviewer",
+      },
+    },
+  ],
+  ...overrides,
 })
 
 const parseRequestBody = (body: BodyInit | null | undefined) => {
@@ -411,6 +450,78 @@ describe("e2e", () => {
     expect(result.prompt).toContain('"title":"Fix regression"')
     expect(result.prompt).toContain('"acceptanceCriteriaMarkdown":"-   Do the thing"')
     expect(result.prompt).toContain('"markdown":"Rendered comment"')
+  })
+
+  test("includes eligible pull-request thread context in the generated prompt", async () => {
+    const result = await runReviewScenario({
+      opencode: { type: "success" },
+      capturePrompt: true,
+      buildThreadsResponse: () =>
+        makeThreadsResponse([
+          makeHumanThread(),
+          makeHumanThread({
+            id: 31,
+            comments: [
+              {
+                id: 310,
+                content:
+                  'Earlier finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"previous-finding","finding":{"title":"Old finding"}} -->',
+                publishedDate: "2026-03-24T11:00:00.000Z",
+                commentType: "text",
+                author: {
+                  displayName: "Open AZDO",
+                },
+              },
+              {
+                id: 311,
+                content: "I fixed this already in the latest patch.",
+                publishedDate: "2026-03-24T12:00:00.000Z",
+                commentType: "text",
+                author: {
+                  displayName: "Author",
+                },
+              },
+            ],
+          }),
+          makeHumanThread({
+            id: 32,
+            comments: [
+              {
+                id: 320,
+                content:
+                  'Bot-only finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"bot-only","finding":{"title":"Bot only"}} -->',
+                publishedDate: "2026-03-24T09:00:00.000Z",
+                commentType: "text",
+                author: {
+                  displayName: "Open AZDO",
+                },
+              },
+            ],
+          }),
+          makeHumanThread({
+            id: 33,
+            comments: [
+              {
+                id: 330,
+                content: "Policy status has been updated",
+                publishedDate: "2026-03-24T08:00:00.000Z",
+                author: {
+                  displayName: "Microsoft.VisualStudio.Services.TFS",
+                },
+              },
+            ],
+          }),
+        ]),
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.prompt).toContain('"pullRequestThreads"')
+    expect(result.prompt).toContain("Human thread context")
+    expect(result.prompt).toContain("Earlier finding")
+    expect(result.prompt).toContain("I fixed this already in the latest patch.")
+    expect(result.prompt).not.toContain("previous-finding")
+    expect(result.prompt).not.toContain("Bot-only finding")
+    expect(result.prompt).not.toContain("Policy status has been updated")
   })
 
   test("skips same-commit reruns and only updates the managed summary thread", async () => {

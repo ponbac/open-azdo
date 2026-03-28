@@ -61,7 +61,7 @@ describe("opencode", () => {
     })
   })
 
-  test("adds an OpenAI direct provider fallback for unsupported gpt-5 mini-family ids", async () => {
+  test("passes through native openai gpt-5.4-mini models without provider overrides", async () => {
     let receivedRequest: OpenCodeSdkPromptRequest | undefined
     const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
       receivedRequest = request
@@ -79,15 +79,10 @@ describe("opencode", () => {
     await Effect.runPromise(runOpenCode(request, sdkRuntime))
 
     expect(receivedRequest?.model).toEqual({
-      providerID: "openai-direct",
+      providerID: "openai",
       modelID: "gpt-5.4-mini",
     })
-    expect(receivedRequest?.config).toEqual(
-      buildOpenCodeConfig(request.agent, {
-        providerID: "openai",
-        modelID: "gpt-5.4-mini",
-      }),
-    )
+    expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
   test("returns structured output and model error metadata from the sdk runtime", async () => {
