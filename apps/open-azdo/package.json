@@ -1,6 +1,6 @@
 {
   "name": "open-azdo",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Secure Azure DevOps pull request review CLI powered by OpenCode",
   "repository": {
     "type": "git",

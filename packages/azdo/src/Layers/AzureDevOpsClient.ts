@@ -366,12 +366,15 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         "api-version": "7.1",
       }),
     )
-    const requestWithBody = yield* HttpClientRequest.bodyJson(request, {
+    const requestBody = {
       ids,
-      fields,
       errorPolicy: "omit",
-      ...(includeRelations ? { $expand: "Relations" } : {}),
-    }).pipe(Effect.mapError(toAzureDevOpsClientError(request)))
+      // Azure DevOps rejects workitemsbatch bodies that combine $expand=Relations with an explicit fields filter.
+      ...(includeRelations ? { $expand: "Relations" } : { fields }),
+    }
+    const requestWithBody = yield* HttpClientRequest.bodyJson(request, requestBody).pipe(
+      Effect.mapError(toAzureDevOpsClientError(request)),
+    )
     const response = yield* executeJson(client, requestWithBody, WorkItemsBatchResponseSchema)
 
     return response.value ?? []

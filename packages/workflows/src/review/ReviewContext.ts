@@ -5,12 +5,15 @@ import {
   type LineRange,
   type PullRequestDiff,
 } from "@open-azdo/core/git"
+import { normalizePath } from "@open-azdo/core/paths"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import type { PullRequestWorkItem, PullRequestWorkItemRef } from "@open-azdo/azdo/client"
+import { listManagedFindingThreads } from "./ThreadReconciliation"
 
 const MAX_WORK_ITEM_CONTEXT_CHARS = 24_000
 const MAX_RELATED_ITEMS = 4
 const MAX_THREAD_CONTEXT_CHARS = 24_000
+const MAX_MANAGED_FINDING_CONTEXT_CHARS = 12_000
 const MANAGED_COMMENT_PREFIXES = ["<!-- open-azdo-review:", "<!-- open-azdo:"]
 const MANAGED_COMMENT_SUFFIX = " -->"
 const SYSTEM_THREAD_AUTHORS = new Set(["Azure Pipelines Test Service", "Microsoft.VisualStudio.Services.TFS"])
@@ -97,6 +100,18 @@ export type PromptThread = {
   readonly comments: ReadonlyArray<PromptThreadComment>
 }
 
+export type PromptManagedFinding = {
+  readonly id: number
+  readonly status: ExistingThread["status"]
+  readonly resolution: "resolved" | "unresolved" | "unknown"
+  readonly filePath?: string
+  readonly line?: number
+  readonly updatedAt?: string
+  readonly title: string
+  readonly severity: "low" | "medium" | "high" | "critical"
+  readonly confidence: "low" | "medium" | "high"
+}
+
 export type ReviewContext = {
   readonly pullRequest: {
     readonly title: string
@@ -116,6 +131,10 @@ export type ReviewContext = {
     readonly omittedCount: number
     readonly items: ReadonlyArray<PromptThread>
   }
+  readonly managedFindings?: {
+    readonly omittedCount: number
+    readonly items: ReadonlyArray<PromptManagedFinding>
+  }
   readonly connectedWorkItems?: {
     readonly omittedCount: number
     readonly items: ReadonlyArray<PullRequestWorkItem>
@@ -133,6 +152,7 @@ export type BuildReviewContextInput = {
 }
 
 type ExistingThreadComment = ExistingThread["comments"][number]
+type ManagedFindingContextItem = ReturnType<typeof listManagedFindingThreads>[number]
 
 type TruncationSlot<T> = {
   readonly text: string
@@ -403,7 +423,10 @@ const getThreadUpdatedAt = (thread: ExistingThread) =>
     return publishedAt > latest ? publishedAt : latest
   }, undefined)
 
-const compareThreadRecency = (left: PromptThread, right: PromptThread) => {
+const compareUpdatedAtThenIdDesc = (
+  left: { readonly id: number; readonly updatedAt?: string },
+  right: { readonly id: number; readonly updatedAt?: string },
+) => {
   const leftUpdatedAt = left.updatedAt ?? ""
   const rightUpdatedAt = right.updatedAt ?? ""
 
@@ -413,6 +436,37 @@ const compareThreadRecency = (left: PromptThread, right: PromptThread) => {
 
   return right.id - left.id
 }
+
+const resolveManagedFindingResolution = (status: ExistingThread["status"]): PromptManagedFinding["resolution"] => {
+  // Azure DevOps thread statuses can arrive as either enums or human-readable strings.
+  if (status === 1 || status === "active" || status === "pending") {
+    return "unresolved"
+  }
+
+  if (status === 2 || status === 4 || status === "fixed" || status === "closed") {
+    return "resolved"
+  }
+
+  return "unknown"
+}
+
+const toPromptManagedFinding = ({
+  thread,
+  updatedAt,
+  filePath,
+  line,
+  finding,
+}: ManagedFindingContextItem): PromptManagedFinding => ({
+  id: thread.id,
+  status: thread.status,
+  resolution: resolveManagedFindingResolution(thread.status),
+  filePath: filePath ?? normalizePath(finding.filePath),
+  line: line ?? finding.line,
+  ...(updatedAt !== undefined ? { updatedAt } : {}),
+  title: finding.title,
+  severity: finding.severity,
+  confidence: finding.confidence,
+})
 
 const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChars: number, totalCount: number) =>
   shrinkValueToFitSerializedBudget({
@@ -432,6 +486,42 @@ const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChar
   })
 
 /**
+ * Keeps the managed-finding summary context small by retaining the newest items first and then
+ * dropping older entries once the serialized section reaches its budget.
+ */
+const selectManagedFindingsForPrompt = (threads: ReadonlyArray<ExistingThread>) => {
+  const managedFindings = listManagedFindingThreads(threads)
+    .map(toPromptManagedFinding)
+    .sort(compareUpdatedAtThenIdDesc)
+
+  if (managedFindings.length === 0) {
+    return undefined
+  }
+
+  const selected: PromptManagedFinding[] = []
+
+  for (const managedFinding of managedFindings) {
+    const nextSelection = [...selected, managedFinding]
+    if (
+      serializeBudgetedPromptSection(nextSelection, managedFindings.length).length > MAX_MANAGED_FINDING_CONTEXT_CHARS
+    ) {
+      break
+    }
+
+    selected.push(managedFinding)
+  }
+
+  if (selected.length === 0) {
+    return undefined
+  }
+
+  return {
+    omittedCount: Math.max(managedFindings.length - selected.length, 0),
+    items: selected,
+  } satisfies NonNullable<ReviewContext["managedFindings"]>
+}
+
+/**
  * Selects the prompt-safe thread context shown to the reviewer model.
  * The filter keeps user discussion, allows mixed managed threads with human replies,
  * and drops older threads once the serialized thread section reaches its budget.
@@ -440,7 +530,7 @@ const selectPullRequestThreadsForPrompt = (threads: ReadonlyArray<ExistingThread
   const eligibleThreads = threads
     .map((thread) => toPromptThread(thread))
     .filter((thread): thread is PromptThread => thread !== undefined)
-    .sort(compareThreadRecency)
+    .sort(compareUpdatedAtThenIdDesc)
 
   return selectItemsWithinSerializedBudget({
     items: eligibleThreads,
@@ -499,6 +589,7 @@ export const buildReviewContext = ({
   connectedWorkItems,
 }: BuildReviewContextInput): ReviewContext => {
   const pullRequestThreads = existingThreads ? selectPullRequestThreadsForPrompt(existingThreads) : undefined
+  const managedFindings = existingThreads ? selectManagedFindingsForPrompt(existingThreads) : undefined
   const totalConnectedWorkItemCount = metadata.workItemRefs?.length ?? connectedWorkItems?.length ?? 0
   const promptWorkItems =
     connectedWorkItems && connectedWorkItems.length > 0
@@ -521,6 +612,7 @@ export const buildReviewContext = ({
       hunkHeaders: extractHunkHeaders(file.patch),
     })),
     ...(pullRequestThreads !== undefined ? { pullRequestThreads } : {}),
+    ...(managedFindings !== undefined ? { managedFindings } : {}),
     ...(promptWorkItems !== undefined ? { connectedWorkItems: promptWorkItems } : {}),
   }
 }

@@ -20,6 +20,9 @@ const parseJsonBody = (body: BodyInit | null | undefined) => {
   return {}
 }
 
+const isTitleOnlyBatchRequest = (body: { readonly fields?: ReadonlyArray<string> | undefined }) =>
+  Array.isArray(body.fields) && body.fields.includes("System.Title") && body.fields.length === 1
+
 const isWorkItemCommentsUrl = (url: string) => {
   const parsed = new URL(url)
   return (
@@ -296,7 +299,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           return Response.json({
             value: [
               {
@@ -429,7 +432,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
         }
 
@@ -479,7 +482,7 @@ describe("azure devops", () => {
         batchUrls.push(url)
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           return Response.json({
             value: [
               {
@@ -563,7 +566,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
         }
 
@@ -612,7 +615,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
         }
 
@@ -675,7 +678,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           titleBatchRequests.push(body.ids)
 
           return Response.json({
@@ -760,7 +763,7 @@ describe("azure devops", () => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         const body = parseJsonBody(init.body)
 
-        if (body.fields.includes("System.Title") && body.fields.length === 1) {
+        if (isTitleOnlyBatchRequest(body)) {
           titleBatchRequests.push(body.ids)
 
           return Response.json({
@@ -820,6 +823,70 @@ describe("azure devops", () => {
     expect(workItems[0]?.parent).toEqual({
       id: 456,
       title: "Parent title",
+    })
+  })
+
+  test("omits field filters when expanding connected work item relations", async () => {
+    const batchBodies: Array<Record<string, unknown>> = []
+
+    const { fetchMock } = makeFetchMock((url, init) => {
+      if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
+        const body = parseJsonBody(init.body)
+        batchBodies.push(body)
+
+        if (isTitleOnlyBatchRequest(body)) {
+          return Response.json({ value: [] })
+        }
+
+        return Response.json({
+          value: [
+            {
+              id: 123,
+              fields: {
+                "System.Title": "Fix regression",
+                "System.WorkItemType": "Bug",
+                "System.State": "Active",
+              },
+              relations: [
+                {
+                  rel: "System.LinkTypes.Hierarchy-Reverse",
+                  url: "https://dev.azure.com/acme/project/_apis/wit/workItems/456",
+                },
+              ],
+            },
+          ],
+        })
+      }
+
+      if (isWorkItemCommentsUrl(url)) {
+        return Response.json({ comments: [] })
+      }
+
+      return Response.json({})
+    })
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* AzureDevOpsClient
+        return yield* client.getPullRequestWorkItems({
+          context,
+          token,
+          workItemRefs: [{ id: "123" }],
+        })
+      }).pipe(provideLiveClient(fetchMock)),
+    )
+
+    expect(batchBodies).toHaveLength(2)
+    expect(batchBodies[0]).toMatchObject({
+      ids: [123],
+      errorPolicy: "omit",
+      $expand: "Relations",
+    })
+    expect(batchBodies[0]?.fields).toBeUndefined()
+    expect(batchBodies[1]).toMatchObject({
+      ids: [456],
+      fields: ["System.Title"],
+      errorPolicy: "omit",
     })
   })
 })

@@ -338,6 +338,9 @@ type ExistingSummaryThread = {
 
 type ExistingFindingThread = {
   readonly thread: ExistingThread
+  readonly updatedAt: string | undefined
+  readonly filePath: string | undefined
+  readonly line: number | undefined
   readonly commentId: number
   readonly fingerprint: string
   readonly finding: ReviewFinding
@@ -362,7 +365,25 @@ export const findManagedSummaryThread = (
   return undefined
 }
 
-const listManagedFindingThreads = (
+const getThreadUpdatedAt = (thread: ExistingThread) =>
+  thread.comments.reduce<string | undefined>((latest, comment) => {
+    const publishedAt = comment.publishedDate ?? undefined
+    if (!publishedAt) {
+      return latest
+    }
+
+    if (!latest) {
+      return publishedAt
+    }
+
+    return publishedAt > latest ? publishedAt : latest
+  }, undefined)
+
+/**
+ * Lists every managed finding thread by decoding the embedded finding payload once and attaching
+ * the thread metadata that later prompt shaping and reconciliation logic need.
+ */
+export const listManagedFindingThreads = (
   existingThreads: ReadonlyArray<ExistingThread>,
 ): ReadonlyArray<ExistingFindingThread> => {
   const managed: ExistingFindingThread[] = []
@@ -374,8 +395,13 @@ const listManagedFindingThreads = (
         continue
       }
 
+      const updatedAt = getThreadUpdatedAt(thread)
+
       managed.push({
         thread,
+        updatedAt,
+        filePath: thread.threadContext?.filePath ?? undefined,
+        line: thread.threadContext?.rightFileStart?.line ?? undefined,
         commentId: comment.id,
         fingerprint: findingState.fingerprint,
         finding: findingState.finding,

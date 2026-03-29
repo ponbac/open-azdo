@@ -232,6 +232,9 @@ const parseRequestBody = (body: BodyInit | null | undefined) => {
   return {}
 }
 
+const isTitleOnlyBatchRequest = (body: { readonly fields?: ReadonlyArray<string> | undefined }) =>
+  Array.isArray(body.fields) && body.fields.includes("System.Title") && body.fields.length === 1
+
 const isWorkItemCommentsUrl = (url: string) => {
   const parsed = new URL(url)
   return (
@@ -393,7 +396,7 @@ describe("e2e", () => {
         if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
           const body = parseRequestBody(init.body)
 
-          if (body.fields.includes("System.Title") && body.fields.length === 1) {
+          if (isTitleOnlyBatchRequest(body)) {
             return Response.json({
               value: [
                 {
@@ -486,11 +489,12 @@ describe("e2e", () => {
           }),
           makeHumanThread({
             id: 32,
+            status: 2,
             comments: [
               {
                 id: 320,
                 content:
-                  'Bot-only finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"bot-only","finding":{"title":"Bot only"}} -->',
+                  'Bot-only finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"bot-only","finding":{"severity":"medium","confidence":"high","title":"Bot only","body":"Body","filePath":"src/example.ts","line":2}} -->',
                 publishedDate: "2026-03-24T09:00:00.000Z",
                 commentType: "text",
                 author: {
@@ -520,6 +524,9 @@ describe("e2e", () => {
     expect(result.prompt).toContain("Human thread context")
     expect(result.prompt).toContain("Earlier finding")
     expect(result.prompt).toContain("I fixed this already in the latest patch.")
+    expect(result.prompt).toContain('"managedFindings"')
+    expect(result.prompt).toContain('"resolution":"resolved"')
+    expect(result.prompt).toContain('"title":"Bot only"')
     expect(result.prompt).not.toContain("previous-finding")
     expect(result.prompt).not.toContain("Bot-only finding")
     expect(result.prompt).not.toContain("Policy status has been updated")
@@ -634,6 +641,7 @@ describe("e2e", () => {
 
     expect(result.exitCode).toBe(0)
     expect(summaryContent).toContain("Verdict: **concerns**")
+    expect(summaryContent).toContain("No new issues in the follow-up diff")
     expect(summaryContent).toContain("Still tracking 1 managed finding")
     expect(summaryContent).toContain("$0.1234")
     expect(summaryContent).toContain("$0.0456")

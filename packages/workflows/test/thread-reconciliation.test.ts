@@ -4,6 +4,7 @@ import {
   buildInlineComment,
   buildSummaryComment,
   findManagedSummaryThread,
+  listManagedFindingThreads,
   mergeFollowUpReviewResult,
   reconcileThreads,
 } from "../src/review/ThreadReconciliation"
@@ -94,6 +95,23 @@ describe("thread reconciliation", () => {
     expect(content).toContain("Suggestion:")
     expect(content).toContain("```")
     expect(content).toContain("const next = computeValue()")
+  })
+
+  test("lists managed finding threads with decoded finding state and thread metadata", () => {
+    const finding = makeReviewFinding({
+      title: "Existing finding",
+      filePath: "src/legacy.ts",
+      line: 7,
+    })
+
+    const managedFinding = listManagedFindingThreads([makeManagedFindingThread(finding, 12, 2)])[0]
+
+    expect(managedFinding?.thread.id).toBe(12)
+    expect(managedFinding?.thread.status).toBe(2)
+    expect(managedFinding?.commentId).toBe(120)
+    expect(managedFinding?.filePath).toBe("/src/legacy.ts")
+    expect(managedFinding?.line).toBe(7)
+    expect(managedFinding?.finding.title).toBe("Existing finding")
   })
 
   test("only closes stale findings that intersect the follow-up changed lines", () => {

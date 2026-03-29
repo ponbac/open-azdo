@@ -414,6 +414,7 @@ describe("review context", () => {
     })
 
     expect(context.pullRequestThreads).toBeUndefined()
+    expect(context.managedFindings).toBeUndefined()
   })
 
   test("keeps managed threads with human replies and strips embedded state payloads", () => {
@@ -435,11 +436,15 @@ describe("review context", () => {
       existingThreads: [
         makeThread({
           id: 7,
+          threadContext: {
+            filePath: "src/example.ts",
+            rightFileStart: { line: 2 },
+          },
           comments: [
             makeThreadComment({
               id: 70,
               content:
-                'Finding title\n<!-- open-azdo:{"kind":"finding","fingerprint":"abc","finding":{"title":"t"}} -->',
+                'Finding title\n<!-- open-azdo:{"kind":"finding","fingerprint":"abc","finding":{"severity":"high","confidence":"high","title":"t","body":"Body","filePath":"src/example.ts","line":2}} -->',
               author: { displayName: "Open AZDO" },
               publishedDate: "2026-03-23T09:00:00.000Z",
             }),
@@ -460,6 +465,8 @@ describe("review context", () => {
         {
           id: 7,
           status: "active",
+          filePath: "src/example.ts",
+          line: 2,
           updatedAt: "2026-03-23T10:00:00.000Z",
           managedThread: true,
           comments: [
@@ -476,6 +483,78 @@ describe("review context", () => {
               content: "This is fixed in the latest patch.",
             },
           ],
+        },
+      ],
+    })
+    expect(context.managedFindings).toEqual({
+      omittedCount: 0,
+      items: [
+        {
+          id: 7,
+          status: "active",
+          resolution: "unresolved",
+          filePath: "src/example.ts",
+          line: 2,
+          updatedAt: "2026-03-23T10:00:00.000Z",
+          title: "t",
+          severity: "high",
+          confidence: "high",
+        },
+      ],
+    })
+  })
+
+  test("includes fixed pure managed finding threads in managedFindings while keeping them out of pullRequestThreads", () => {
+    const context = buildReviewContext({
+      metadata: {
+        title: "Feature PR",
+        description: "Adds a new export",
+      },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        diffText: "",
+        changedFiles: [],
+        changedLinesByFile: new Map(),
+        deletedLinesByFile: new Map(),
+      },
+      existingThreads: [
+        makeThread({
+          id: 8,
+          status: "fixed",
+          threadContext: {
+            filePath: "/src/legacy.ts",
+            rightFileStart: { line: 9 },
+          },
+          comments: [
+            makeThreadComment({
+              id: 80,
+              content:
+                'Legacy finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"legacy","finding":{"severity":"medium","confidence":"high","title":"Legacy issue","body":"Body","filePath":"src/legacy.ts","line":9}} -->',
+              author: { displayName: "Open AZDO" },
+              publishedDate: "2026-03-22T10:00:00.000Z",
+            }),
+          ],
+        }),
+      ],
+    })
+
+    expect(context.pullRequestThreads).toBeUndefined()
+    expect(context.managedFindings).toEqual({
+      omittedCount: 0,
+      items: [
+        {
+          id: 8,
+          status: "fixed",
+          resolution: "resolved",
+          filePath: "/src/legacy.ts",
+          line: 9,
+          updatedAt: "2026-03-22T10:00:00.000Z",
+          title: "Legacy issue",
+          severity: "medium",
+          confidence: "high",
         },
       ],
     })
