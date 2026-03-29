@@ -80,8 +80,9 @@ describe("review prompt", () => {
 
     expect(prompt).toContain("Build an internal checklist containing every path in scoped changedFiles")
     expect(prompt).toContain(
-      "For each scoped changed file, inspect the diff with `git diff <baseRef> <headRef> -- <path>`",
+      "For each scoped changed file, inspect the diff with `git diff '<baseRef>' '<headRef>' -- '<path>'`",
     )
+    expect(prompt).toContain("Always shell-quote file paths and refs when you run read-only commands.")
     expect(prompt).toContain("If LSP access is available for the current file, use it selectively")
     expect(prompt).toContain("Treat LSP results as supporting evidence, not authority on their own")
     expect(prompt).toContain("Return strict JSON only with the shape:")
