@@ -130,6 +130,7 @@ Key requirements:
 
 Attach the pipeline as a branch build-validation policy. Findings are posted as PR comments by default and do not fail the build.
 `open-azdo` does not install language-specific prerequisites itself. LSP prerequisites are provided by the pipeline environment, and the pnpm example enables OpenCode's experimental LSP tool while provisioning `.NET` plus `dotnet restore` for C# projects.
+For nested JS or TS packages, install dependencies in the package directory that owns the lockfile before running `open-azdo`. `open-azdo` keeps the review workspace at the checkout root and relies on workspace-local TypeScript resolution.
 
 ```yaml
 trigger: none

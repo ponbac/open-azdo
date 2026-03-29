@@ -208,6 +208,11 @@ describe("opencode", () => {
   test("allows lsp queries in the generated opencode config", () => {
     expect(buildOpenCodeConfig("azdo-review")).toEqual(
       expect.objectContaining({
+        lsp: expect.objectContaining({
+          typescript: expect.objectContaining({
+            command: [process.execPath, "x", "typescript-language-server", "--stdio"],
+          }),
+        }),
         permission: expect.objectContaining({
           lsp: "allow",
         }),

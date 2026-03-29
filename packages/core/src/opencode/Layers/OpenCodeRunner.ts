@@ -9,6 +9,12 @@ import { OpenCodeSdkRuntimeLive } from "../internal/Layers/OpenCodeSdkRuntime"
 import { OpenCodeSdkRuntime } from "../internal/Services/OpenCodeSdkRuntime"
 
 const OPEN_CODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
+/**
+ * Override OpenCode's built-in TypeScript LSP spawn so nested JS/TS package
+ * roots can use their own installed TypeScript version even when OpenCode runs
+ * from the repository root.
+ */
+const OPEN_CODE_TYPESCRIPT_LSP_COMMAND = [process.execPath, "x", "typescript-language-server", "--stdio"]
 
 type ParsedModel = {
   readonly providerID: string
@@ -46,6 +52,11 @@ export const buildOpenCodeConfig = (agentName: string): Config => ({
   share: "disabled",
   autoupdate: false,
   default_agent: agentName,
+  lsp: {
+    typescript: {
+      command: OPEN_CODE_TYPESCRIPT_LSP_COMMAND,
+    },
+  },
   permission: openCodePermission,
   agent: {
     [agentName]: {
