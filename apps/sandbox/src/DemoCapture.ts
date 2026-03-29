@@ -32,6 +32,7 @@ const actions: SandboxCapture["review"]["actions"] = [
       line: 34,
       endLine: 42,
       suggestion: "Move the cache write into an Effect-run update path outside of render.",
+      managedFindingId: 202,
     },
   },
   {
@@ -431,6 +432,7 @@ export const demoCapture: SandboxCapture = {
           line: 34,
           endLine: 42,
           suggestion: "Move the cache write into an Effect-run update path outside of render.",
+          managedFindingId: 202,
         },
       ],
       inlineFindings: [
@@ -443,9 +445,11 @@ export const demoCapture: SandboxCapture = {
           line: 34,
           endLine: 42,
           suggestion: "Move the cache write into an Effect-run update path outside of render.",
+          managedFindingId: 202,
         },
       ],
       summaryOnlyFindings: [],
+      resolvedManagedFindingIds: [303],
       unmappedNotes: [],
     },
     summaryPass: {

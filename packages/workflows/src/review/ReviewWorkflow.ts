@@ -46,9 +46,9 @@ import {
   buildManagedReviewState,
   buildSummaryComment,
   findManagedSummaryThread,
+  mergeManagedReviewResult,
   reconcileThreads,
   type ManagedReviewState,
-  mergeFollowUpReviewResult,
   type ReviewHistoryEntry,
   type ReviewHistoryTokens,
 } from "./ThreadReconciliation"
@@ -107,6 +107,7 @@ export type PlannedReviewWorkflow = {
   readonly summaryState: ManagedReviewState
   readonly summaryContent: string
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
+  readonly resolvedManagedFindingIds: ReadonlyArray<number>
   readonly actions: ReturnType<typeof reconcileThreads>
   readonly reviewMode: ReviewMode
   readonly output: ReviewWorkflowOutput
@@ -283,13 +284,17 @@ const resolveReviewScope = ({
 const decodeStructuredReviewResult = ({
   openCodeResult,
   changedLinesByFile,
+  managedFindingCandidateIds,
 }: {
   readonly openCodeResult: OpenCodeRunResult
   readonly changedLinesByFile: Map<string, Set<number>>
+  readonly managedFindingCandidateIds: ReadonlySet<number>
 }) =>
   Effect.gen(function* () {
     const decodeCandidate = (payload: unknown) =>
-      decodeReviewResult(payload, changedLinesByFile).pipe(Effect.orElseSucceed(() => undefined))
+      decodeReviewResult(payload, changedLinesByFile, managedFindingCandidateIds).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
 
     if (openCodeResult.structured !== undefined) {
       const structuredReviewResult = yield* decodeCandidate(openCodeResult.structured)
@@ -321,9 +326,11 @@ const decodeStructuredReviewResult = ({
         {
           verdict: "concerns",
           findings: [],
+          resolvedManagedFindingIds: [],
           unmappedNotes: [],
         },
         changedLinesByFile,
+        managedFindingCandidateIds,
       ),
       source: "fallback" as const,
     } as const
@@ -424,11 +431,13 @@ const aggregateUsage = (usages: ReadonlyArray<OpenCodeRunUsage | undefined>): Op
 const runReviewSummaryPass = ({
   config,
   openCodeRunner,
+  reviewMode,
   reviewResult,
   summarySubjects,
 }: {
   readonly config: ReviewWorkflowConfig
   readonly openCodeRunner: OpenCodeRunner["Service"]
+  readonly reviewMode: ReviewMode
   readonly reviewResult: NormalizedReviewResult
   readonly summarySubjects: ReadonlyArray<ReviewSummarySubject>
 }) =>
@@ -438,6 +447,7 @@ const runReviewSummaryPass = ({
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
+          reviewMode,
           subjects: summarySubjects,
         }),
         summaryFallbackUsed: false,
@@ -468,6 +478,7 @@ const runReviewSummaryPass = ({
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
+          reviewMode,
           subjects: summarySubjects,
         }),
         summaryPrompt,
@@ -489,6 +500,7 @@ const runReviewSummaryPass = ({
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
+          reviewMode,
           subjects: summarySubjects,
         }),
         summaryPrompt,
@@ -501,6 +513,7 @@ const runReviewSummaryPass = ({
     return {
       renderedSummary: renderReviewSummaryFromHighlights({
         verdict: reviewResult.verdict,
+        reviewMode,
         subjects: summarySubjects,
         output: validatedSummaryResult.output,
       }),
@@ -655,6 +668,7 @@ export const planReviewWorkflow = (
         existingThreads,
         summaryContent,
         inlineFindings: [],
+        resolvedManagedFindingIds: [],
         reviewMode,
         scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
         scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
@@ -681,6 +695,7 @@ export const planReviewWorkflow = (
         summaryState: previousSummaryState,
         summaryContent,
         inlineFindings: [],
+        resolvedManagedFindingIds: [],
         actions,
         reviewMode,
         output: {
@@ -738,6 +753,9 @@ export const planReviewWorkflow = (
 
     const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext)
     yield* logInfo("Built review prompt.")
+    const managedFindingCandidateIds = new Set(
+      reviewContext.managedFindingCandidates?.items.map((item) => item.id) ?? [],
+    )
 
     const openCodeResult = yield* openCodeRunner.run({
       workspace: config.workspace,
@@ -754,30 +772,25 @@ export const planReviewWorkflow = (
     const { reviewResult, source } = yield* decodeStructuredReviewResult({
       openCodeResult,
       changedLinesByFile: scopedDiff.changedLinesByFile,
+      managedFindingCandidateIds,
     })
     yield* logInfo(`Decoded review result: ${reviewResult.verdict} with ${reviewResult.findings.length} finding(s).`)
 
-    const followUpMerge =
-      reviewMode === "follow-up"
-        ? mergeFollowUpReviewResult({
-            existingThreads,
-            scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
-            scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
-            reviewResult,
-          })
-        : {
-            reviewResult,
-            carriedForwardFindings: [],
-            carriedForwardFindingsCount: 0,
-          }
-    const outstandingReviewResult = followUpMerge.reviewResult
+    const mergedReview = mergeManagedReviewResult({
+      existingThreads,
+      scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
+      scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
+      reviewResult,
+    })
+    const outstandingReviewResult = mergedReview.reviewResult
     const summarySubjects = buildReviewSummarySubjects({
       reviewResult: outstandingReviewResult,
-      carriedForwardFindings: followUpMerge.carriedForwardFindings,
+      retainedFindings: mergedReview.retainedFindings,
     })
     const summaryRender = yield* runReviewSummaryPass({
       config,
       openCodeRunner,
+      reviewMode,
       reviewResult: outstandingReviewResult,
       summarySubjects,
     })
@@ -810,6 +823,7 @@ export const planReviewWorkflow = (
       existingThreads,
       summaryContent,
       inlineFindings: reviewResult.inlineFindings,
+      resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
       reviewMode,
       scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
       scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
@@ -836,6 +850,7 @@ export const planReviewWorkflow = (
       summaryState,
       summaryContent,
       inlineFindings: reviewResult.inlineFindings,
+      resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
       actions,
       reviewMode,
       output: {
@@ -865,6 +880,7 @@ export const runReviewWorkflow = (config: ReviewWorkflowConfig) =>
         dryRun: config.dryRun,
         summaryContent: exit.value.summaryContent,
         inlineFindings: exit.value.inlineFindings,
+        resolvedManagedFindingIds: exit.value.resolvedManagedFindingIds,
         reviewMode: exit.value.reviewMode,
         scopedChangedLinesByFile: exit.value.scopedDiff.changedLinesByFile,
         scopedDeletedLinesByFile: exit.value.scopedDiff.deletedLinesByFile,

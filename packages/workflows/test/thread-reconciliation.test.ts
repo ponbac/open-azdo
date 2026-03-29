@@ -5,7 +5,7 @@ import {
   buildSummaryComment,
   findManagedSummaryThread,
   listManagedFindingThreads,
-  mergeFollowUpReviewResult,
+  mergeManagedReviewResult,
   reconcileThreads,
 } from "../src/review/ThreadReconciliation"
 
@@ -114,44 +114,36 @@ describe("thread reconciliation", () => {
     expect(managedFinding?.finding.title).toBe("Existing finding")
   })
 
-  test("only closes stale findings that intersect the follow-up changed lines", () => {
-    const activeFinding = makeReviewFinding({
-      title: "New finding",
+  test("updates an explicitly linked managed finding thread even when the wording changed", () => {
+    const currentFinding = makeReviewFinding({
+      title: "Updated wording",
+      body: "Fresh repository evidence with new wording.",
+      managedFindingId: 3,
       line: 5,
     })
-    const intersectingStaleFinding = makeReviewFinding({
-      title: "Intersecting stale",
+    const previousFinding = makeReviewFinding({
+      title: "Old wording",
+      body: "Older phrasing.",
       line: 2,
-    })
-    const untouchedStaleFinding = makeReviewFinding({
-      title: "Untouched stale",
-      filePath: "src/other.ts",
-      line: 20,
     })
 
     const actions = reconcileThreads({
-      existingThreads: [
-        makeManagedSummaryThread(),
-        makeManagedFindingThread(intersectingStaleFinding, 3),
-        makeManagedFindingThread(untouchedStaleFinding, 4),
-      ],
+      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(previousFinding, 3)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
-      inlineFindings: [activeFinding],
+      inlineFindings: [currentFinding],
+      resolvedManagedFindingIds: [],
       reviewMode: "follow-up",
-      scopedChangedLinesByFile: new Map([
-        ["src/example.ts", new Set([2, 5])],
-        ["src/other.ts", new Set([99])],
-      ]),
+      scopedChangedLinesByFile: new Map([["src/example.ts", new Set([2, 5])]]),
       scopedDeletedLinesByFile: new Map(),
     })
 
-    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding", "close-thread"])
-    const closedThread = actions.find((action) => action.type === "close-thread")
-    expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
+    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding"])
+    const findingAction = actions.find((action) => action.type === "upsert-finding")
+    expect(findingAction && "existingThread" in findingAction ? findingAction.existingThread?.id : undefined).toBe(3)
   })
 
-  test("keeps untouched open findings in the follow-up summary result", () => {
-    const carriedForwardFinding = makeReviewFinding({
+  test("retains untouched out-of-scope findings in the outstanding result", () => {
+    const retainedFinding = makeReviewFinding({
       title: "Earlier finding",
       filePath: "src/other.ts",
       line: 20,
@@ -161,9 +153,9 @@ describe("thread reconciliation", () => {
       line: 5,
     })
 
-    const result = mergeFollowUpReviewResult({
+    const result = mergeManagedReviewResult({
       existingThreads: [
-        makeManagedFindingThread(carriedForwardFinding, 2),
+        makeManagedFindingThread(retainedFinding, 2),
         makeManagedFindingThread(makeReviewFinding({ title: "Closed finding", line: 99 }), 3, 2),
       ],
       scopedChangedLinesByFile: new Map([
@@ -176,6 +168,7 @@ describe("thread reconciliation", () => {
         findings: [currentFinding],
         inlineFindings: [currentFinding],
         summaryOnlyFindings: [],
+        resolvedManagedFindingIds: [],
         unmappedNotes: [],
       },
     })
@@ -186,20 +179,27 @@ describe("thread reconciliation", () => {
       "Earlier finding",
       "Current finding",
     ])
-    expect(result.carriedForwardFindings.map((finding) => finding.title)).toEqual(["Earlier finding"])
-    expect(result.carriedForwardFindingsCount).toBe(1)
+    expect(result.retainedFindings).toEqual([
+      {
+        existingThreadId: 2,
+        finding: { ...retainedFinding, managedFindingId: 2 },
+        retentionReason: "outside-scope",
+      },
+    ])
+    expect(result.retainedFindingsCount).toBe(1)
   })
 
-  test("closes stale findings when the follow-up only deletes the previously annotated line", () => {
-    const staleFinding = makeReviewFinding({
-      title: "Deleted finding",
+  test("closes only explicitly resolved managed findings", () => {
+    const resolvedFinding = makeReviewFinding({
+      title: "Resolved finding",
       line: 20,
     })
 
     const actions = reconcileThreads({
-      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(staleFinding, 3)],
+      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(resolvedFinding, 3)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       inlineFindings: [],
+      resolvedManagedFindingIds: [3],
       reviewMode: "follow-up",
       scopedChangedLinesByFile: new Map(),
       scopedDeletedLinesByFile: new Map([["src/example.ts", new Set([20])]]),
@@ -210,7 +210,7 @@ describe("thread reconciliation", () => {
     expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
   })
 
-  test("does not carry forward stale findings when a deleted range intersects them", () => {
+  test("retains in-scope managed findings that were neither linked nor resolved", () => {
     const deletedRangeFinding = makeReviewFinding({
       title: "Range finding",
       line: 40,
@@ -222,7 +222,7 @@ describe("thread reconciliation", () => {
       line: 80,
     })
 
-    const result = mergeFollowUpReviewResult({
+    const result = mergeManagedReviewResult({
       existingThreads: [
         makeManagedFindingThread(deletedRangeFinding, 2),
         makeManagedFindingThread(untouchedFinding, 3),
@@ -234,15 +234,59 @@ describe("thread reconciliation", () => {
         findings: [],
         inlineFindings: [],
         summaryOnlyFindings: [],
+        resolvedManagedFindingIds: [],
         unmappedNotes: [],
       },
     })
 
     expect(result.reviewResult.verdict).toBe("concerns")
-    expect(result.reviewResult.findings.map((finding) => finding.title)).toEqual(["Untouched finding"])
-    expect(result.reviewResult.inlineFindings.map((finding) => finding.title)).toEqual(["Untouched finding"])
-    expect(result.carriedForwardFindings.map((finding) => finding.title)).toEqual(["Untouched finding"])
-    expect(result.carriedForwardFindingsCount).toBe(1)
+    expect(result.reviewResult.findings.map((finding) => finding.title)).toEqual(["Untouched finding", "Range finding"])
+    expect(result.reviewResult.inlineFindings.map((finding) => finding.title)).toEqual([
+      "Untouched finding",
+      "Range finding",
+    ])
+    expect(result.retainedFindings).toEqual([
+      {
+        existingThreadId: 3,
+        finding: { ...untouchedFinding, managedFindingId: 3 },
+        retentionReason: "outside-scope",
+      },
+      {
+        existingThreadId: 2,
+        finding: { ...deletedRangeFinding, managedFindingId: 2 },
+        retentionReason: "unresolved-existing",
+      },
+    ])
+    expect(result.retainedFindingsCount).toBe(2)
+  })
+
+  test("ignores unknown, duplicate, and conflicting resolution ids during reconciliation", () => {
+    const linkedFinding = makeReviewFinding({
+      title: "Linked finding",
+      managedFindingId: 2,
+    })
+    const explicitlyResolvedFinding = makeReviewFinding({
+      title: "Resolved finding",
+      line: 3,
+    })
+
+    const actions = reconcileThreads({
+      existingThreads: [
+        makeManagedSummaryThread(),
+        makeManagedFindingThread(linkedFinding, 2),
+        makeManagedFindingThread(explicitlyResolvedFinding, 3),
+      ],
+      summaryContent: buildSummaryComment(makeSummarySnapshot()),
+      inlineFindings: [linkedFinding],
+      resolvedManagedFindingIds: [999, 2, 3, 3],
+      reviewMode: "full",
+      scopedChangedLinesByFile: new Map([["src/example.ts", new Set([2, 3])]]),
+      scopedDeletedLinesByFile: new Map(),
+    })
+
+    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding", "close-thread"])
+    const closedThread = actions.find((action) => action.type === "close-thread")
+    expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
   })
 
   test("skipped mode only updates the summary thread", () => {
@@ -250,6 +294,7 @@ describe("thread reconciliation", () => {
       existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       inlineFindings: [makeReviewFinding()],
+      resolvedManagedFindingIds: [],
       reviewMode: "skipped",
       scopedChangedLinesByFile: new Map([["src/example.ts", new Set([2])]]),
       scopedDeletedLinesByFile: new Map(),

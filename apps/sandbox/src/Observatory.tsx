@@ -188,6 +188,7 @@ const OverviewSection = ({ state }: SandboxViewProps) => {
   const history = capture.review.summaryState.reviewHistory ?? []
   const histCost = totalHistoryCost(history)
   const findings = capture.review.result?.findings ?? []
+  const resolvedManagedFindingIds = capture.review.result?.resolvedManagedFindingIds ?? []
   const totalTokenCount = tokens ? tokens.input + tokens.output + tokens.reasoning + tokens.cacheRead : 0
   const sc = capture.review.summaryState.severityCounts
 
@@ -208,6 +209,11 @@ const OverviewSection = ({ state }: SandboxViewProps) => {
           {capture.review.summaryPass.subjects.length} summary subject
           {capture.review.summaryPass.subjects.length === 1 ? "" : "s"} captured across both passes.
         </p>
+        {resolvedManagedFindingIds.length > 0 ? (
+          <p className="mt-2 text-xs text-[#8a7e70]">
+            Explicitly resolved managed threads: {resolvedManagedFindingIds.map((id) => `#${id}`).join(", ")}
+          </p>
+        ) : null}
       </div>
 
       {/* Two-column: Cost + Severity */}
@@ -290,7 +296,7 @@ const FindingsSection = ({ state }: SandboxViewProps) => {
         return (
           <div
             className={`border border-[#2a2520] border-l-2 ${severityColor} bg-[#18140f]`}
-            key={`${f.filePath}:${f.line}`}
+            key={`${f.managedFindingId ?? "new"}:${f.filePath}:${f.line}:${i}`}
           >
             <button
               className="flex w-full items-start gap-3 p-4 text-left hover:bg-white/[0.02] transition"
@@ -303,6 +309,9 @@ const FindingsSection = ({ state }: SandboxViewProps) => {
                     {f.severity}
                   </Pill>
                   <Pill>{f.confidence}</Pill>
+                  {f.managedFindingId !== undefined ? (
+                    <Pill tone="neutral">{`thread #${f.managedFindingId}`}</Pill>
+                  ) : null}
                 </div>
                 <h3 className="mt-2 text-sm font-semibold text-[#e4d8c8] leading-snug">{f.title}</h3>
                 <div className="mt-1 text-[0.65rem] text-[#8a7e70] font-mono">

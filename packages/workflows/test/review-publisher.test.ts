@@ -34,6 +34,7 @@ describe("review publisher", () => {
         dryRun: false,
         summaryContent,
         inlineFindings: [finding],
+        resolvedManagedFindingIds: [],
         reviewMode: "full",
         scopedChangedLinesByFile,
         scopedDeletedLinesByFile,
@@ -54,8 +55,10 @@ describe("review publisher", () => {
     expect(createThreadCalls).toHaveLength(2)
   })
 
-  test("updates existing summary, reuses matching findings, and closes stale threads", async () => {
-    const finding = makeReviewFinding()
+  test("updates existing summary, reuses linked findings, and closes only explicitly resolved threads", async () => {
+    const finding = makeReviewFinding({
+      managedFindingId: 2,
+    })
     const staleFinding = makeReviewFinding({
       title: "Stale finding",
       line: 3,
@@ -70,6 +73,7 @@ describe("review publisher", () => {
         dryRun: false,
         summaryContent,
         inlineFindings: [finding],
+        resolvedManagedFindingIds: [3],
         reviewMode: "full",
         scopedChangedLinesByFile,
         scopedDeletedLinesByFile,
@@ -111,6 +115,7 @@ describe("review publisher", () => {
         dryRun: false,
         summaryContent,
         inlineFindings: [finding],
+        resolvedManagedFindingIds: [],
         reviewMode: "full",
         scopedChangedLinesByFile,
         scopedDeletedLinesByFile,
@@ -168,6 +173,7 @@ describe("review publisher", () => {
         dryRun: false,
         summaryContent,
         inlineFindings: [finding],
+        resolvedManagedFindingIds: [],
         reviewMode: "full",
         scopedChangedLinesByFile,
         scopedDeletedLinesByFile,
@@ -210,6 +216,7 @@ describe("review publisher", () => {
         dryRun: false,
         summaryContent,
         inlineFindings: [],
+        resolvedManagedFindingIds: [],
         reviewMode: "skipped",
         scopedChangedLinesByFile,
         scopedDeletedLinesByFile,

@@ -26,19 +26,25 @@ describe("review summary", () => {
     const subjects = buildReviewSummarySubjects({
       reviewResult: {
         ...makeNormalizedReviewResult([inlineFinding, summaryOnlyFinding], [inlineFinding]),
-        findings: [carriedForwardFinding, inlineFinding, summaryOnlyFinding],
-        inlineFindings: [carriedForwardFinding, inlineFinding],
+        findings: [{ ...carriedForwardFinding, managedFindingId: 11 }, inlineFinding, summaryOnlyFinding],
+        inlineFindings: [{ ...carriedForwardFinding, managedFindingId: 11 }, inlineFinding],
         summaryOnlyFindings: [summaryOnlyFinding],
         unmappedNotes: ["Needs wider validation"],
       },
-      carriedForwardFindings: [carriedForwardFinding],
+      retainedFindings: [
+        {
+          existingThreadId: 11,
+          finding: { ...carriedForwardFinding, managedFindingId: 11 },
+          retentionReason: "outside-scope",
+        },
+      ],
     })
 
-    expect(subjects.map((subject) => [subject.id, subject.kind, subject.title])).toEqual([
-      ["inline-finding-1", "inline-finding", "Inline finding"],
-      ["summary-only-finding-1", "summary-only-finding", "Summary-only finding"],
-      ["unmapped-note-1", "unmapped-note", "Needs wider validation"],
-      ["carried-forward-finding-1", "carried-forward-finding", "Carried forward finding"],
+    expect(subjects.map((subject) => [subject.id, subject.kind, subject.title, subject.retentionReason])).toEqual([
+      ["inline-finding-1", "inline-finding", "Inline finding", undefined],
+      ["summary-only-finding-1", "summary-only-finding", "Summary-only finding", undefined],
+      ["unmapped-note-1", "unmapped-note", "Needs wider validation", undefined],
+      ["carried-forward-finding-1", "carried-forward-finding", "Carried forward finding", "outside-scope"],
     ])
   })
 
@@ -146,20 +152,60 @@ describe("review summary", () => {
     const subjects = buildReviewSummarySubjects({
       reviewResult: {
         ...makeNormalizedReviewResult([inlineFinding], [inlineFinding]),
-        findings: [carriedForwardFinding, inlineFinding],
-        inlineFindings: [carriedForwardFinding, inlineFinding],
+        findings: [{ ...carriedForwardFinding, managedFindingId: 8 }, inlineFinding],
+        inlineFindings: [{ ...carriedForwardFinding, managedFindingId: 8 }, inlineFinding],
       },
-      carriedForwardFindings: [carriedForwardFinding],
+      retainedFindings: [
+        {
+          existingThreadId: 8,
+          finding: { ...carriedForwardFinding, managedFindingId: 8 },
+          retentionReason: "outside-scope",
+        },
+      ],
     })
 
     const summary = renderReviewSummaryFallback({
       verdict: "concerns",
+      reviewMode: "follow-up",
       subjects,
     })
 
     expect(summary).toContain("This review is concerns with 2 findings.")
     expect(summary).toContain("1 finding is carried forward from earlier managed reviews outside this follow-up diff.")
     expect(summary).toContain("- Current issue (src/example.ts:2)")
-    expect(summary).toContain("- Still tracking: Older issue (src/legacy.ts:20)")
+    expect(summary).toContain("- Still tracking outside scope: Older issue (src/legacy.ts:20)")
+  })
+
+  test("describes earlier managed findings that remain open after the rerun", () => {
+    const retainedFinding = makeReviewFinding({
+      title: "Earlier issue",
+      filePath: "src/example.ts",
+      line: 4,
+      managedFindingId: 9,
+    })
+
+    const subjects = buildReviewSummarySubjects({
+      reviewResult: {
+        ...makeNormalizedReviewResult([retainedFinding], [retainedFinding]),
+        findings: [retainedFinding],
+        inlineFindings: [retainedFinding],
+      },
+      retainedFindings: [
+        {
+          existingThreadId: 9,
+          finding: retainedFinding,
+          retentionReason: "unresolved-existing",
+        },
+      ],
+    })
+
+    const summary = renderReviewSummaryFallback({
+      verdict: "concerns",
+      reviewMode: "full",
+      subjects,
+    })
+
+    expect(summary).toContain("1 earlier managed finding still remains open after this rerun.")
+    expect(summary).toContain("- Still open from an earlier managed review: Earlier issue (src/example.ts:4)")
   })
 })

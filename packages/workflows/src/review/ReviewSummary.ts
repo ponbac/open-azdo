@@ -9,10 +9,12 @@ import {
   type ReviewFinding,
   ReviewSeveritySchema,
 } from "./ReviewOutput"
-import { fingerprintFinding } from "./ThreadReconciliation"
+import type { ReviewMode } from "./ReviewContext"
+import type { RetainedManagedFinding } from "./ThreadReconciliation"
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
+const ReviewSummaryRetentionReasonSchema = Schema.Literals(["outside-scope", "unresolved-existing"])
 
 export const ReviewSummarySubjectKindSchema = Schema.Literals([
   "inline-finding",
@@ -31,6 +33,7 @@ export const ReviewSummarySubjectSchema = Schema.Struct({
   confidence: Schema.optionalKey(ReviewConfidenceSchema),
   filePath: Schema.optionalKey(NonEmptyString),
   line: Schema.optionalKey(PositiveInt),
+  retentionReason: Schema.optionalKey(ReviewSummaryRetentionReasonSchema),
 })
 export type ReviewSummarySubject = Schema.Schema.Type<typeof ReviewSummarySubjectSchema>
 
@@ -77,7 +80,8 @@ export const ReviewSummaryPassOutputJsonSchema = {
 type ReviewSummaryCounts = {
   readonly findings: number
   readonly summaryOnlyNotes: number
-  readonly carriedForwardFindings: number
+  readonly retainedOutsideScopeFindings: number
+  readonly retainedUnresolvedExistingFindings: number
 }
 
 export type ReviewSummaryValidationResult =
@@ -114,24 +118,26 @@ const createUnmappedNoteSubject = (id: string, note: string): ReviewSummarySubje
 
 /**
  * Builds the summary-pass subject list from the normalized result that will actually be published.
- * Carry-forward findings are passed separately so they can stay explicit and cannot be confused with
+ * Retained managed findings are passed separately so they stay explicit and cannot be confused with
  * newly discovered issues during the summary render.
  */
 export const buildReviewSummarySubjects = ({
   reviewResult,
-  carriedForwardFindings,
+  retainedFindings,
 }: {
   readonly reviewResult: NormalizedReviewResult
-  readonly carriedForwardFindings?: ReadonlyArray<ReviewFinding> | undefined
+  readonly retainedFindings?: ReadonlyArray<RetainedManagedFinding> | undefined
 }): ReadonlyArray<ReviewSummarySubject> => {
   const subjects: ReviewSummarySubject[] = []
-  const carriedForwardFingerprints = new Set(
-    (carriedForwardFindings ?? []).map((finding) => fingerprintFinding(finding)),
+  const retainedManagedFindingIds = new Set(
+    (retainedFindings ?? []).flatMap((retainedFinding) =>
+      retainedFinding.finding.managedFindingId !== undefined ? [retainedFinding.finding.managedFindingId] : [],
+    ),
   )
 
   let inlineFindingIndex = 1
   for (const finding of reviewResult.inlineFindings) {
-    if (carriedForwardFingerprints.has(fingerprintFinding(finding))) {
+    if (finding.managedFindingId !== undefined && retainedManagedFindingIds.has(finding.managedFindingId)) {
       continue
     }
 
@@ -154,10 +160,15 @@ export const buildReviewSummarySubjects = ({
   }
 
   let carriedForwardFindingIndex = 1
-  for (const finding of carriedForwardFindings ?? []) {
-    subjects.push(
-      createFindingSubject(`carried-forward-finding-${carriedForwardFindingIndex}`, "carried-forward-finding", finding),
-    )
+  for (const retainedFinding of retainedFindings ?? []) {
+    subjects.push({
+      ...createFindingSubject(
+        `carried-forward-finding-${carriedForwardFindingIndex}`,
+        "carried-forward-finding",
+        retainedFinding.finding,
+      ),
+      retentionReason: retainedFinding.retentionReason,
+    } satisfies ReviewSummarySubject)
     carriedForwardFindingIndex += 1
   }
 
@@ -178,7 +189,9 @@ export const decodeReviewSummaryPassOutput = (payload: unknown) =>
 const countSummarySubjects = (subjects: ReadonlyArray<ReviewSummarySubject>): ReviewSummaryCounts => ({
   findings: subjects.filter((subject) => subject.kind !== "unmapped-note").length,
   summaryOnlyNotes: subjects.filter((subject) => subject.kind === "unmapped-note").length,
-  carriedForwardFindings: subjects.filter((subject) => subject.kind === "carried-forward-finding").length,
+  retainedOutsideScopeFindings: subjects.filter((subject) => subject.retentionReason === "outside-scope").length,
+  retainedUnresolvedExistingFindings: subjects.filter((subject) => subject.retentionReason === "unresolved-existing")
+    .length,
 })
 
 const formatCount = (count: number, singular: string, plural = `${singular}s`) =>
@@ -190,9 +203,11 @@ const formatCount = (count: number, singular: string, plural = `${singular}s`) =
  */
 export const renderReviewSummaryOverview = ({
   verdict,
+  reviewMode,
   subjects,
 }: {
   readonly verdict: NormalizedReviewResult["verdict"]
+  readonly reviewMode: ReviewMode
   readonly subjects: ReadonlyArray<ReviewSummarySubject>
 }) => {
   const counts = countSummarySubjects(subjects)
@@ -212,12 +227,21 @@ export const renderReviewSummaryOverview = ({
   }
 
   const overview = `This review is ${verdict} with ${parts.join(" and ")}.`
+  const retentionNotes: string[] = []
 
-  if (counts.carriedForwardFindings === 0) {
-    return overview
+  if (counts.retainedOutsideScopeFindings > 0) {
+    retentionNotes.push(
+      `${formatCount(counts.retainedOutsideScopeFindings, "finding")} ${counts.retainedOutsideScopeFindings === 1 ? "is" : "are"} carried forward from earlier managed reviews ${reviewMode === "follow-up" ? "outside this follow-up diff" : "outside this review scope"}.`,
+    )
   }
 
-  return `${overview} ${formatCount(counts.carriedForwardFindings, "finding")} ${counts.carriedForwardFindings === 1 ? "is" : "are"} carried forward from earlier managed reviews outside this follow-up diff.`
+  if (counts.retainedUnresolvedExistingFindings > 0) {
+    retentionNotes.push(
+      `${formatCount(counts.retainedUnresolvedExistingFindings, "earlier managed finding", "earlier managed findings")} ${counts.retainedUnresolvedExistingFindings === 1 ? "still remains" : "still remain"} open after this rerun.`,
+    )
+  }
+
+  return retentionNotes.length > 0 ? `${overview} ${retentionNotes.join(" ")}` : overview
 }
 
 const renderSubjectLocation = (subject: ReviewSummarySubject) =>
@@ -228,6 +252,14 @@ const renderSubjectFallbackText = (subject: ReviewSummarySubject) => {
   const locationSuffix = location ? ` (${location})` : ""
 
   if (subject.kind === "carried-forward-finding") {
+    if (subject.retentionReason === "outside-scope") {
+      return `Still tracking outside scope: ${subject.title}${locationSuffix}`
+    }
+
+    if (subject.retentionReason === "unresolved-existing") {
+      return `Still open from an earlier managed review: ${subject.title}${locationSuffix}`
+    }
+
     return `Still tracking: ${subject.title}${locationSuffix}`
   }
 
@@ -239,14 +271,16 @@ const renderSummaryHighlights = (highlights: ReadonlyArray<{ readonly text: stri
 
 export const renderReviewSummaryFromHighlights = ({
   verdict,
+  reviewMode,
   subjects,
   output,
 }: {
   readonly verdict: NormalizedReviewResult["verdict"]
+  readonly reviewMode: ReviewMode
   readonly subjects: ReadonlyArray<ReviewSummarySubject>
   readonly output: ReviewSummaryPassOutput
 }) => {
-  const overview = renderReviewSummaryOverview({ verdict, subjects })
+  const overview = renderReviewSummaryOverview({ verdict, reviewMode, subjects })
   const highlightBlock = renderSummaryHighlights(output.highlights)
 
   return highlightBlock.length > 0 ? `${overview}\n\n${highlightBlock}` : overview
@@ -258,12 +292,14 @@ export const renderReviewSummaryFromHighlights = ({
  */
 export const renderReviewSummaryFallback = ({
   verdict,
+  reviewMode,
   subjects,
 }: {
   readonly verdict: NormalizedReviewResult["verdict"]
+  readonly reviewMode: ReviewMode
   readonly subjects: ReadonlyArray<ReviewSummarySubject>
 }) => {
-  const overview = renderReviewSummaryOverview({ verdict, subjects })
+  const overview = renderReviewSummaryOverview({ verdict, reviewMode, subjects })
 
   if (subjects.length === 0) {
     return overview

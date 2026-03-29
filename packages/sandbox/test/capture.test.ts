@@ -79,6 +79,7 @@ const baseCapture = {
           body: "Finding body",
           filePath: "src/example.ts",
           line: 2,
+          managedFindingId: 1,
         },
       ],
       inlineFindings: [
@@ -89,9 +90,11 @@ const baseCapture = {
           body: "Finding body",
           filePath: "src/example.ts",
           line: 2,
+          managedFindingId: 1,
         },
       ],
       summaryOnlyFindings: [],
+      resolvedManagedFindingIds: [],
       unmappedNotes: [],
     },
     summaryPass: {
@@ -160,6 +163,7 @@ const baseCapture = {
           body: "Finding body",
           filePath: "src/example.ts",
           line: 2,
+          managedFindingId: 1,
         },
       },
       {

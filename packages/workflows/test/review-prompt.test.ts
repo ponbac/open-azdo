@@ -65,6 +65,22 @@ const reviewContext: ReviewContext = {
       },
     ],
   },
+  managedFindingCandidates: {
+    omittedCount: 0,
+    items: [
+      {
+        id: 7,
+        filePath: "src/example.ts",
+        line: 2,
+        updatedAt: "2026-03-21T11:00:00.000Z",
+        title: "🧵 Earlier finding",
+        body: "Still verify whether this remains.",
+        suggestion: "return nextValue",
+        severity: "high",
+        confidence: "high",
+      },
+    ],
+  },
   connectedWorkItems: {
     omittedCount: 0,
     items: [
@@ -114,6 +130,9 @@ describe("review prompt", () => {
     expect(prompt).toContain(
       'Treat `managedFindings` entries with `resolution: "resolved"` as previously fixed concerns.',
     )
+    expect(prompt).toContain("Use `managedFindingCandidates` as the only authoritative reuse and resolution pool")
+    expect(prompt).toContain("set that finding's `managedFindingId`")
+    expect(prompt).toContain("add its id to `resolvedManagedFindingIds`")
     expect(prompt).toContain(
       "Do not mention resolved managed findings in `findings` or `unmappedNotes` unless fresh repository evidence shows the issue still reproduces",
     )
@@ -126,7 +145,10 @@ describe("review prompt", () => {
     expect(prompt).toContain('"pullRequestThreads"')
     expect(prompt).toContain('"origin":"open-azdo"')
     expect(prompt).toContain('"managedFindings"')
+    expect(prompt).toContain('"managedFindingCandidates"')
     expect(prompt).toContain('"resolution":"resolved"')
+    expect(prompt).toContain('"managedFindingId":123')
+    expect(prompt).toContain('"resolvedManagedFindingIds":[123]')
     expect(prompt).toContain('"connectedWorkItems"')
     expect(prompt).toContain('"descriptionMarkdown":"Hello world"')
   })

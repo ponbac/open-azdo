@@ -57,8 +57,8 @@ OpenCode is prompted through the SDK v2 client with JSON-schema structured outpu
 The only intended write surface is PR thread management:
 
 - one managed summary thread
-- one managed inline thread per finding fingerprint
-- stale managed finding threads marked `fixed`
+- one managed inline thread per active finding, with thread reuse selected explicitly by the reviewer model through the prior Azure DevOps thread id
+- managed finding threads closed only when the reviewer model explicitly resolves an in-scope prior thread id
 
 Comment-post failures are surfaced as operational failures and do not get swallowed.
 

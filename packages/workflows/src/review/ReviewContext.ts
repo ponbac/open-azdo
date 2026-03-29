@@ -14,6 +14,7 @@ const MAX_WORK_ITEM_CONTEXT_CHARS = 24_000
 const MAX_RELATED_ITEMS = 4
 const MAX_THREAD_CONTEXT_CHARS = 24_000
 const MAX_MANAGED_FINDING_CONTEXT_CHARS = 12_000
+const MAX_MANAGED_FINDING_CANDIDATE_CONTEXT_CHARS = 20_000
 const MANAGED_COMMENT_PREFIXES = ["<!-- open-azdo-review:", "<!-- open-azdo:"]
 const MANAGED_COMMENT_SUFFIX = " -->"
 const SYSTEM_THREAD_AUTHORS = new Set(["Azure Pipelines Test Service", "Microsoft.VisualStudio.Services.TFS"])
@@ -112,6 +113,19 @@ export type PromptManagedFinding = {
   readonly confidence: "low" | "medium" | "high"
 }
 
+export type PromptManagedFindingCandidate = {
+  readonly id: number
+  readonly filePath: string
+  readonly line: number
+  readonly endLine?: number
+  readonly updatedAt?: string
+  readonly title: string
+  readonly body: string
+  readonly suggestion?: string
+  readonly severity: "low" | "medium" | "high" | "critical"
+  readonly confidence: "low" | "medium" | "high"
+}
+
 export type ReviewContext = {
   readonly pullRequest: {
     readonly title: string
@@ -134,6 +148,10 @@ export type ReviewContext = {
   readonly managedFindings?: {
     readonly omittedCount: number
     readonly items: ReadonlyArray<PromptManagedFinding>
+  }
+  readonly managedFindingCandidates?: {
+    readonly omittedCount: number
+    readonly items: ReadonlyArray<PromptManagedFindingCandidate>
   }
   readonly connectedWorkItems?: {
     readonly omittedCount: number
@@ -468,6 +486,50 @@ const toPromptManagedFinding = ({
   confidence: finding.confidence,
 })
 
+const normalizeScopedFindingPath = (value: string) => normalizePath(value).replace(/^\/+/, "")
+
+const resolveManagedFindingPromptLocation = ({ filePath, line, finding }: ManagedFindingContextItem) => ({
+  filePath: normalizeScopedFindingPath(filePath ?? finding.filePath),
+  line: line ?? finding.line,
+  endLine: finding.endLine,
+})
+
+const managedFindingTouchesScopedDiff = (
+  managedFinding: ManagedFindingContextItem,
+  changedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
+  deletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
+) => {
+  const location = resolveManagedFindingPromptLocation(managedFinding)
+  const changedLines = changedLinesByFile.get(location.filePath)
+  const deletedLines = deletedLinesByFile.get(location.filePath)
+
+  for (let currentLine = location.line; currentLine <= (location.endLine ?? location.line); currentLine += 1) {
+    // Treat deleted lines as in-scope so the reviewer can explicitly resolve findings removed by the patch.
+    if (changedLines?.has(currentLine) || deletedLines?.has(currentLine)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+const toPromptManagedFindingCandidate = (managedFinding: ManagedFindingContextItem): PromptManagedFindingCandidate => {
+  const location = resolveManagedFindingPromptLocation(managedFinding)
+
+  return {
+    id: managedFinding.thread.id,
+    filePath: location.filePath,
+    line: location.line,
+    ...(location.endLine !== undefined ? { endLine: location.endLine } : {}),
+    ...(managedFinding.updatedAt !== undefined ? { updatedAt: managedFinding.updatedAt } : {}),
+    title: managedFinding.finding.title,
+    body: managedFinding.finding.body,
+    ...(managedFinding.finding.suggestion !== undefined ? { suggestion: managedFinding.finding.suggestion } : {}),
+    severity: managedFinding.finding.severity,
+    confidence: managedFinding.finding.confidence,
+  } satisfies PromptManagedFindingCandidate
+}
+
 const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChars: number, totalCount: number) =>
   shrinkValueToFitSerializedBudget({
     value: thread,
@@ -483,6 +545,35 @@ const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChar
           ),
         }),
       })),
+  })
+
+const truncatePromptManagedFindingCandidateToFitBudget = (
+  managedFindingCandidate: PromptManagedFindingCandidate,
+  maxSerializedChars: number,
+  totalCount: number,
+) =>
+  shrinkValueToFitSerializedBudget({
+    value: managedFindingCandidate,
+    maxSerializedChars,
+    serialize: (candidate) => serializeBudgetedPromptSection([candidate], totalCount),
+    getSlots: (candidate) => [
+      {
+        text: candidate.body,
+        write: (nextText: string) => ({ ...candidate, body: nextText }),
+      },
+      ...(candidate.suggestion
+        ? [
+            {
+              text: candidate.suggestion,
+              write: (nextText: string) => ({ ...candidate, suggestion: nextText }),
+            },
+          ]
+        : []),
+      {
+        text: candidate.title,
+        write: (nextText: string) => ({ ...candidate, title: nextText }),
+      },
+    ],
   })
 
 /**
@@ -519,6 +610,28 @@ const selectManagedFindingsForPrompt = (threads: ReadonlyArray<ExistingThread>) 
     omittedCount: Math.max(managedFindings.length - selected.length, 0),
     items: selected,
   } satisfies NonNullable<ReviewContext["managedFindings"]>
+}
+
+/**
+ * Provides the reviewer model with only active managed findings that still overlap the current
+ * review scope so it can explicitly link or resolve those threads without spending prompt budget
+ * on unrelated historical findings.
+ */
+const selectManagedFindingCandidatesForPrompt = (threads: ReadonlyArray<ExistingThread>, gitDiff: PullRequestDiff) => {
+  const managedFindingCandidates = listManagedFindingThreads(threads)
+    .filter((managedFinding) => resolveManagedFindingResolution(managedFinding.thread.status) === "unresolved")
+    .filter((managedFinding) =>
+      managedFindingTouchesScopedDiff(managedFinding, gitDiff.changedLinesByFile, gitDiff.deletedLinesByFile),
+    )
+    .map(toPromptManagedFindingCandidate)
+    .sort(compareUpdatedAtThenIdDesc)
+
+  return selectItemsWithinSerializedBudget({
+    items: managedFindingCandidates,
+    totalCount: managedFindingCandidates.length,
+    maxSerializedChars: MAX_MANAGED_FINDING_CANDIDATE_CONTEXT_CHARS,
+    truncateItemToFit: truncatePromptManagedFindingCandidateToFitBudget,
+  }) satisfies NonNullable<ReviewContext["managedFindingCandidates"]> | undefined
 }
 
 /**
@@ -590,6 +703,9 @@ export const buildReviewContext = ({
 }: BuildReviewContextInput): ReviewContext => {
   const pullRequestThreads = existingThreads ? selectPullRequestThreadsForPrompt(existingThreads) : undefined
   const managedFindings = existingThreads ? selectManagedFindingsForPrompt(existingThreads) : undefined
+  const managedFindingCandidates = existingThreads
+    ? selectManagedFindingCandidatesForPrompt(existingThreads, gitDiff)
+    : undefined
   const totalConnectedWorkItemCount = metadata.workItemRefs?.length ?? connectedWorkItems?.length ?? 0
   const promptWorkItems =
     connectedWorkItems && connectedWorkItems.length > 0
@@ -613,6 +729,7 @@ export const buildReviewContext = ({
     })),
     ...(pullRequestThreads !== undefined ? { pullRequestThreads } : {}),
     ...(managedFindings !== undefined ? { managedFindings } : {}),
+    ...(managedFindingCandidates !== undefined ? { managedFindingCandidates } : {}),
     ...(promptWorkItems !== undefined ? { connectedWorkItems: promptWorkItems } : {}),
   }
 }

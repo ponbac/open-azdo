@@ -50,6 +50,7 @@ export const makeNormalizedReviewResult = (
   findings: [...findings],
   inlineFindings: [...inlineFindings],
   summaryOnlyFindings: findings.filter((finding) => !inlineFindings.includes(finding)),
+  resolvedManagedFindingIds: [],
   unmappedNotes: [],
 })
 

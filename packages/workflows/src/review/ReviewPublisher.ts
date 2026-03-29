@@ -16,6 +16,7 @@ export type PublishReviewInput = {
   readonly dryRun: boolean
   readonly summaryContent: string
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
+  readonly resolvedManagedFindingIds: ReadonlyArray<number>
   readonly reviewMode: ReviewMode
   readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
@@ -130,6 +131,7 @@ export const publishReview = ({
   dryRun,
   summaryContent,
   inlineFindings,
+  resolvedManagedFindingIds,
   reviewMode,
   scopedChangedLinesByFile,
   scopedDeletedLinesByFile,
@@ -141,6 +143,7 @@ export const publishReview = ({
       existingThreads,
       summaryContent,
       inlineFindings,
+      resolvedManagedFindingIds,
       reviewMode,
       scopedChangedLinesByFile,
       scopedDeletedLinesByFile,

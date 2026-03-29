@@ -73,10 +73,16 @@ type SummarySnapshot = {
   readonly persistedState?: ManagedReviewState | undefined
 }
 
-export type FollowUpReviewMergeResult = {
+export type RetainedManagedFinding = {
+  readonly existingThreadId: number
+  readonly finding: ReviewFinding
+  readonly retentionReason: "outside-scope" | "unresolved-existing"
+}
+
+export type ManagedReviewMergeResult = {
   readonly reviewResult: NormalizedReviewResult
-  readonly carriedForwardFindings: ReadonlyArray<ReviewFinding>
-  readonly carriedForwardFindingsCount: number
+  readonly retainedFindings: ReadonlyArray<RetainedManagedFinding>
+  readonly retainedFindingsCount: number
 }
 
 export type ThreadAction =
@@ -102,6 +108,7 @@ type ReconcileThreadsInput = {
   readonly existingThreads: ReadonlyArray<ExistingThread>
   readonly summaryContent: string
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
+  readonly resolvedManagedFindingIds: ReadonlyArray<number>
   readonly reviewMode: ReviewMode
   readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
@@ -347,8 +354,12 @@ type ExistingFindingThread = {
   readonly filePath: string | undefined
   readonly line: number | undefined
   readonly commentId: number
-  readonly fingerprint: string
   readonly finding: ReviewFinding
+}
+
+type ManagedFindingThreadPartition = {
+  readonly inScopeCandidates: ReadonlyArray<ExistingFindingThread>
+  readonly retainedOutOfScopeFindings: ReadonlyArray<ExistingFindingThread>
 }
 
 export const findManagedSummaryThread = (
@@ -408,7 +419,6 @@ export const listManagedFindingThreads = (
         filePath: thread.threadContext?.filePath ?? undefined,
         line: thread.threadContext?.rightFileStart?.line ?? undefined,
         commentId: comment.id,
-        fingerprint: findingState.fingerprint,
         finding: findingState.finding,
       })
       break
@@ -417,6 +427,11 @@ export const listManagedFindingThreads = (
 
   return managed
 }
+
+const listActiveManagedFindingThreads = (existingThreads: ReadonlyArray<ExistingThread>) =>
+  listManagedFindingThreads(existingThreads).filter((existingThread) =>
+    isActiveThreadStatus(existingThread.thread.status),
+  )
 
 const findingTouchesScopedDiff = (
   finding: ReviewFinding,
@@ -437,11 +452,54 @@ const findingTouchesScopedDiff = (
 }
 
 /**
- * Merges the current follow-up result with still-open managed findings that sit outside the newly
- * scoped diff, while returning the carry-forward list separately so later summary rendering can
- * describe that state without mutating model-authored text.
+ * Splits active managed findings into threads the current review can explicitly reconcile and
+ * threads that sit outside the scoped diff and therefore must be retained conservatively.
  */
-export const mergeFollowUpReviewResult = ({
+const partitionActiveManagedFindingThreads = ({
+  activeManagedFindingThreads,
+  scopedChangedLinesByFile,
+  scopedDeletedLinesByFile,
+}: {
+  readonly activeManagedFindingThreads: ReadonlyArray<ExistingFindingThread>
+  readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
+  readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
+}): ManagedFindingThreadPartition => {
+  const inScopeCandidates: ExistingFindingThread[] = []
+  const retainedOutOfScopeFindings: ExistingFindingThread[] = []
+
+  for (const managedFinding of activeManagedFindingThreads) {
+    if (findingTouchesScopedDiff(managedFinding.finding, scopedChangedLinesByFile, scopedDeletedLinesByFile)) {
+      inScopeCandidates.push(managedFinding)
+      continue
+    }
+
+    retainedOutOfScopeFindings.push(managedFinding)
+  }
+
+  return {
+    inScopeCandidates,
+    retainedOutOfScopeFindings,
+  }
+}
+
+const toRetainedManagedFinding = (
+  existingThread: ExistingFindingThread,
+  retentionReason: RetainedManagedFinding["retentionReason"],
+): RetainedManagedFinding => ({
+  existingThreadId: existingThread.thread.id,
+  retentionReason,
+  finding: {
+    ...existingThread.finding,
+    managedFindingId: existingThread.thread.id,
+  },
+})
+
+/**
+ * Merges the normalized review result with active managed findings that the current rerun did not
+ * explicitly reconcile, preserving those older threads in the published outstanding state until
+ * the model links or resolves them by thread id.
+ */
+export const mergeManagedReviewResult = ({
   existingThreads,
   scopedChangedLinesByFile,
   scopedDeletedLinesByFile,
@@ -451,20 +509,36 @@ export const mergeFollowUpReviewResult = ({
   readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly reviewResult: NormalizedReviewResult
-}): FollowUpReviewMergeResult => {
-  const carriedForwardFindings = listManagedFindingThreads(existingThreads)
-    .filter((existingThread) => isActiveThreadStatus(existingThread.thread.status))
-    .filter(
-      (existingThread) =>
-        !findingTouchesScopedDiff(existingThread.finding, scopedChangedLinesByFile, scopedDeletedLinesByFile),
-    )
-    .map((existingThread) => existingThread.finding)
+}): ManagedReviewMergeResult => {
+  const activeManagedFindingThreads = listActiveManagedFindingThreads(existingThreads)
+  const { inScopeCandidates, retainedOutOfScopeFindings } = partitionActiveManagedFindingThreads({
+    activeManagedFindingThreads,
+    scopedChangedLinesByFile,
+    scopedDeletedLinesByFile,
+  })
+  const linkedManagedFindingIds = new Set(
+    reviewResult.findings.flatMap((finding) =>
+      finding.managedFindingId !== undefined ? [finding.managedFindingId] : [],
+    ),
+  )
+  const resolvedManagedFindingIds = new Set(reviewResult.resolvedManagedFindingIds)
+  const retainedFindings = [
+    ...retainedOutOfScopeFindings.map((existingThread) => toRetainedManagedFinding(existingThread, "outside-scope")),
+    ...inScopeCandidates
+      .filter(
+        (existingThread) =>
+          !linkedManagedFindingIds.has(existingThread.thread.id) &&
+          !resolvedManagedFindingIds.has(existingThread.thread.id),
+      )
+      // In-scope candidates stay outstanding until the model explicitly links or resolves them.
+      .map((existingThread) => toRetainedManagedFinding(existingThread, "unresolved-existing")),
+  ]
 
-  if (carriedForwardFindings.length === 0) {
+  if (retainedFindings.length === 0) {
     return {
       reviewResult,
-      carriedForwardFindings,
-      carriedForwardFindingsCount: 0,
+      retainedFindings,
+      retainedFindingsCount: 0,
     }
   }
 
@@ -472,11 +546,14 @@ export const mergeFollowUpReviewResult = ({
     reviewResult: {
       ...reviewResult,
       verdict: reviewResult.verdict === "pass" ? "concerns" : reviewResult.verdict,
-      findings: [...carriedForwardFindings, ...reviewResult.findings],
-      inlineFindings: [...carriedForwardFindings, ...reviewResult.inlineFindings],
+      findings: [...retainedFindings.map((retainedFinding) => retainedFinding.finding), ...reviewResult.findings],
+      inlineFindings: [
+        ...retainedFindings.map((retainedFinding) => retainedFinding.finding),
+        ...reviewResult.inlineFindings,
+      ],
     },
-    carriedForwardFindings,
-    carriedForwardFindingsCount: carriedForwardFindings.length,
+    retainedFindings,
+    retainedFindingsCount: retainedFindings.length,
   }
 }
 
@@ -484,6 +561,7 @@ export const reconcileThreads = ({
   existingThreads,
   summaryContent,
   inlineFindings,
+  resolvedManagedFindingIds,
   reviewMode,
   scopedChangedLinesByFile,
   scopedDeletedLinesByFile,
@@ -502,18 +580,28 @@ export const reconcileThreads = ({
     return actions
   }
 
-  const existingFindingsByFingerprint = new Map(
-    listManagedFindingThreads(existingThreads).map(
-      (existingThread) => [existingThread.fingerprint, existingThread] as const,
-    ),
+  const activeManagedFindingThreads = listActiveManagedFindingThreads(existingThreads)
+  const managedFindingThreadsById = new Map(
+    activeManagedFindingThreads.map((existingThread) => [existingThread.thread.id, existingThread] as const),
   )
-  const activeFingerprints = new Set<string>()
+  const { inScopeCandidates } = partitionActiveManagedFindingThreads({
+    activeManagedFindingThreads,
+    scopedChangedLinesByFile,
+    scopedDeletedLinesByFile,
+  })
+  const managedFindingCandidatesById = new Map(
+    inScopeCandidates.map((existingThread) => [existingThread.thread.id, existingThread] as const),
+  )
+  const linkedManagedFindingIds = new Set<number>()
+  const processedResolvedManagedFindingIds = new Set<number>()
 
   for (const finding of inlineFindings) {
-    const fingerprint = fingerprintFinding(finding)
-    activeFingerprints.add(fingerprint)
+    const existingThread =
+      finding.managedFindingId !== undefined ? managedFindingThreadsById.get(finding.managedFindingId) : undefined
+    if (finding.managedFindingId !== undefined && existingThread) {
+      linkedManagedFindingIds.add(finding.managedFindingId)
+    }
 
-    const existingThread = existingFindingsByFingerprint.get(fingerprint)
     actions.push({
       type: "upsert-finding",
       content: buildInlineComment(finding),
@@ -523,17 +611,18 @@ export const reconcileThreads = ({
     })
   }
 
-  for (const existingThread of existingFindingsByFingerprint.values()) {
-    if (activeFingerprints.has(existingThread.fingerprint)) {
+  for (const managedFindingId of resolvedManagedFindingIds) {
+    if (linkedManagedFindingIds.has(managedFindingId) || processedResolvedManagedFindingIds.has(managedFindingId)) {
       continue
     }
 
-    if (
-      reviewMode === "follow-up" &&
-      !findingTouchesScopedDiff(existingThread.finding, scopedChangedLinesByFile, scopedDeletedLinesByFile)
-    ) {
+    // Only in-scope active candidates can be resolved by this rerun.
+    const existingThread = managedFindingCandidatesById.get(managedFindingId)
+    if (!existingThread) {
       continue
     }
+
+    processedResolvedManagedFindingIds.add(managedFindingId)
 
     actions.push({
       type: "close-thread",

@@ -135,6 +135,7 @@ const successfulReviewOutput = makePromptResponse({
       line: 2,
     },
   ],
+  resolvedManagedFindingIds: [],
   unmappedNotes: [],
 })
 
@@ -162,6 +163,7 @@ const successfulSummaryOutput = makePromptResponse(
 const passingFollowUpOutput = makePromptResponse({
   verdict: "pass",
   findings: [],
+  resolvedManagedFindingIds: [],
   unmappedNotes: [],
 })
 
@@ -216,12 +218,12 @@ const makeManagedSummaryThread = (reviewState: ManagedReviewState) => ({
   ],
 })
 
-const makeManagedFindingThread = (finding: ManagedFinding) => ({
-  id: 2,
+const makeManagedFindingThread = (finding: ManagedFinding, threadId = 2) => ({
+  id: threadId,
   status: 1,
   comments: [
     {
-      id: 20,
+      id: threadId * 10,
       content: `finding\n<!-- open-azdo:${JSON.stringify({
         kind: "finding",
         fingerprint: "previous-finding",
@@ -520,11 +522,16 @@ describe("e2e", () => {
           makeHumanThread(),
           makeHumanThread({
             id: 31,
+            threadContext: {
+              filePath: "/src/example.ts",
+              rightFileStart: { line: 2 },
+              rightFileEnd: { line: 2 },
+            },
             comments: [
               {
                 id: 310,
                 content:
-                  'Earlier finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"previous-finding","finding":{"title":"Old finding"}} -->',
+                  'Earlier finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"previous-finding","finding":{"severity":"high","confidence":"high","title":"Old finding","body":"Body","filePath":"src/example.ts","line":2}} -->',
                 publishedDate: "2026-03-24T11:00:00.000Z",
                 commentType: "text",
                 author: {
@@ -580,6 +587,7 @@ describe("e2e", () => {
     expect(result.prompt).toContain("Earlier finding")
     expect(result.prompt).toContain("I fixed this already in the latest patch.")
     expect(result.prompt).toContain('"managedFindings"')
+    expect(result.prompt).toContain('"managedFindingCandidates"')
     expect(result.prompt).toContain('"resolution":"resolved"')
     expect(result.prompt).toContain('"title":"Bot only"')
     expect(result.prompt).not.toContain("previous-finding")
@@ -707,8 +715,77 @@ describe("e2e", () => {
     expect(summaryContent).toContain(
       "1 finding is carried forward from earlier managed reviews outside this follow-up diff.",
     )
-    expect(summaryContent).toContain("An earlier managed finding still remains open outside this follow-up diff.")
     expect(summaryContent).toContain("$0.1690")
+  })
+
+  test("reuses linked managed finding threads and closes only explicitly resolved ones", async () => {
+    const result = await runReviewScenario({
+      opencode: {
+        review: {
+          type: "success",
+          output: makePromptResponse({
+            verdict: "concerns",
+            findings: [
+              {
+                severity: "high",
+                confidence: "high",
+                title: "Updated finding wording",
+                body: "Fresh evidence for the same issue.",
+                filePath: "src/example.ts",
+                line: 2,
+                managedFindingId: 2,
+              },
+            ],
+            resolvedManagedFindingIds: [3],
+            unmappedNotes: [],
+          }),
+        },
+      },
+      buildThreadsResponse: () =>
+        makeThreadsResponse([
+          makeManagedSummaryThread(makeManagedReviewState()),
+          makeManagedFindingThread({
+            severity: "high",
+            confidence: "high",
+            title: "Earlier finding wording",
+            body: "Older evidence.",
+            filePath: "src/example.ts",
+            line: 2,
+          }),
+          makeManagedFindingThread(
+            {
+              severity: "medium",
+              confidence: "high",
+              title: "Resolved finding",
+              body: "This one should close.",
+              filePath: "src/example.ts",
+              line: 1,
+            },
+            3,
+          ),
+        ]),
+    })
+
+    const reusedFindingUpdate = result.calls.find(
+      (call) =>
+        call.init?.method === "PATCH" &&
+        call.url.endsWith("/threads/2/comments/20?api-version=7.1") &&
+        extractCommentContent(call.init?.body).includes("Updated finding wording"),
+    )
+    const duplicateFindingCreate = result.calls.find(
+      (call) =>
+        call.init?.method === "POST" &&
+        call.url.endsWith("/threads?api-version=7.1") &&
+        extractCommentContent(call.init?.body).includes("Updated finding wording"),
+    )
+    const resolvedThreadClose = result.calls.find(
+      (call) => call.init?.method === "PATCH" && call.url.endsWith("/threads/3?api-version=7.1"),
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(reusedFindingUpdate).toBeDefined()
+    expect(duplicateFindingCreate).toBeUndefined()
+    expect(resolvedThreadClose).toBeDefined()
   })
 
   test("falls back to a deterministic summary when the summary pass returns invalid ids", async () => {

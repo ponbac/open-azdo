@@ -10,7 +10,7 @@ const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 export const ReviewResultJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["verdict", "findings", "unmappedNotes"],
+  required: ["verdict", "findings", "resolvedManagedFindingIds", "unmappedNotes"],
   properties: {
     verdict: {
       type: "string",
@@ -55,7 +55,18 @@ export const ReviewResultJsonSchema = {
             type: "string",
             minLength: 1,
           },
+          managedFindingId: {
+            type: "integer",
+            minimum: 1,
+          },
         },
+      },
+    },
+    resolvedManagedFindingIds: {
+      type: "array",
+      items: {
+        type: "integer",
+        minimum: 1,
       },
     },
     unmappedNotes: {
@@ -82,12 +93,14 @@ export const ReviewFindingSchema = Schema.Struct({
   line: PositiveInt,
   endLine: Schema.optionalKey(PositiveInt),
   suggestion: Schema.optionalKey(NonEmptyString),
+  managedFindingId: Schema.optionalKey(PositiveInt),
 })
 export type ReviewFinding = Schema.Schema.Type<typeof ReviewFindingSchema>
 
 export const ReviewResultSchema = Schema.Struct({
   verdict: Schema.Literals(["pass", "concerns", "fail"]),
   findings: Schema.Array(ReviewFindingSchema),
+  resolvedManagedFindingIds: Schema.Array(PositiveInt),
   unmappedNotes: Schema.Array(Schema.String),
 })
 export type ReviewResult = Schema.Schema.Type<typeof ReviewResultSchema>
@@ -97,7 +110,11 @@ export type NormalizedReviewResult = ReviewResult & {
   readonly summaryOnlyFindings: ReviewFinding[]
 }
 
-export const decodeReviewResult = (payload: unknown, changedLinesByFile: Map<string, Set<number>>) =>
+export const decodeReviewResult = (
+  payload: unknown,
+  changedLinesByFile: Map<string, Set<number>>,
+  managedFindingCandidateIds: ReadonlySet<number> = new Set<number>(),
+) =>
   Schema.decodeUnknownEffect(ReviewResultSchema)(payload).pipe(
     Effect.mapError(
       (error) =>
@@ -106,18 +123,71 @@ export const decodeReviewResult = (payload: unknown, changedLinesByFile: Map<str
           issues: [String(error)],
         }),
     ),
-    Effect.map((decoded) => normalizeReviewResult(decoded, changedLinesByFile)),
+    Effect.map((decoded) => normalizeReviewResult(decoded, changedLinesByFile, managedFindingCandidateIds)),
   )
+
+/**
+ * Keeps reviewer-selected reconciliation ids conservative by dropping unknown candidates, keeping
+ * only the first live link to each prior thread, and refusing to resolve any thread that a finding
+ * already linked in the same run.
+ */
+const normalizeManagedFindingReconciliation = (
+  reviewResult: ReviewResult,
+  managedFindingCandidateIds: ReadonlySet<number>,
+) => {
+  const linkedManagedFindingIds = new Set<number>()
+  const findings = reviewResult.findings.map((finding) => {
+    const managedFindingId = finding.managedFindingId
+
+    if (
+      managedFindingId === undefined ||
+      !managedFindingCandidateIds.has(managedFindingId) ||
+      linkedManagedFindingIds.has(managedFindingId)
+    ) {
+      // Strip invalid or duplicate links instead of rejecting the whole model payload.
+      const { managedFindingId: _managedFindingId, ...rest } = finding
+      return rest
+    }
+
+    linkedManagedFindingIds.add(managedFindingId)
+    return finding
+  })
+
+  const resolvedManagedFindingIds: number[] = []
+  const seenResolvedManagedFindingIds = new Set<number>()
+
+  for (const managedFindingId of reviewResult.resolvedManagedFindingIds) {
+    if (!managedFindingCandidateIds.has(managedFindingId)) {
+      continue
+    }
+
+    // A live link always wins over a simultaneous resolution for the same prior thread.
+    if (linkedManagedFindingIds.has(managedFindingId) || seenResolvedManagedFindingIds.has(managedFindingId)) {
+      continue
+    }
+
+    seenResolvedManagedFindingIds.add(managedFindingId)
+    resolvedManagedFindingIds.push(managedFindingId)
+  }
+
+  return {
+    ...reviewResult,
+    findings,
+    resolvedManagedFindingIds,
+  } satisfies ReviewResult
+}
 
 export const normalizeReviewResult = (
   reviewResult: ReviewResult,
   changedLinesByFile: Map<string, Set<number>>,
+  managedFindingCandidateIds: ReadonlySet<number> = new Set<number>(),
 ): NormalizedReviewResult => {
-  const unmappedNotes = [...reviewResult.unmappedNotes]
+  const normalizedReviewResult = normalizeManagedFindingReconciliation(reviewResult, managedFindingCandidateIds)
+  const unmappedNotes = [...normalizedReviewResult.unmappedNotes]
   const inlineFindings: ReviewFinding[] = []
   const summaryOnlyFindings: ReviewFinding[] = []
 
-  for (const finding of reviewResult.findings) {
+  for (const finding of normalizedReviewResult.findings) {
     const changedLines = changedLinesByFile.get(normalizePath(finding.filePath))
     const isChangedLine = changedLines?.has(finding.line) ?? false
 
@@ -136,7 +206,7 @@ export const normalizeReviewResult = (
   }
 
   return {
-    ...reviewResult,
+    ...normalizedReviewResult,
     inlineFindings,
     summaryOnlyFindings,
     unmappedNotes: uniqueNotes(unmappedNotes),

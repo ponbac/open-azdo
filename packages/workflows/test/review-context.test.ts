@@ -415,6 +415,7 @@ describe("review context", () => {
 
     expect(context.pullRequestThreads).toBeUndefined()
     expect(context.managedFindings).toBeUndefined()
+    expect(context.managedFindingCandidates).toBeUndefined()
   })
 
   test("keeps managed threads with human replies and strips embedded state payloads", () => {
@@ -429,8 +430,8 @@ describe("review context", () => {
         baseRef: "base",
         headRef: "HEAD",
         diffText: "",
-        changedFiles: [],
-        changedLinesByFile: new Map(),
+        changedFiles: ["src/example.ts"],
+        changedLinesByFile: new Map([["src/example.ts", new Set([2])]]),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -502,6 +503,21 @@ describe("review context", () => {
         },
       ],
     })
+    expect(context.managedFindingCandidates).toEqual({
+      omittedCount: 0,
+      items: [
+        {
+          id: 7,
+          filePath: "src/example.ts",
+          line: 2,
+          updatedAt: "2026-03-23T10:00:00.000Z",
+          title: "t",
+          body: "Body",
+          severity: "high",
+          confidence: "high",
+        },
+      ],
+    })
   })
 
   test("includes fixed pure managed finding threads in managedFindings while keeping them out of pullRequestThreads", () => {
@@ -516,8 +532,8 @@ describe("review context", () => {
         baseRef: "base",
         headRef: "HEAD",
         diffText: "",
-        changedFiles: [],
-        changedLinesByFile: new Map(),
+        changedFiles: ["src/legacy.ts"],
+        changedLinesByFile: new Map([["src/legacy.ts", new Set([9])]]),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -554,6 +570,90 @@ describe("review context", () => {
           updatedAt: "2026-03-22T10:00:00.000Z",
           title: "Legacy issue",
           severity: "medium",
+          confidence: "high",
+        },
+      ],
+    })
+    expect(context.managedFindingCandidates).toBeUndefined()
+  })
+
+  test("limits managed finding candidates to active findings that intersect the scoped diff", () => {
+    const context = buildReviewContext({
+      metadata: {
+        title: "Feature PR",
+        description: "Adds a new export",
+      },
+      reviewMode: "follow-up",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "prev",
+        headRef: "HEAD",
+        diffText: "",
+        changedFiles: ["src/example.ts"],
+        changedLinesByFile: new Map([["src/example.ts", new Set([5])]]),
+        deletedLinesByFile: new Map(),
+      },
+      existingThreads: [
+        makeThread({
+          id: 21,
+          threadContext: {
+            filePath: "/src/example.ts",
+            rightFileStart: { line: 5 },
+          },
+          comments: [
+            makeThreadComment({
+              id: 210,
+              content:
+                'Current finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"current","finding":{"severity":"high","confidence":"high","title":"Current","body":"Body","filePath":"src/example.ts","line":5}} -->',
+              author: { displayName: "Open AZDO" },
+            }),
+          ],
+        }),
+        makeThread({
+          id: 22,
+          threadContext: {
+            filePath: "/src/other.ts",
+            rightFileStart: { line: 20 },
+          },
+          comments: [
+            makeThreadComment({
+              id: 220,
+              content:
+                'Outside scope\n<!-- open-azdo:{"kind":"finding","fingerprint":"outside","finding":{"severity":"medium","confidence":"high","title":"Outside","body":"Body","filePath":"src/other.ts","line":20}} -->',
+              author: { displayName: "Open AZDO" },
+            }),
+          ],
+        }),
+        makeThread({
+          id: 23,
+          status: "fixed",
+          threadContext: {
+            filePath: "/src/example.ts",
+            rightFileStart: { line: 5 },
+          },
+          comments: [
+            makeThreadComment({
+              id: 230,
+              content:
+                'Resolved\n<!-- open-azdo:{"kind":"finding","fingerprint":"resolved","finding":{"severity":"medium","confidence":"high","title":"Resolved","body":"Body","filePath":"src/example.ts","line":5}} -->',
+              author: { displayName: "Open AZDO" },
+            }),
+          ],
+        }),
+      ],
+    })
+
+    expect(context.managedFindingCandidates).toEqual({
+      omittedCount: 0,
+      items: [
+        {
+          id: 21,
+          filePath: "src/example.ts",
+          line: 5,
+          updatedAt: "2026-03-21T10:00:00.000Z",
+          title: "Current",
+          body: "Body",
+          severity: "high",
           confidence: "high",
         },
       ],

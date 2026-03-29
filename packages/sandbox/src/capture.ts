@@ -17,6 +17,7 @@ const ReviewFindingSchema = Schema.Struct({
   line: Schema.Int,
   endLine: Schema.optionalKey(Schema.Int),
   suggestion: Schema.optionalKey(Schema.String),
+  managedFindingId: Schema.optionalKey(Schema.Int),
 })
 
 const ReviewHistoryTokensSchema = Schema.Struct({
@@ -104,6 +105,7 @@ const ReviewSummarySubjectSchema = Schema.Struct({
   confidence: Schema.optionalKey(Schema.Literals(["low", "medium", "high"])),
   filePath: Schema.optionalKey(Schema.String),
   line: Schema.optionalKey(Schema.Int),
+  retentionReason: Schema.optionalKey(Schema.Literals(["outside-scope", "unresolved-existing"])),
 })
 
 const ReviewSummaryPassOutputSchema = Schema.Struct({
@@ -134,6 +136,7 @@ const NormalizedReviewResultSchema = Schema.Struct({
   findings: Schema.Array(ReviewFindingSchema),
   inlineFindings: Schema.Array(ReviewFindingSchema),
   summaryOnlyFindings: Schema.Array(ReviewFindingSchema),
+  resolvedManagedFindingIds: Schema.Array(Schema.Int),
   unmappedNotes: Schema.Array(Schema.String),
 })
 
