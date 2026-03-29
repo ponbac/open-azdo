@@ -114,7 +114,7 @@ const baselineThreads: SandboxCapture["baselineThreads"] = [
 ]
 
 export const demoCapture: SandboxCapture = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   capturedAt: "2026-03-22T10:30:00.000Z",
   workspaceMode: "temporary",
   target: {
@@ -402,11 +402,9 @@ export const demoCapture: SandboxCapture = {
     resultSource: "structured",
     openCodeResult: {
       response: JSON.stringify({
-        summary: "One regression found in the render path.",
         verdict: "concerns",
       }),
       structured: {
-        summary: "One regression found in the render path.",
         verdict: "concerns",
       },
       sessionId: "ses_demo",
@@ -422,7 +420,6 @@ export const demoCapture: SandboxCapture = {
       },
     },
     result: {
-      summary: "One regression found in the render path.",
       verdict: "concerns",
       findings: [
         {
@@ -450,6 +447,65 @@ export const demoCapture: SandboxCapture = {
       ],
       summaryOnlyFindings: [],
       unmappedNotes: [],
+    },
+    summaryPass: {
+      prompt: [
+        "You are writing the human-facing summary for an Azure DevOps pull-request review.",
+        "",
+        "Structured review subjects:",
+        '[{"id":"inline-finding-1","kind":"inline-finding","title":"Shared client cache is mutated during render","body":"Mutating shared state from render can duplicate or reorder PR comments in follow-up runs.","severity":"high","confidence":"high","filePath":"src/review/ReviewPanel.tsx","line":34}]',
+      ].join("\n"),
+      resultSource: "structured",
+      openCodeResult: {
+        response: JSON.stringify({
+          highlights: [
+            {
+              subjectIds: ["inline-finding-1"],
+              text: "Rendering mutates shared client state, which can duplicate or reorder PR comments on later runs.",
+            },
+          ],
+        }),
+        structured: {
+          highlights: [
+            {
+              subjectIds: ["inline-finding-1"],
+              text: "Rendering mutates shared client state, which can duplicate or reorder PR comments on later runs.",
+            },
+          ],
+        },
+        sessionId: "ses_demo_summary",
+        usage: {
+          costUsd: 0.0182,
+          tokens: {
+            input: 420,
+            output: 96,
+            reasoning: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        },
+      },
+      result: {
+        highlights: [
+          {
+            subjectIds: ["inline-finding-1"],
+            text: "Rendering mutates shared client state, which can duplicate or reorder PR comments on later runs.",
+          },
+        ],
+      },
+      fallbackUsed: false,
+      subjects: [
+        {
+          id: "inline-finding-1",
+          kind: "inline-finding",
+          title: "Shared client cache is mutated during render",
+          body: "Mutating shared state from render can duplicate or reorder PR comments in follow-up runs.",
+          severity: "high",
+          confidence: "high",
+          filePath: "src/review/ReviewPanel.tsx",
+          line: 34,
+        },
+      ],
     },
     summaryState: {
       schemaVersion: 2,
@@ -491,10 +547,10 @@ export const demoCapture: SandboxCapture = {
           buildNumber: "422",
           buildId: "422",
           buildLink: "https://dev.azure.com/acme/platform/_build/results?buildId=422",
-          costUsd: 0.0723,
+          costUsd: 0.0905,
           tokens: {
-            input: 2350,
-            output: 411,
+            input: 2770,
+            output: 507,
             reasoning: 120,
             cacheRead: 80,
             cacheWrite: 0,

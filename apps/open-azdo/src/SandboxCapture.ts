@@ -25,7 +25,7 @@ const buildSandboxCapture = ({
 
   return {
     capture: decodeSandboxCapture({
-      schemaVersion: 1,
+      schemaVersion: 2,
       capturedAt: new Date().toISOString(),
       workspaceMode,
       target: {
@@ -56,6 +56,14 @@ const buildSandboxCapture = ({
         ...(planned.reviewResultSource ? { resultSource: planned.reviewResultSource } : {}),
         ...(planned.openCodeResult ? { openCodeResult: planned.openCodeResult } : {}),
         ...(planned.reviewResult ? { result: planned.reviewResult } : {}),
+        summaryPass: {
+          ...(planned.summaryPrompt ? { prompt: planned.summaryPrompt } : {}),
+          ...(planned.summaryResultSource ? { resultSource: planned.summaryResultSource } : {}),
+          ...(planned.summaryOpenCodeResult ? { openCodeResult: planned.summaryOpenCodeResult } : {}),
+          ...(planned.summaryPassOutput ? { result: planned.summaryPassOutput } : {}),
+          fallbackUsed: planned.summaryFallbackUsed,
+          subjects: [...planned.summarySubjects],
+        },
         summaryState: planned.summaryState,
         summaryContent: planned.summaryContent,
         actions,

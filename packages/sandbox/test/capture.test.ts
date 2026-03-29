@@ -4,7 +4,7 @@ import { Schema } from "effect"
 import { SandboxCaptureSchema, projectPreviewThreads } from "../src/capture"
 
 const baseCapture = {
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   capturedAt: "2026-03-22T10:30:00.000Z",
   workspaceMode: "temporary" as const,
   target: {
@@ -64,14 +64,12 @@ const baseCapture = {
     prompt: "Review this pull request.",
     resultSource: "structured" as const,
     openCodeResult: {
-      response: '{"summary":"Summary","verdict":"concerns"}',
+      response: '{"verdict":"concerns"}',
       structured: {
-        summary: "Summary",
         verdict: "concerns",
       },
     },
     result: {
-      summary: "Summary",
       verdict: "concerns" as const,
       findings: [
         {
@@ -95,6 +93,42 @@ const baseCapture = {
       ],
       summaryOnlyFindings: [],
       unmappedNotes: [],
+    },
+    summaryPass: {
+      prompt: "Summarize these structured review subjects.",
+      resultSource: "structured" as const,
+      openCodeResult: {
+        response: '{"highlights":[{"subjectIds":["inline-finding-1"],"text":"Summary"}]}',
+        structured: {
+          highlights: [
+            {
+              subjectIds: ["inline-finding-1"],
+              text: "Summary",
+            },
+          ],
+        },
+      },
+      result: {
+        highlights: [
+          {
+            subjectIds: ["inline-finding-1"],
+            text: "Summary",
+          },
+        ],
+      },
+      fallbackUsed: false,
+      subjects: [
+        {
+          id: "inline-finding-1",
+          kind: "inline-finding" as const,
+          title: "Finding title",
+          body: "Finding body",
+          severity: "high" as const,
+          confidence: "high" as const,
+          filePath: "src/example.ts",
+          line: 2,
+        },
+      ],
     },
     summaryState: {
       schemaVersion: 2 as const,
@@ -154,6 +188,8 @@ describe("sandbox capture", () => {
 
     expect(decoded.target.pullRequestId).toBe(42)
     expect(decoded.review.previewThreads.length).toBeGreaterThanOrEqual(decoded.baselineThreads.length)
+    expect(decoded.review.summaryPass.fallbackUsed).toBe(false)
+    expect(decoded.review.summaryPass.result?.highlights[0]?.subjectIds).toEqual(["inline-finding-1"])
   })
 
   test("projects preview threads from thread actions", () => {

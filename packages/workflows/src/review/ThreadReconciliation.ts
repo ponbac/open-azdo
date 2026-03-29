@@ -8,7 +8,6 @@ import {
   type NormalizedReviewResult,
   ReviewFindingSchema,
   type ReviewFinding,
-  type ReviewResult,
 } from "./ReviewOutput"
 import type { ReviewMode } from "./ReviewContext"
 
@@ -66,12 +65,18 @@ export type ManagedReviewState = Schema.Schema.Type<typeof ManagedReviewStateSch
 export const SKIPPED_REVIEW_SUMMARY = "⏭️ No new commits since the last managed review. Previous verdict still applies."
 
 type SummarySnapshot = {
-  readonly verdict: ReviewResult["verdict"]
+  readonly verdict: NormalizedReviewResult["verdict"]
   readonly summary: string
   readonly unmappedNotes: ReadonlyArray<string>
   readonly severityCounts: SeverityCounts
   readonly buildLink?: string | undefined
   readonly persistedState?: ManagedReviewState | undefined
+}
+
+export type FollowUpReviewMergeResult = {
+  readonly reviewResult: NormalizedReviewResult
+  readonly carriedForwardFindings: ReadonlyArray<ReviewFinding>
+  readonly carriedForwardFindingsCount: number
 }
 
 export type ThreadAction =
@@ -176,7 +181,7 @@ export const buildManagedReviewState = ({
 }: {
   readonly reviewedCommit: string
   readonly pullRequestBaseRef: string
-  readonly reviewResult: ReviewResult & {
+  readonly reviewResult: NormalizedReviewResult & {
     readonly inlineFindings?: ReadonlyArray<ReviewFinding>
   }
   readonly reviewHistory?: ReadonlyArray<ReviewHistoryEntry> | undefined
@@ -431,13 +436,11 @@ const findingTouchesScopedDiff = (
   return false
 }
 
-const appendFollowUpSummary = (summary: string, carriedForwardFindingsCount: number) =>
-  [
-    summary,
-    "",
-    `Still tracking ${carriedForwardFindingsCount} managed finding${carriedForwardFindingsCount === 1 ? "" : "s"} from earlier reviews outside this follow-up diff.`,
-  ].join("\n")
-
+/**
+ * Merges the current follow-up result with still-open managed findings that sit outside the newly
+ * scoped diff, while returning the carry-forward list separately so later summary rendering can
+ * describe that state without mutating model-authored text.
+ */
 export const mergeFollowUpReviewResult = ({
   existingThreads,
   scopedChangedLinesByFile,
@@ -448,7 +451,7 @@ export const mergeFollowUpReviewResult = ({
   readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly reviewResult: NormalizedReviewResult
-}): NormalizedReviewResult => {
+}): FollowUpReviewMergeResult => {
   const carriedForwardFindings = listManagedFindingThreads(existingThreads)
     .filter((existingThread) => isActiveThreadStatus(existingThread.thread.status))
     .filter(
@@ -458,15 +461,22 @@ export const mergeFollowUpReviewResult = ({
     .map((existingThread) => existingThread.finding)
 
   if (carriedForwardFindings.length === 0) {
-    return reviewResult
+    return {
+      reviewResult,
+      carriedForwardFindings,
+      carriedForwardFindingsCount: 0,
+    }
   }
 
   return {
-    ...reviewResult,
-    verdict: reviewResult.verdict === "pass" ? "concerns" : reviewResult.verdict,
-    summary: appendFollowUpSummary(reviewResult.summary, carriedForwardFindings.length),
-    findings: [...carriedForwardFindings, ...reviewResult.findings],
-    inlineFindings: [...carriedForwardFindings, ...reviewResult.inlineFindings],
+    reviewResult: {
+      ...reviewResult,
+      verdict: reviewResult.verdict === "pass" ? "concerns" : reviewResult.verdict,
+      findings: [...carriedForwardFindings, ...reviewResult.findings],
+      inlineFindings: [...carriedForwardFindings, ...reviewResult.inlineFindings],
+    },
+    carriedForwardFindings,
+    carriedForwardFindingsCount: carriedForwardFindings.length,
   }
 }
 

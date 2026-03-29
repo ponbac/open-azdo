@@ -10,12 +10,8 @@ const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 export const ReviewResultJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["summary", "verdict", "findings", "unmappedNotes"],
+  required: ["verdict", "findings", "unmappedNotes"],
   properties: {
-    summary: {
-      type: "string",
-      minLength: 1,
-    },
     verdict: {
       type: "string",
       enum: ["pass", "concerns", "fail"],
@@ -90,7 +86,6 @@ export const ReviewFindingSchema = Schema.Struct({
 export type ReviewFinding = Schema.Schema.Type<typeof ReviewFindingSchema>
 
 export const ReviewResultSchema = Schema.Struct({
-  summary: NonEmptyString,
   verdict: Schema.Literals(["pass", "concerns", "fail"]),
   findings: Schema.Array(ReviewFindingSchema),
   unmappedNotes: Schema.Array(Schema.String),
@@ -168,4 +163,9 @@ export const renderUnmappedFinding = (finding: ReviewFinding) =>
 
 export const getFindingEndLine = (finding: ReviewFinding) => finding.endLine ?? finding.line
 
-export const uniqueNotes = (notes: ReadonlyArray<string>) => [...new Set(notes)]
+/**
+ * Trims, de-duplicates, and drops blank notes so summary-only text is always safe to publish.
+ */
+export const uniqueNotes = (notes: ReadonlyArray<string>) => [
+  ...new Set(notes.map((note) => note.trim()).filter((note) => note.length > 0)),
+]

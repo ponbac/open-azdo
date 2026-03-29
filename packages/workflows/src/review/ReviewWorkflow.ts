@@ -32,6 +32,17 @@ import {
 } from "./ReviewOutput"
 import { buildReviewPrompt } from "./ReviewPrompt"
 import {
+  buildReviewSummarySubjects,
+  decodeReviewSummaryPassOutput,
+  renderReviewSummaryFallback,
+  renderReviewSummaryFromHighlights,
+  ReviewSummaryPassOutputJsonSchema,
+  type ReviewSummaryPassOutput,
+  type ReviewSummarySubject,
+  validateReviewSummaryPassOutput,
+} from "./ReviewSummary"
+import { buildReviewSummaryPrompt } from "./ReviewSummaryPrompt"
+import {
   buildManagedReviewState,
   buildSummaryComment,
   findManagedSummaryThread,
@@ -87,6 +98,12 @@ export type PlannedReviewWorkflow = {
   readonly openCodeResult?: OpenCodeRunResult
   readonly reviewResult?: NormalizedReviewResult
   readonly reviewResultSource?: ReviewResultSource
+  readonly summaryPrompt?: string
+  readonly summaryOpenCodeResult?: OpenCodeRunResult
+  readonly summaryPassOutput?: ReviewSummaryPassOutput
+  readonly summaryResultSource?: ReviewResultSource
+  readonly summaryFallbackUsed: boolean
+  readonly summarySubjects: ReadonlyArray<ReviewSummarySubject>
   readonly summaryState: ManagedReviewState
   readonly summaryContent: string
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
@@ -95,9 +112,24 @@ export type PlannedReviewWorkflow = {
   readonly output: ReviewWorkflowOutput
 }
 
+type SummaryRenderResult = {
+  readonly renderedSummary: string
+  readonly summaryPrompt?: string
+  readonly summaryOpenCodeResult?: OpenCodeRunResult
+  readonly summaryPassOutput?: ReviewSummaryPassOutput
+  readonly summaryResultSource?: ReviewResultSource
+  readonly summaryFallbackUsed: boolean
+}
+
 const REVIEW_OUTPUT_FORMAT = {
   type: "json_schema" as const,
   schema: ReviewResultJsonSchema,
+  retryCount: 2,
+}
+
+const REVIEW_SUMMARY_OUTPUT_FORMAT = {
+  type: "json_schema" as const,
+  schema: ReviewSummaryPassOutputJsonSchema,
   retryCount: 2,
 }
 
@@ -287,10 +319,6 @@ const decodeStructuredReviewResult = ({
     return {
       reviewResult: yield* decodeReviewResult(
         {
-          summary:
-            openCodeResult.response.trim() ||
-            openCodeResult.modelError?.message ||
-            "OpenCode did not return structured review output.",
           verdict: "concerns",
           findings: [],
           unmappedNotes: [],
@@ -299,6 +327,39 @@ const decodeStructuredReviewResult = ({
       ),
       source: "fallback" as const,
     } as const
+  })
+
+const decodeStructuredSummaryPassResult = ({ openCodeResult }: { readonly openCodeResult: OpenCodeRunResult }) =>
+  Effect.gen(function* () {
+    const decodeCandidate = (payload: unknown) =>
+      decodeReviewSummaryPassOutput(payload).pipe(Effect.orElseSucceed(() => undefined))
+
+    if (openCodeResult.structured !== undefined) {
+      const structuredSummaryResult = yield* decodeCandidate(openCodeResult.structured)
+      if (structuredSummaryResult) {
+        return {
+          output: structuredSummaryResult,
+          source: "structured" as const,
+        } as const
+      }
+    }
+
+    const repairedPayload = yield* Effect.try({
+      try: () => JSON.parse(jsonrepair(openCodeResult.response)) as unknown,
+      catch: () => undefined,
+    })
+
+    if (repairedPayload !== undefined) {
+      const repairedSummaryResult = yield* decodeCandidate(repairedPayload)
+      if (repairedSummaryResult) {
+        return {
+          output: repairedSummaryResult,
+          source: "repaired" as const,
+        } as const
+      }
+    }
+
+    return undefined
   })
 
 const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryTokens | undefined =>
@@ -311,6 +372,145 @@ const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryToken
         cacheWrite: usage.tokens.cacheWrite,
       }
     : undefined
+
+/**
+ * Review history tracks the total cost of a managed review run, so the two-pass review and summary
+ * executions are collapsed into a single aggregate usage record before persistence.
+ */
+const aggregateUsage = (usages: ReadonlyArray<OpenCodeRunUsage | undefined>): OpenCodeRunUsage | undefined => {
+  const definedUsages = usages.filter((usage) => usage !== undefined)
+
+  if (definedUsages.length === 0) {
+    return undefined
+  }
+
+  const totalCostUsd = definedUsages.reduce((total, usage) => total + (usage.costUsd ?? 0), 0)
+  const hasAnyCost = definedUsages.some((usage) => usage.costUsd !== undefined)
+  const hasAnyTokens = definedUsages.some((usage) => usage.tokens !== undefined)
+
+  if (!hasAnyCost && !hasAnyTokens) {
+    return undefined
+  }
+
+  const totalTokens = hasAnyTokens
+    ? definedUsages.reduce(
+        (totals, usage) => ({
+          input: totals.input + (usage.tokens?.input ?? 0),
+          output: totals.output + (usage.tokens?.output ?? 0),
+          reasoning: totals.reasoning + (usage.tokens?.reasoning ?? 0),
+          cacheRead: totals.cacheRead + (usage.tokens?.cacheRead ?? 0),
+          cacheWrite: totals.cacheWrite + (usage.tokens?.cacheWrite ?? 0),
+        }),
+        {
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      )
+    : undefined
+
+  return {
+    ...(hasAnyCost ? { costUsd: totalCostUsd } : {}),
+    ...(totalTokens ? { tokens: totalTokens } : {}),
+  }
+}
+
+/**
+ * Runs the summary-only pass against the already publishable subject list and returns either the
+ * validated grouped highlights or a deterministic fallback render.
+ */
+const runReviewSummaryPass = ({
+  config,
+  openCodeRunner,
+  reviewResult,
+  summarySubjects,
+}: {
+  readonly config: ReviewWorkflowConfig
+  readonly openCodeRunner: OpenCodeRunner["Service"]
+  readonly reviewResult: NormalizedReviewResult
+  readonly summarySubjects: ReadonlyArray<ReviewSummarySubject>
+}) =>
+  Effect.gen(function* () {
+    if (summarySubjects.length === 0) {
+      yield* logInfo("Skipped summary pass because there were no summary subjects to group.")
+      return {
+        renderedSummary: renderReviewSummaryFallback({
+          verdict: reviewResult.verdict,
+          subjects: summarySubjects,
+        }),
+        summaryFallbackUsed: false,
+      } satisfies SummaryRenderResult
+    }
+
+    const summaryPrompt = buildReviewSummaryPrompt(summarySubjects)
+    yield* logInfo(`Built summary prompt for ${summarySubjects.length} summary subject(s).`)
+
+    const summaryOpenCodeResult = yield* openCodeRunner.run({
+      workspace: config.workspace,
+      model: config.model,
+      agent: config.agent,
+      variant: config.opencodeVariant,
+      timeout: config.opencodeTimeout,
+      prompt: summaryPrompt,
+      inheritedEnv: config.inheritedEnv,
+      format: REVIEW_SUMMARY_OUTPUT_FORMAT,
+    })
+    yield* logInfo("Received OpenCode summary response.")
+
+    const decodedSummaryResult = yield* decodeStructuredSummaryPassResult({
+      openCodeResult: summaryOpenCodeResult,
+    })
+
+    if (!decodedSummaryResult) {
+      yield* logInfo("Falling back to deterministic summary rendering because summary output was not decodable.")
+      return {
+        renderedSummary: renderReviewSummaryFallback({
+          verdict: reviewResult.verdict,
+          subjects: summarySubjects,
+        }),
+        summaryPrompt,
+        summaryOpenCodeResult,
+        summaryResultSource: "fallback",
+        summaryFallbackUsed: true,
+      } satisfies SummaryRenderResult
+    }
+
+    const validatedSummaryResult = validateReviewSummaryPassOutput({
+      subjects: summarySubjects,
+      output: decodedSummaryResult.output,
+    })
+
+    if (!validatedSummaryResult.ok) {
+      yield* logInfo("Falling back to deterministic summary rendering because summary validation failed.", {
+        issues: validatedSummaryResult.issues,
+      })
+      return {
+        renderedSummary: renderReviewSummaryFallback({
+          verdict: reviewResult.verdict,
+          subjects: summarySubjects,
+        }),
+        summaryPrompt,
+        summaryOpenCodeResult,
+        summaryResultSource: "fallback",
+        summaryFallbackUsed: true,
+      } satisfies SummaryRenderResult
+    }
+
+    return {
+      renderedSummary: renderReviewSummaryFromHighlights({
+        verdict: reviewResult.verdict,
+        subjects: summarySubjects,
+        output: validatedSummaryResult.output,
+      }),
+      summaryPrompt,
+      summaryOpenCodeResult,
+      summaryPassOutput: validatedSummaryResult.output,
+      summaryResultSource: decodedSummaryResult.source,
+      summaryFallbackUsed: false,
+    } satisfies SummaryRenderResult
+  })
 
 const buildReviewHistoryEntry = ({
   reviewedCommit,
@@ -476,6 +676,8 @@ export const planReviewWorkflow = (
           gitDiff: scopedDiff,
           existingThreads,
         }),
+        summaryFallbackUsed: false,
+        summarySubjects: [],
         summaryState: previousSummaryState,
         summaryContent,
         inlineFindings: [],
@@ -555,7 +757,7 @@ export const planReviewWorkflow = (
     })
     yield* logInfo(`Decoded review result: ${reviewResult.verdict} with ${reviewResult.findings.length} finding(s).`)
 
-    const outstandingReviewResult =
+    const followUpMerge =
       reviewMode === "follow-up"
         ? mergeFollowUpReviewResult({
             existingThreads,
@@ -563,7 +765,22 @@ export const planReviewWorkflow = (
             scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
             reviewResult,
           })
-        : reviewResult
+        : {
+            reviewResult,
+            carriedForwardFindings: [],
+            carriedForwardFindingsCount: 0,
+          }
+    const outstandingReviewResult = followUpMerge.reviewResult
+    const summarySubjects = buildReviewSummarySubjects({
+      reviewResult: outstandingReviewResult,
+      carriedForwardFindings: followUpMerge.carriedForwardFindings,
+    })
+    const summaryRender = yield* runReviewSummaryPass({
+      config,
+      openCodeRunner,
+      reviewResult: outstandingReviewResult,
+      summarySubjects,
+    })
 
     const reviewHistory = appendReviewHistoryEntry({
       previousSummaryState,
@@ -571,7 +788,7 @@ export const planReviewWorkflow = (
       reviewMode: reviewMode as Exclude<ReviewMode, "skipped">,
       config,
       buildLink,
-      usage: openCodeResult.usage,
+      usage: aggregateUsage([openCodeResult.usage, summaryRender.summaryOpenCodeResult?.usage]),
     })
 
     const summaryState = buildManagedReviewState({
@@ -582,7 +799,7 @@ export const planReviewWorkflow = (
     })
     const summaryContent = buildSummaryComment({
       verdict: summaryState.verdict,
-      summary: outstandingReviewResult.summary,
+      summary: summaryRender.renderedSummary,
       unmappedNotes: outstandingReviewResult.unmappedNotes,
       severityCounts: summaryState.severityCounts,
       buildLink,
@@ -610,6 +827,12 @@ export const planReviewWorkflow = (
       openCodeResult,
       reviewResult: outstandingReviewResult,
       reviewResultSource: source,
+      summaryFallbackUsed: summaryRender.summaryFallbackUsed,
+      summarySubjects,
+      ...(summaryRender.summaryPrompt ? { summaryPrompt: summaryRender.summaryPrompt } : {}),
+      ...(summaryRender.summaryOpenCodeResult ? { summaryOpenCodeResult: summaryRender.summaryOpenCodeResult } : {}),
+      ...(summaryRender.summaryPassOutput ? { summaryPassOutput: summaryRender.summaryPassOutput } : {}),
+      ...(summaryRender.summaryResultSource ? { summaryResultSource: summaryRender.summaryResultSource } : {}),
       summaryState,
       summaryContent,
       inlineFindings: reviewResult.inlineFindings,

@@ -66,6 +66,11 @@ type ReviewScript =
   | { readonly type: "success"; readonly output?: OpenCodeRunResult }
   | { readonly type: "failure"; readonly message: string }
 
+type ReviewScripts = {
+  readonly review?: ReviewScript
+  readonly summary?: ReviewScript
+}
+
 type FixtureRepo = Awaited<ReturnType<typeof createFixtureRepo>>
 type TestThread = {
   readonly id: number
@@ -119,7 +124,6 @@ const makePromptResponse = (
 })
 
 const successfulReviewOutput = makePromptResponse({
-  summary: "Found one issue",
   verdict: "concerns",
   findings: [
     {
@@ -134,12 +138,41 @@ const successfulReviewOutput = makePromptResponse({
   unmappedNotes: [],
 })
 
-const passingFollowUpOutput = makePromptResponse(
+const successfulSummaryOutput = makePromptResponse(
   {
-    summary: "No new issues in the follow-up diff",
-    verdict: "pass",
-    findings: [],
-    unmappedNotes: [],
+    highlights: [
+      {
+        subjectIds: ["inline-finding-1"],
+        text: "The new export is introduced without updating the dependent usage path.",
+      },
+    ],
+  },
+  {
+    cost: 0.0456,
+    tokens: {
+      input: 900,
+      output: 120,
+      reasoning: 50,
+      cacheRead: 10,
+      cacheWrite: 0,
+    },
+  },
+)
+
+const passingFollowUpOutput = makePromptResponse({
+  verdict: "pass",
+  findings: [],
+  unmappedNotes: [],
+})
+
+const passingFollowUpSummaryOutput = makePromptResponse(
+  {
+    highlights: [
+      {
+        subjectIds: ["carried-forward-finding-1"],
+        text: "An earlier managed finding still remains open outside this follow-up diff.",
+      },
+    ],
   },
   {
     cost: 0.0456,
@@ -254,8 +287,8 @@ const runReview = (
   repoDir: string,
   env: Record<string, string>,
   fetchMock: FetchLike,
-  opencode: ReviewScript,
-  onPrompt?: (prompt: string) => void,
+  opencode: ReviewScripts,
+  onPrompt?: (prompt: string, pass: "review" | "summary") => void,
 ) => {
   const cliInput = makeReviewCliInput({
     model: Option.some("openai/gpt-5.4"),
@@ -265,14 +298,22 @@ const runReview = (
     repositoryId: Option.some("repo-1"),
     pullRequestId: Option.some(42),
   })
+  let invocationCount = 0
   const openCodeRunner = makeOpenCodeRunner((request) => {
-    onPrompt?.(request.prompt)
+    invocationCount += 1
+    const pass = invocationCount === 1 ? "review" : "summary"
+    const script =
+      pass === "review"
+        ? (opencode.review ?? { type: "success", output: successfulReviewOutput })
+        : (opencode.summary ?? { type: "success", output: successfulSummaryOutput })
 
-    if (opencode.type === "failure") {
-      return Effect.die(opencode.message)
+    onPrompt?.(request.prompt, pass)
+
+    if (script.type === "failure") {
+      return Effect.die(script.message)
     }
 
-    return Effect.succeed(opencode.output ?? successfulReviewOutput)
+    return Effect.succeed(script.output ?? (pass === "review" ? successfulReviewOutput : successfulSummaryOutput))
   })
 
   const effect = executeReview.pipe(
@@ -309,7 +350,7 @@ const runReviewScenario = async ({
   buildExtraResponse,
   capturePrompt = false,
 }: {
-  readonly opencode: ReviewScript
+  readonly opencode: ReviewScripts
   readonly envOverrides?: Record<string, string> | ((fixture: FixtureRepo) => Record<string, string>)
   readonly buildThreadsResponse?: (fixture: FixtureRepo) => Response
   readonly buildPullRequestResponse?: (fixture: FixtureRepo) => Response
@@ -322,6 +363,7 @@ const runReviewScenario = async ({
 }) => {
   const fixture = await createFixtureRepo()
   let prompt: string | undefined
+  let summaryPrompt: string | undefined
 
   const { fetchMock, calls } = makeFetchMock((url, init) => {
     if (url.includes("/pullRequests/42?includeWorkItemRefs=true&api-version=7.1") && init?.method === "GET") {
@@ -347,16 +389,24 @@ const runReviewScenario = async ({
   }
 
   try {
-    const exitCode = await runReview(fixture.repoDir, configEnv, fetchMock, opencode, (value) => {
-      if (capturePrompt) {
-        prompt = value
+    const exitCode = await runReview(fixture.repoDir, configEnv, fetchMock, opencode, (value, pass) => {
+      if (!capturePrompt) {
+        return
       }
+
+      if (pass === "review") {
+        prompt = value
+        return
+      }
+
+      summaryPrompt = value
     })
     return {
       calls,
       exitCode,
       fixture,
       prompt,
+      summaryPrompt,
     }
   } finally {
     await rm(fixture.repoDir, { recursive: true, force: true })
@@ -366,7 +416,8 @@ const runReviewScenario = async ({
 describe("e2e", () => {
   test("runs the review workflow against a fixture repo and mocked Azure DevOps", async () => {
     const result = await runReviewScenario({
-      opencode: { type: "success" },
+      opencode: {},
+      capturePrompt: true,
     })
 
     const summaryCreate = result.calls.find(
@@ -379,12 +430,16 @@ describe("e2e", () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.calls.filter((call) => call.init?.method === "POST")).toHaveLength(2)
-    expect(summaryContent).toContain("$0.1234")
+    expect(result.prompt).toContain('"changedFiles"')
+    expect(result.summaryPrompt).toContain('"id":"inline-finding-1"')
+    expect(result.summaryPrompt).not.toContain('"pullRequest"')
+    expect(summaryContent).toContain("$0.1690")
+    expect(summaryContent).toContain("The new export is introduced without updating the dependent usage path.")
   })
 
   test("includes connected work item context in the generated prompt", async () => {
     const result = await runReviewScenario({
-      opencode: { type: "success" },
+      opencode: {},
       capturePrompt: true,
       buildPullRequestResponse: () =>
         Response.json({
@@ -458,7 +513,7 @@ describe("e2e", () => {
 
   test("includes eligible pull-request thread context in the generated prompt", async () => {
     const result = await runReviewScenario({
-      opencode: { type: "success" },
+      opencode: {},
       capturePrompt: true,
       buildThreadsResponse: () =>
         makeThreadsResponse([
@@ -535,8 +590,10 @@ describe("e2e", () => {
   test("skips same-commit reruns and only updates the managed summary thread", async () => {
     const result = await runReviewScenario({
       opencode: {
-        type: "failure",
-        message: "opencode should not run on skipped reviews",
+        review: {
+          type: "failure",
+          message: "opencode should not run on skipped reviews",
+        },
       },
       envOverrides: ({ featureSha }: FixtureRepo) => ({
         SYSTEM_PULLREQUEST_SOURCECOMMITID: featureSha,
@@ -575,7 +632,7 @@ describe("e2e", () => {
 
   test("reruns a full review when the stored managed-review base differs", async () => {
     const result = await runReviewScenario({
-      opencode: { type: "success" },
+      opencode: {},
       envOverrides: ({ featureSha }: FixtureRepo) => ({
         SYSTEM_PULLREQUEST_SOURCECOMMITID: featureSha,
       }),
@@ -600,8 +657,14 @@ describe("e2e", () => {
   test("keeps untouched older managed findings in the follow-up summary", async () => {
     const result = await runReviewScenario({
       opencode: {
-        type: "success",
-        output: passingFollowUpOutput,
+        review: {
+          type: "success",
+          output: passingFollowUpOutput,
+        },
+        summary: {
+          type: "success",
+          output: passingFollowUpSummaryOutput,
+        },
       },
       envOverrides: ({ featureSha }: FixtureRepo) => ({
         SYSTEM_PULLREQUEST_SOURCECOMMITID: featureSha,
@@ -641,10 +704,42 @@ describe("e2e", () => {
 
     expect(result.exitCode).toBe(0)
     expect(summaryContent).toContain("Verdict: **concerns**")
-    expect(summaryContent).toContain("No new issues in the follow-up diff")
-    expect(summaryContent).toContain("Still tracking 1 managed finding")
-    expect(summaryContent).toContain("$0.1234")
-    expect(summaryContent).toContain("$0.0456")
+    expect(summaryContent).toContain(
+      "1 finding is carried forward from earlier managed reviews outside this follow-up diff.",
+    )
+    expect(summaryContent).toContain("An earlier managed finding still remains open outside this follow-up diff.")
+    expect(summaryContent).toContain("$0.1690")
+  })
+
+  test("falls back to a deterministic summary when the summary pass returns invalid ids", async () => {
+    const result = await runReviewScenario({
+      opencode: {
+        summary: {
+          type: "success",
+          output: makePromptResponse({
+            highlights: [
+              {
+                subjectIds: ["missing-subject"],
+                text: "Invented issue.",
+              },
+            ],
+          }),
+        },
+      },
+    })
+
+    const summaryCreate = result.calls.find(
+      (call) =>
+        call.init?.method === "POST" &&
+        call.url.endsWith("/threads?api-version=7.1") &&
+        extractCommentContent(call.init?.body).includes("Verdict: **concerns**"),
+    )
+    const summaryContent = extractCommentContent(summaryCreate?.init?.body)
+
+    expect(result.exitCode).toBe(0)
+    expect(summaryContent).toContain("This review is concerns with 1 finding.")
+    expect(summaryContent).toContain("- Use the updated value (src/example.ts:2)")
+    expect(summaryContent).not.toContain("Invented issue.")
   })
 
   test("falls back to a full review when a follow-up range only adds a merge from the target branch", async () => {
@@ -683,9 +778,11 @@ describe("e2e", () => {
           SYSTEM_PULLREQUEST_SOURCECOMMITID: fixture.headSha,
         },
         fetchMock,
-        { type: "success" },
-        (value) => {
-          prompt = value
+        {},
+        (value, pass) => {
+          if (pass === "review") {
+            prompt = value
+          }
         },
       )
 

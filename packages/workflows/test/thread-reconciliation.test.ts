@@ -172,7 +172,6 @@ describe("thread reconciliation", () => {
       ]),
       scopedDeletedLinesByFile: new Map(),
       reviewResult: {
-        summary: "Current summary",
         verdict: "pass",
         findings: [currentFinding],
         inlineFindings: [currentFinding],
@@ -181,10 +180,14 @@ describe("thread reconciliation", () => {
       },
     })
 
-    expect(result.verdict).toBe("concerns")
-    expect(result.findings.map((finding) => finding.title)).toEqual(["Earlier finding", "Current finding"])
-    expect(result.inlineFindings.map((finding) => finding.title)).toEqual(["Earlier finding", "Current finding"])
-    expect(result.summary).toContain("Still tracking 1 managed finding")
+    expect(result.reviewResult.verdict).toBe("concerns")
+    expect(result.reviewResult.findings.map((finding) => finding.title)).toEqual(["Earlier finding", "Current finding"])
+    expect(result.reviewResult.inlineFindings.map((finding) => finding.title)).toEqual([
+      "Earlier finding",
+      "Current finding",
+    ])
+    expect(result.carriedForwardFindings.map((finding) => finding.title)).toEqual(["Earlier finding"])
+    expect(result.carriedForwardFindingsCount).toBe(1)
   })
 
   test("closes stale findings when the follow-up only deletes the previously annotated line", () => {
@@ -227,7 +230,6 @@ describe("thread reconciliation", () => {
       scopedChangedLinesByFile: new Map(),
       scopedDeletedLinesByFile: new Map([["src/example.ts", new Set([41])]]),
       reviewResult: {
-        summary: "Current summary",
         verdict: "pass",
         findings: [],
         inlineFindings: [],
@@ -236,10 +238,11 @@ describe("thread reconciliation", () => {
       },
     })
 
-    expect(result.verdict).toBe("concerns")
-    expect(result.findings.map((finding) => finding.title)).toEqual(["Untouched finding"])
-    expect(result.inlineFindings.map((finding) => finding.title)).toEqual(["Untouched finding"])
-    expect(result.summary).toContain("Still tracking 1 managed finding")
+    expect(result.reviewResult.verdict).toBe("concerns")
+    expect(result.reviewResult.findings.map((finding) => finding.title)).toEqual(["Untouched finding"])
+    expect(result.reviewResult.inlineFindings.map((finding) => finding.title)).toEqual(["Untouched finding"])
+    expect(result.carriedForwardFindings.map((finding) => finding.title)).toEqual(["Untouched finding"])
+    expect(result.carriedForwardFindingsCount).toBe(1)
   })
 
   test("skipped mode only updates the summary thread", () => {

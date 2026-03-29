@@ -46,7 +46,6 @@ export const makeNormalizedReviewResult = (
   findings: ReadonlyArray<ReviewFinding>,
   inlineFindings: ReadonlyArray<ReviewFinding> = findings,
 ): NormalizedReviewResult => ({
-  summary: "Summary",
   verdict: "concerns",
   findings: [...findings],
   inlineFindings: [...inlineFindings],

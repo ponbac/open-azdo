@@ -8,7 +8,6 @@ describe("review output", () => {
     const exit = await Effect.runPromiseExit(
       decodeReviewResult(
         {
-          summary: "Summary",
           verdict: "concerns",
           findings: [
             {
@@ -33,7 +32,6 @@ describe("review output", () => {
     const result = await Effect.runPromise(
       decodeReviewResult(
         {
-          summary: "Summary",
           verdict: "concerns",
           findings: [
             {
@@ -59,7 +57,6 @@ describe("review output", () => {
     const result = await Effect.runPromise(
       decodeReviewResult(
         {
-          summary: "Summary",
           verdict: "concerns",
           findings: [
             {
@@ -85,7 +82,6 @@ describe("review output", () => {
     const result = await Effect.runPromise(
       decodeReviewResult(
         {
-          summary: "Summary",
           verdict: "concerns",
           findings: [
             {
@@ -106,5 +102,20 @@ describe("review output", () => {
     expect(result.inlineFindings).toHaveLength(0)
     expect(result.summaryOnlyFindings).toHaveLength(1)
     expect(result.unmappedNotes[0]).toContain("Old line")
+  })
+
+  test("trims and drops blank unmapped notes during normalization", async () => {
+    const result = await Effect.runPromise(
+      decodeReviewResult(
+        {
+          verdict: "concerns",
+          findings: [],
+          unmappedNotes: ["  Needs follow-up  ", " ", ""],
+        },
+        new Map(),
+      ),
+    )
+
+    expect(result.unmappedNotes).toEqual(["Needs follow-up"])
   })
 })

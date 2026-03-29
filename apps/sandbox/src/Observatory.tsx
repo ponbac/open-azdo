@@ -141,11 +141,49 @@ const TokenRow = ({
   )
 }
 
+const combineUsage = (
+  reviewUsage:
+    | {
+        readonly costUsd?: number
+        readonly tokens?: {
+          readonly input: number
+          readonly output: number
+          readonly reasoning: number
+          readonly cacheRead: number
+          readonly cacheWrite: number
+        }
+      }
+    | undefined,
+  summaryUsage:
+    | {
+        readonly costUsd?: number
+        readonly tokens?: {
+          readonly input: number
+          readonly output: number
+          readonly reasoning: number
+          readonly cacheRead: number
+          readonly cacheWrite: number
+        }
+      }
+    | undefined,
+) => ({
+  costUsd: (reviewUsage?.costUsd ?? 0) + (summaryUsage?.costUsd ?? 0),
+  tokens: {
+    input: (reviewUsage?.tokens?.input ?? 0) + (summaryUsage?.tokens?.input ?? 0),
+    output: (reviewUsage?.tokens?.output ?? 0) + (summaryUsage?.tokens?.output ?? 0),
+    reasoning: (reviewUsage?.tokens?.reasoning ?? 0) + (summaryUsage?.tokens?.reasoning ?? 0),
+    cacheRead: (reviewUsage?.tokens?.cacheRead ?? 0) + (summaryUsage?.tokens?.cacheRead ?? 0),
+    cacheWrite: (reviewUsage?.tokens?.cacheWrite ?? 0) + (summaryUsage?.tokens?.cacheWrite ?? 0),
+  },
+})
+
 // ── Content sections ───────────────────────────────────────────
 
 const OverviewSection = ({ state }: SandboxViewProps) => {
   const { capture } = state
-  const usage = capture.review.openCodeResult?.usage
+  const reviewUsage = capture.review.openCodeResult?.usage
+  const summaryUsage = capture.review.summaryPass.openCodeResult?.usage
+  const usage = combineUsage(reviewUsage, summaryUsage)
   const tokens = usage?.tokens
   const history = capture.review.summaryState.reviewHistory ?? []
   const histCost = totalHistoryCost(history)
@@ -161,10 +199,15 @@ const OverviewSection = ({ state }: SandboxViewProps) => {
           <Pill tone={verdictTone(capture.review.result?.verdict)}>{capture.review.result?.verdict ?? "unknown"}</Pill>
           <span className="text-[0.6rem] text-[#8a7e70] uppercase tracking-wider">{capture.review.mode} review</span>
           <span className="text-[0.6rem] text-[#8a7e70]">{capture.review.resultSource ?? ""}</span>
+          <span className="text-[0.6rem] text-[#8a7e70]">
+            summary{" "}
+            {capture.review.summaryPass.fallbackUsed ? "fallback" : (capture.review.summaryPass.resultSource ?? "")}
+          </span>
         </div>
-        {capture.review.result?.summary ? (
-          <p className="text-sm leading-relaxed text-[#c4b8a8]">{capture.review.result.summary}</p>
-        ) : null}
+        <p className="text-sm leading-relaxed text-[#c4b8a8]">
+          {capture.review.summaryPass.subjects.length} summary subject
+          {capture.review.summaryPass.subjects.length === 1 ? "" : "s"} captured across both passes.
+        </p>
       </div>
 
       {/* Two-column: Cost + Severity */}
@@ -444,10 +487,38 @@ const HistorySection = ({ state }: SandboxViewProps) => {
 const PromptSection = ({ state }: SandboxViewProps) => {
   const { capture } = state
   const [showRaw, setShowRaw] = useState(false)
+  const [selectedPass, setSelectedPass] = useState<"review" | "summary">("review")
+  const selectedPrompt = selectedPass === "review" ? capture.review.prompt : capture.review.summaryPass.prompt
+  const selectedRawOutput =
+    selectedPass === "review"
+      ? capture.review.openCodeResult?.response
+      : capture.review.summaryPass.openCodeResult?.response
 
   return (
     <div className="space-y-4">
       <div className="flex gap-2">
+        <button
+          className={`px-3 py-1.5 text-[0.6rem] font-semibold uppercase tracking-wider border transition ${
+            selectedPass === "review"
+              ? "border-amber-600/50 bg-amber-600/10 text-amber-400"
+              : "border-[#2a2520] text-[#8a7e70]"
+          }`}
+          onClick={() => setSelectedPass("review")}
+          type="button"
+        >
+          Review pass
+        </button>
+        <button
+          className={`px-3 py-1.5 text-[0.6rem] font-semibold uppercase tracking-wider border transition ${
+            selectedPass === "summary"
+              ? "border-amber-600/50 bg-amber-600/10 text-amber-400"
+              : "border-[#2a2520] text-[#8a7e70]"
+          }`}
+          onClick={() => setSelectedPass("summary")}
+          type="button"
+        >
+          Summary pass
+        </button>
         <button
           className={`px-3 py-1.5 text-[0.6rem] font-semibold uppercase tracking-wider border transition ${
             !showRaw ? "border-amber-600/50 bg-amber-600/10 text-amber-400" : "border-[#2a2520] text-[#8a7e70]"
@@ -469,9 +540,7 @@ const PromptSection = ({ state }: SandboxViewProps) => {
       </div>
 
       <pre className="bg-[#0f0c0a] border border-[#2a2520] p-4 text-xs leading-5 text-[#a09080] whitespace-pre-wrap overflow-y-auto max-h-[60vh]">
-        {showRaw
-          ? (capture.review.openCodeResult?.response ?? "No raw output.")
-          : (capture.review.prompt ?? "No prompt captured.")}
+        {showRaw ? (selectedRawOutput ?? "No raw output.") : (selectedPrompt ?? "No prompt captured.")}
       </pre>
     </div>
   )
@@ -808,7 +877,10 @@ export const Observatory = ({ state }: SandboxViewProps) => {
             <div className="flex items-center justify-between text-[0.6rem]">
               <span className="text-[#6a6050]">Cost</span>
               <span className="font-semibold text-amber-400 tabular-nums">
-                {formatCost(capture.review.openCodeResult?.usage?.costUsd)}
+                {formatCost(
+                  combineUsage(capture.review.openCodeResult?.usage, capture.review.summaryPass.openCodeResult?.usage)
+                    .costUsd,
+                )}
               </span>
             </div>
             <div className="flex items-center justify-between text-[0.6rem]">

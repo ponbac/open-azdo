@@ -95,6 +95,26 @@ const OpenCodeUsageSchema = Schema.Struct({
   ),
 })
 
+const ReviewSummarySubjectSchema = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.Literals(["inline-finding", "summary-only-finding", "unmapped-note", "carried-forward-finding"]),
+  title: Schema.String,
+  body: Schema.optionalKey(Schema.String),
+  severity: Schema.optionalKey(Schema.Literals(["low", "medium", "high", "critical"])),
+  confidence: Schema.optionalKey(Schema.Literals(["low", "medium", "high"])),
+  filePath: Schema.optionalKey(Schema.String),
+  line: Schema.optionalKey(Schema.Int),
+})
+
+const ReviewSummaryPassOutputSchema = Schema.Struct({
+  highlights: Schema.Array(
+    Schema.Struct({
+      subjectIds: Schema.Array(Schema.String),
+      text: Schema.String,
+    }),
+  ),
+})
+
 const OpenCodeResultSchema = Schema.Struct({
   response: Schema.String,
   structured: Schema.optionalKey(Schema.Unknown),
@@ -110,7 +130,6 @@ const OpenCodeResultSchema = Schema.Struct({
 })
 
 const NormalizedReviewResultSchema = Schema.Struct({
-  summary: Schema.String,
   verdict: Schema.Literals(["pass", "concerns", "fail"]),
   findings: Schema.Array(ReviewFindingSchema),
   inlineFindings: Schema.Array(ReviewFindingSchema),
@@ -144,7 +163,7 @@ export const SandboxThreadSchema = ExistingThreadSchema
 export type SandboxThread = Schema.Schema.Type<typeof SandboxThreadSchema>
 
 export const SandboxCaptureSchema = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
+  schemaVersion: Schema.Literal(2),
   capturedAt: Schema.String,
   workspaceMode: Schema.Literals(["provided", "temporary"]),
   target: Schema.Struct({
@@ -175,6 +194,14 @@ export const SandboxCaptureSchema = Schema.Struct({
     resultSource: Schema.optionalKey(Schema.Literals(["structured", "repaired", "fallback"])),
     openCodeResult: Schema.optionalKey(OpenCodeResultSchema),
     result: Schema.optionalKey(NormalizedReviewResultSchema),
+    summaryPass: Schema.Struct({
+      prompt: Schema.optionalKey(Schema.String),
+      resultSource: Schema.optionalKey(Schema.Literals(["structured", "repaired", "fallback"])),
+      openCodeResult: Schema.optionalKey(OpenCodeResultSchema),
+      result: Schema.optionalKey(ReviewSummaryPassOutputSchema),
+      fallbackUsed: Schema.Boolean,
+      subjects: Schema.Array(ReviewSummarySubjectSchema),
+    }),
     summaryState: ManagedReviewStateSchema,
     summaryContent: Schema.String,
     actions: Schema.Array(SandboxPreviewActionSchema),
