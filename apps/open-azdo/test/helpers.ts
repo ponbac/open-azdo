@@ -209,6 +209,47 @@ export const createFixtureRepo = async () => {
   }
 }
 
+export const createTargetMergeFollowUpRepo = async () => {
+  const repoDir = await createTempDir("open-azdo-target-merge-follow-up-")
+  runGit(repoDir, ["init", "-b", "main"])
+  runGit(repoDir, ["config", "user.name", "Open AZDO"])
+  runGit(repoDir, ["config", "user.email", "open-azdo@example.com"])
+  await mkdir(join(repoDir, "src"), { recursive: true })
+  await writeFile(join(repoDir, "src/example.ts"), "export const value = 1\n", "utf8")
+  await writeFile(join(repoDir, "open-azdo.yaml"), "steps:\n  - script: echo baseline\n", "utf8")
+  runGit(repoDir, ["add", "."])
+  runGit(repoDir, ["commit", "-m", "base"])
+  const baseSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  runGit(repoDir, ["update-ref", "refs/remotes/origin/main", baseSha])
+  runGit(repoDir, ["checkout", "-b", "feature"])
+  await writeFile(join(repoDir, "src/example.ts"), "export const value = 2\nexport const next = 3\n", "utf8")
+  runGit(repoDir, ["commit", "-am", "feature"])
+  runGit(repoDir, ["checkout", "main"])
+  await writeFile(join(repoDir, "README.md"), "# Main before review\n", "utf8")
+  runGit(repoDir, ["add", "README.md"])
+  runGit(repoDir, ["commit", "-m", "main-before-review"])
+  const previousTargetSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  runGit(repoDir, ["update-ref", "refs/remotes/origin/main", previousTargetSha])
+  runGit(repoDir, ["checkout", "feature"])
+  runGit(repoDir, ["merge", "--no-ff", "main", "-m", "merge main before review"])
+  const reviewedSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  runGit(repoDir, ["checkout", "main"])
+  await writeFile(join(repoDir, "open-azdo.yaml"), "steps:\n  - task: NodeTool@0\n  - script: echo bootstrap\n", "utf8")
+  runGit(repoDir, ["commit", "-am", "main-target-only"])
+  const targetSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+  runGit(repoDir, ["update-ref", "refs/remotes/origin/main", targetSha])
+  runGit(repoDir, ["checkout", "feature"])
+  runGit(repoDir, ["merge", "--no-ff", "main", "-m", "merge main after review"])
+  const headSha = runGit(repoDir, ["rev-parse", "HEAD"]).trim()
+
+  return {
+    repoDir,
+    reviewedSha,
+    headSha,
+    targetSha,
+  }
+}
+
 const runGit = (cwd: string, args: ReadonlyArray<string>) => {
   const result = spawnSync("git", [...args], {
     cwd,

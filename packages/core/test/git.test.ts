@@ -7,6 +7,7 @@ import {
   GitExec,
   compressChangedLines,
   extractHunkHeaders,
+  hasTargetMergeCommitInRange,
   isAncestor,
   resolveDiffRange,
   resolvePullRequestDiff,
@@ -17,6 +18,7 @@ import {
   createDeletionFollowUpRepo,
   createFixtureRepo,
   createSyntheticMergeRepo,
+  createTargetMergeFollowUpRepo,
   makeGitExec,
   makeGitExecLayer,
   makeRealGitExecLayer,
@@ -47,7 +49,7 @@ describe("git", () => {
   })
 
   test("resolves synthetic merge commits against HEAD^1", async () => {
-    const { repoDir } = await createSyntheticMergeRepo()
+    const { repoDir, mainSha } = await createSyntheticMergeRepo()
 
     try {
       const diff = await Effect.runPromise(
@@ -57,8 +59,26 @@ describe("git", () => {
         }).pipe(Effect.provide(makeRealGitExecLayer()), withSilentLogs),
       )
 
-      expect(diff.baseRef).toBe("HEAD^1")
+      expect(diff.baseRef).toBe(mainSha)
       expect(diff.changedFiles).toContain("src/example.ts")
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  test("resolves source-branch merges against the parent that matches the target branch", async () => {
+    const { repoDir, targetSha } = await createTargetMergeFollowUpRepo()
+
+    try {
+      const diff = await Effect.runPromise(
+        resolvePullRequestDiff({
+          workspace: repoDir,
+          targetBranch: "refs/heads/main",
+        }).pipe(Effect.provide(makeRealGitExecLayer()), withSilentLogs),
+      )
+
+      expect(diff.baseRef).toBe(targetSha)
+      expect(diff.changedFiles).toEqual(["src/example.ts"])
     } finally {
       await rm(repoDir, { recursive: true, force: true })
     }
@@ -215,6 +235,25 @@ describe("git", () => {
 
       expect(mainIsAncestor).toBe(true)
       expect(featureIsAncestor).toBe(false)
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  test("detects target merges on a first-parent follow-up range", async () => {
+    const { repoDir, reviewedSha, headSha, targetSha } = await createTargetMergeFollowUpRepo()
+
+    try {
+      const containsTargetMerge = await Effect.runPromise(
+        hasTargetMergeCommitInRange({
+          workspace: repoDir,
+          baseRef: reviewedSha,
+          headRef: headSha,
+          currentTargetRef: targetSha,
+        }).pipe(Effect.provide(makeRealGitExecLayer()), withSilentLogs),
+      )
+
+      expect(containsTargetMerge).toBe(true)
     } finally {
       await rm(repoDir, { recursive: true, force: true })
     }

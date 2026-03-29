@@ -45,6 +45,13 @@ export type IsAncestorInput = {
   readonly headRef: string
 }
 
+export type HasTargetMergeCommitInRangeInput = {
+  readonly workspace: string
+  readonly baseRef: string
+  readonly headRef: string
+  readonly currentTargetRef: string
+}
+
 export const splitDiffByFile = (diffText: string): DiffFile[] => {
   const files: DiffFile[] = []
   const chunks = diffText.split(/^diff --git /m).filter(Boolean)
@@ -179,9 +186,13 @@ const extractDiffLineMaps = (diffText: string) => {
 export const extractChangedLinesByFile = (diffText: string): Map<string, Set<number>> =>
   extractDiffLineMaps(diffText).changedLinesByFile
 
+/**
+ * Prefer the fetched remote-tracking ref over local branch names so PR workspaces do not
+ * accidentally treat a local `main` branch as the live target tip.
+ */
 export const buildTargetRefCandidates = (targetBranch: string) => {
   const normalized = targetBranch.replace(/^refs\/heads\//, "")
-  return [targetBranch, `refs/remotes/origin/${normalized}`, `refs/heads/${normalized}`, normalized]
+  return [`refs/remotes/origin/${normalized}`, targetBranch, `refs/heads/${normalized}`, normalized]
 }
 
 const runGit = (workspace: string, operation: string, args: ReadonlyArray<string>, allowNonZeroExit = false) =>
@@ -194,6 +205,11 @@ const runGit = (workspace: string, operation: string, args: ReadonlyArray<string
       allowNonZeroExit,
     })
   })
+
+const resolveCommitRef = (workspace: string, operation: string, ref: string) =>
+  runGit(workspace, operation, ["rev-parse", "--verify", `${ref}^{commit}`]).pipe(
+    Effect.map((result) => result.stdout.trim()),
+  )
 
 const resolveHeadReviewedSourceCommitCandidate = (workspace: string) =>
   runGit(workspace, "Git.resolveReviewedSourceCommit.revList", ["rev-list", "--parents", "-n", "1", "HEAD"]).pipe(
@@ -258,6 +274,52 @@ export const isAncestor = ({ workspace, ancestorRef, headRef }: IsAncestorInput)
       message: `Could not determine whether ${ancestorRef} is an ancestor of ${headRef}.`,
       remediation: "Use `checkout: self` with `fetchDepth: 0` so the relevant commit history is available locally.",
     })
+  })
+
+/**
+ * Detect whether a first-parent follow-up range includes a merge that pulled target-branch
+ * history into the PR branch, which would contaminate a direct source-commit diff with
+ * target-only changes that Azure DevOps would not consider part of the PR scope.
+ */
+export const hasTargetMergeCommitInRange = ({
+  workspace,
+  baseRef,
+  headRef,
+  currentTargetRef,
+}: HasTargetMergeCommitInRangeInput) =>
+  Effect.gen(function* () {
+    const history = yield* runGit(workspace, "Git.hasTargetMergeCommitInRange.revList", [
+      "rev-list",
+      "--first-parent",
+      "--parents",
+      `${baseRef}..${headRef}`,
+    ])
+
+    for (const line of history.stdout
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter(Boolean)) {
+      const [, , ...mergedParents] = line.split(/\s+/)
+      if (mergedParents.length === 0) {
+        continue
+      }
+
+      // Any non-first parent that is already on the current PR base indicates the source branch
+      // merged target history between reviews, so a commit-to-commit follow-up diff is no longer safe.
+      for (const mergedParent of mergedParents) {
+        if (
+          yield* isAncestor({
+            workspace,
+            ancestorRef: mergedParent,
+            headRef: currentTargetRef,
+          })
+        ) {
+          return true
+        }
+      }
+    }
+
+    return false
   })
 
 export const resolveDiffRange = ({ workspace, baseRef, headRef }: ResolveDiffRangeInput) =>
@@ -327,8 +389,15 @@ export const resolveTargetRef = ({ workspace, targetBranch }: ResolvePullRequest
     })
   })
 
+/**
+ * Resolve the current pull-request diff against the commit that actually backs the target branch.
+ * This covers both synthetic Azure Pipelines merge checkouts and source-branch merge commits that
+ * have already merged the target branch locally.
+ */
 export const resolvePullRequestDiff = (input: ResolvePullRequestDiffInput) =>
   Effect.gen(function* () {
+    const targetRef = yield* resolveTargetRef(input)
+    const targetCommit = yield* resolveCommitRef(input.workspace, "Git.resolvePullRequestDiff.targetCommit", targetRef)
     const parents = yield* runGit(input.workspace, "Git.resolvePullRequestDiff.revList", [
       "rev-list",
       "--parents",
@@ -340,11 +409,13 @@ export const resolvePullRequestDiff = (input: ResolvePullRequestDiffInput) =>
 
     let baseRef = ""
     const headRef = "HEAD"
+    const matchingTargetParent = hashes.slice(1).find((hash) => hash === targetCommit)
 
-    if (hashes.length === 3) {
-      baseRef = "HEAD^1"
+    if (matchingTargetParent) {
+      // The current HEAD is a merge commit. Match the target tip to the correct parent instead of
+      // assuming HEAD^1 is always the synthetic merge base.
+      baseRef = matchingTargetParent
     } else {
-      const targetRef = yield* resolveTargetRef(input)
       const mergeBase = yield* runGit(input.workspace, "Git.resolvePullRequestDiff.mergeBase", [
         "merge-base",
         targetRef,

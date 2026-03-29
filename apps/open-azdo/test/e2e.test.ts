@@ -8,6 +8,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { executeReview } from "../src/Cli"
 import {
   createFixtureRepo,
+  createTargetMergeFollowUpRepo,
   type FetchLike,
   makeBaseEnv,
   makeFetchMock,
@@ -636,5 +637,57 @@ describe("e2e", () => {
     expect(summaryContent).toContain("Still tracking 1 managed finding")
     expect(summaryContent).toContain("$0.1234")
     expect(summaryContent).toContain("$0.0456")
+  })
+
+  test("falls back to a full review when a follow-up range only adds a merge from the target branch", async () => {
+    const fixture = await createTargetMergeFollowUpRepo()
+    let prompt: string | undefined
+
+    const { fetchMock, calls } = makeFetchMock((url, init) => {
+      if (url.includes("/pullRequests/42?includeWorkItemRefs=true&api-version=7.1") && init?.method === "GET") {
+        return Response.json({
+          title: "Feature PR",
+          description: "Adds a new export",
+          workItemRefs: [],
+        })
+      }
+
+      if (url.endsWith("/threads?api-version=7.1") && init?.method === "GET") {
+        return makeThreadsResponse([
+          makeManagedSummaryThread(
+            makeManagedReviewState({
+              reviewedCommit: fixture.reviewedSha,
+              pullRequestBaseRef: fixture.targetSha,
+            }),
+          ),
+        ])
+      }
+
+      return Response.json({ id: calls.length })
+    })
+
+    try {
+      const exitCode = await runReview(
+        fixture.repoDir,
+        {
+          ...makeBaseEnv(),
+          BUILD_SOURCESDIRECTORY: fixture.repoDir,
+          SYSTEM_PULLREQUEST_SOURCECOMMITID: fixture.headSha,
+        },
+        fetchMock,
+        { type: "success" },
+        (value) => {
+          prompt = value
+        },
+      )
+
+      expect(exitCode).toBe(0)
+      expect(prompt).toContain("This is a full pull-request review over the scoped changed files.")
+      expect(prompt).not.toContain("This is a follow-up review.")
+      expect(prompt).toContain('"path":"src/example.ts"')
+      expect(prompt).not.toContain("open-azdo.yaml")
+    } finally {
+      await rm(fixture.repoDir, { recursive: true, force: true })
+    }
   })
 })

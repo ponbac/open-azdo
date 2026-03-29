@@ -10,6 +10,7 @@ import { type AzureContext, buildBuildLink, createAzureContext } from "@open-azd
 import { AzureDevOpsClient, type PullRequestMetadata, type PullRequestWorkItem } from "@open-azdo/azdo/client"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import {
+  hasTargetMergeCommitInRange,
   isAncestor,
   resolveDiffRange,
   resolvePullRequestDiff,
@@ -173,6 +174,47 @@ const resolveReviewScope = ({
     }).pipe(Effect.orElseSucceed(() => undefined))
 
     if (previousCommitIsAncestor === true) {
+      const followUpContainsTargetMerge = yield* hasTargetMergeCommitInRange({
+        workspace: config.workspace,
+        baseRef: previousReviewedCommit,
+        headRef: reviewedSourceCommit,
+        currentTargetRef: fullPullRequestDiff.baseRef,
+      }).pipe(Effect.orElseSucceed(() => undefined))
+
+      if (followUpContainsTargetMerge === true) {
+        yield* logInfo(
+          "Follow-up range includes a merge from the target branch. Falling back to a full review to avoid reviewing target-only merge changes.",
+          {
+            previousReviewedCommit,
+            reviewedSourceCommit,
+            currentPullRequestBaseRef: fullPullRequestDiff.baseRef,
+          },
+        )
+
+        return {
+          reviewMode: "full",
+          scopedDiff: fullPullRequestDiff,
+          previousReviewedCommit,
+        } satisfies ResolvedReviewScope
+      }
+
+      if (followUpContainsTargetMerge === undefined) {
+        yield* logInfo(
+          "Could not validate whether the follow-up range includes a merge from the target branch. Falling back to a full review.",
+          {
+            previousReviewedCommit,
+            reviewedSourceCommit,
+            currentPullRequestBaseRef: fullPullRequestDiff.baseRef,
+          },
+        )
+
+        return {
+          reviewMode: "full",
+          scopedDiff: fullPullRequestDiff,
+          previousReviewedCommit,
+        } satisfies ResolvedReviewScope
+      }
+
       return {
         reviewMode: "follow-up",
         scopedDiff: yield* resolveDiffRange({
