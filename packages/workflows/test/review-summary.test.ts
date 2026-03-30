@@ -170,7 +170,7 @@ describe("review summary", () => {
       subjects,
     })
 
-    expect(summary).toContain("This review is concerns with 2 findings.")
+    expect(summary).toContain("⚠️ Review verdict: concerns. 2 findings.")
     expect(summary).toContain("1 finding is carried forward from earlier managed reviews outside this follow-up diff.")
     expect(summary).toContain("- Current issue (src/example.ts:2)")
     expect(summary).toContain("- Still tracking outside scope: Older issue (src/legacy.ts:20)")

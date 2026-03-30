@@ -814,7 +814,7 @@ describe("e2e", () => {
     const summaryContent = extractCommentContent(summaryCreate?.init?.body)
 
     expect(result.exitCode).toBe(0)
-    expect(summaryContent).toContain("This review is concerns with 1 finding.")
+    expect(summaryContent).toContain("⚠️ Review verdict: concerns. 1 finding.")
     expect(summaryContent).toContain("- Use the updated value (src/example.ts:2)")
     expect(summaryContent).not.toContain("Invented issue.")
   })

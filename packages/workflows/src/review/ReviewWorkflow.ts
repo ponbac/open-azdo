@@ -604,7 +604,9 @@ const writeReviewWorkflowOutput = (config: ReviewWorkflowConfig, output: ReviewW
     return writeStdout("Skipped review: no new commits since the last managed review.\n")
   }
 
-  return writeStdout(`Posted review verdict ${output.verdict} with ${output.findingsCount} findings.\n`)
+  return writeStdout(
+    `Posted review verdict ${output.verdict} with ${output.findingsCount} ${output.findingsCount === 1 ? "finding" : "findings"}.\n`,
+  )
 }
 
 export const planReviewWorkflow = (

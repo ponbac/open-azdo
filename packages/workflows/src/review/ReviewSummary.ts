@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Match, Schema } from "effect"
 
 import { normalizePath } from "@open-azdo/core/paths"
 
@@ -197,6 +197,14 @@ const countSummarySubjects = (subjects: ReadonlyArray<ReviewSummarySubject>): Re
 const formatCount = (count: number, singular: string, plural = `${singular}s`) =>
   `${count} ${count === 1 ? singular : plural}`
 
+const renderVerdictBadge = (verdict: NormalizedReviewResult["verdict"]) =>
+  Match.value(verdict).pipe(
+    Match.when("pass", () => "✅ Review verdict: pass."),
+    Match.when("concerns", () => "⚠️ Review verdict: concerns."),
+    Match.when("fail", () => "❌ Review verdict: fail."),
+    Match.exhaustive,
+  )
+
 /**
  * Produces the deterministic lead sentence that every published summary starts with, regardless of
  * whether the grouped highlights came from the model or the fallback renderer.
@@ -211,9 +219,10 @@ export const renderReviewSummaryOverview = ({
   readonly subjects: ReadonlyArray<ReviewSummarySubject>
 }) => {
   const counts = countSummarySubjects(subjects)
+  const verdictBadge = renderVerdictBadge(verdict)
 
   if (counts.findings === 0 && counts.summaryOnlyNotes === 0) {
-    return `✅ This review is ${verdict} with no publishable findings or summary-only notes.`
+    return `${verdictBadge} No publishable findings or summary-only notes.`
   }
 
   const parts: string[] = []
@@ -226,7 +235,7 @@ export const renderReviewSummaryOverview = ({
     parts.push(formatCount(counts.summaryOnlyNotes, "summary-only note"))
   }
 
-  const overview = `This review is ${verdict} with ${parts.join(" and ")}.`
+  const overview = `${verdictBadge} ${parts.join(" and ")}.`
   const retentionNotes: string[] = []
 
   if (counts.retainedOutsideScopeFindings > 0) {
