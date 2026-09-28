@@ -715,7 +715,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
   )
 
   const createThread: AzureDevOpsClient["Service"]["createThread"] = Effect.fn("AzureDevOpsClient.createThread")(
-    function* ({ context, token, content, threadContext }: CreateThreadInput) {
+    function* ({ context, token, content, threadContext, status = 1 }: CreateThreadInput) {
       const client = makeProjectClient(context, token, httpClient)
       const request = HttpClientRequest.post(`${buildPullRequestPath(context)}/threads`).pipe(
         HttpClientRequest.setUrlParams({
@@ -730,7 +730,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
             commentType: 1,
           },
         ],
-        status: 1,
+        status,
         threadContext,
       }).pipe(Effect.mapError(toAzureDevOpsClientError(request)))
 
