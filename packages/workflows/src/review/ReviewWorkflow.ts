@@ -669,6 +669,7 @@ export const planReviewWorkflow = (
       const actions = reconcileThreads({
         existingThreads,
         summaryContent,
+        summaryVerdict: previousSummaryState.verdict,
         inlineFindings: [],
         resolvedManagedFindingIds: [],
         reviewMode,
@@ -824,6 +825,7 @@ export const planReviewWorkflow = (
     const actions = reconcileThreads({
       existingThreads,
       summaryContent,
+      summaryVerdict: summaryState.verdict,
       inlineFindings: reviewResult.inlineFindings,
       resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
       reviewMode,
@@ -881,6 +883,7 @@ export const runReviewWorkflow = (config: ReviewWorkflowConfig) =>
         token: config.systemAccessToken,
         dryRun: config.dryRun,
         summaryContent: exit.value.summaryContent,
+        summaryVerdict: exit.value.summaryState.verdict,
         inlineFindings: exit.value.inlineFindings,
         resolvedManagedFindingIds: exit.value.resolvedManagedFindingIds,
         reviewMode: exit.value.reviewMode,

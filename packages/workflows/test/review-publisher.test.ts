@@ -33,6 +33,7 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         summaryContent,
+        summaryVerdict: "concerns",
         inlineFindings: [finding],
         resolvedManagedFindingIds: [],
         reviewMode: "full",
@@ -72,6 +73,7 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         summaryContent,
+        summaryVerdict: "concerns",
         inlineFindings: [finding],
         resolvedManagedFindingIds: [3],
         reviewMode: "full",
@@ -105,6 +107,38 @@ describe("review publisher", () => {
     expect(updateStatusCalls).toEqual([1, 2, 3])
   })
 
+  test("resolves the existing summary thread when the review passes", async () => {
+    const updateStatusCalls: Array<{ threadId: number; status: number }> = []
+
+    await Effect.runPromise(
+      publishReview({
+        context,
+        token,
+        dryRun: false,
+        summaryContent,
+        summaryVerdict: "pass",
+        inlineFindings: [],
+        resolvedManagedFindingIds: [],
+        reviewMode: "full",
+        scopedChangedLinesByFile,
+        scopedDeletedLinesByFile,
+      }).pipe(
+        Effect.provideService(
+          AzureDevOpsClient,
+          makeAzureDevOpsClient({
+            listThreads: () => Effect.succeed([makeManagedSummaryThread()]),
+            updateThreadStatus: (input) =>
+              Effect.sync(() => {
+                updateStatusCalls.push({ threadId: input.threadId, status: input.status })
+              }),
+          }),
+        ),
+      ),
+    )
+
+    expect(updateStatusCalls).toEqual([{ threadId: 1, status: 2 }])
+  })
+
   test("surfaces comment post failures", async () => {
     const finding = makeReviewFinding()
 
@@ -114,6 +148,7 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         summaryContent,
+        summaryVerdict: "concerns",
         inlineFindings: [finding],
         resolvedManagedFindingIds: [],
         reviewMode: "full",
@@ -172,6 +207,7 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         summaryContent,
+        summaryVerdict: "concerns",
         inlineFindings: [finding],
         resolvedManagedFindingIds: [],
         reviewMode: "full",
@@ -215,6 +251,7 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         summaryContent,
+        summaryVerdict: "concerns",
         inlineFindings: [],
         resolvedManagedFindingIds: [],
         reviewMode: "skipped",

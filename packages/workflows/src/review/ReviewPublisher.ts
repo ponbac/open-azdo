@@ -1,20 +1,21 @@
 import { Effect } from "effect"
 import type { Redacted } from "effect"
 import type { AzureContext } from "@open-azdo/azdo/context"
-import { AzureDevOpsClient } from "@open-azdo/azdo/client"
+import { AzureDevOpsClient, type WritableThreadStatus } from "@open-azdo/azdo/client"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import { normalizePath } from "@open-azdo/core/paths"
 
 import type { ReviewMode } from "./ReviewContext"
 import type { ManagedReviewState, ThreadAction } from "./ThreadReconciliation"
 import { buildSummaryComment, findManagedSummaryThread, reconcileThreads } from "./ThreadReconciliation"
-import type { ReviewFinding } from "./ReviewOutput"
+import type { NormalizedReviewResult, ReviewFinding } from "./ReviewOutput"
 
 export type PublishReviewInput = {
   readonly context: AzureContext
   readonly token: Redacted.Redacted<string>
   readonly dryRun: boolean
   readonly summaryContent: string
+  readonly summaryVerdict: NormalizedReviewResult["verdict"]
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
   readonly resolvedManagedFindingIds: ReadonlyArray<number>
   readonly reviewMode: ReviewMode
@@ -50,6 +51,11 @@ const createInlineThreadContext = (finding: ReviewFinding) => ({
   rightFileEnd: { line: finding.endLine ?? finding.line, offset: 1 },
 })
 
+/**
+ * Creates a thread with the given comment, or rewrites the managed comment of an existing thread.
+ * Either way the thread ends up in `status`, so a resolved thread is reopened (or vice versa) to
+ * match the latest review.
+ */
 const upsertThreadComment = (
   client: AzureDevOpsClient["Service"],
   context: AzureContext,
@@ -58,9 +64,10 @@ const upsertThreadComment = (
   threadContext: Record<string, unknown> | undefined,
   existingThread: ExistingThread | undefined,
   commentId: number | undefined,
+  status: WritableThreadStatus,
 ) =>
   !existingThread || !commentId
-    ? client.createThread({ context, token, content, threadContext })
+    ? client.createThread({ context, token, content, threadContext, status })
     : Effect.all([
         client.updateComment({
           context,
@@ -73,7 +80,7 @@ const upsertThreadComment = (
           context,
           token,
           threadId: existingThread.id,
-          status: 1,
+          status,
         }),
       ]).pipe(Effect.asVoid)
 
@@ -84,7 +91,8 @@ const upsertSummaryThread = (
   content: string,
   existingThread: ExistingThread | undefined,
   commentId: number | undefined,
-) => upsertThreadComment(client, context, token, content, undefined, existingThread, commentId)
+  resolved: boolean,
+) => upsertThreadComment(client, context, token, content, undefined, existingThread, commentId, resolved ? 2 : 1)
 
 const upsertFindingThread = (
   client: AzureDevOpsClient["Service"],
@@ -94,7 +102,8 @@ const upsertFindingThread = (
   finding: ReviewFinding,
   existingThread: ExistingThread | undefined,
   commentId: number | undefined,
-) => upsertThreadComment(client, context, token, content, createInlineThreadContext(finding), existingThread, commentId)
+) =>
+  upsertThreadComment(client, context, token, content, createInlineThreadContext(finding), existingThread, commentId, 1)
 
 const applyThreadAction = (
   client: AzureDevOpsClient["Service"],
@@ -104,7 +113,15 @@ const applyThreadAction = (
 ) => {
   switch (action.type) {
     case "upsert-summary":
-      return upsertSummaryThread(client, context, token, action.content, action.existingThread, action.commentId)
+      return upsertSummaryThread(
+        client,
+        context,
+        token,
+        action.content,
+        action.existingThread,
+        action.commentId,
+        action.resolved,
+      )
     case "upsert-finding":
       return upsertFindingThread(
         client,
@@ -130,6 +147,7 @@ export const publishReview = ({
   token,
   dryRun,
   summaryContent,
+  summaryVerdict,
   inlineFindings,
   resolvedManagedFindingIds,
   reviewMode,
@@ -142,6 +160,7 @@ export const publishReview = ({
     const actions = reconcileThreads({
       existingThreads,
       summaryContent,
+      summaryVerdict,
       inlineFindings,
       resolvedManagedFindingIds,
       reviewMode,
@@ -190,6 +209,7 @@ export const publishFailureSummary = ({
         summaryContent,
         existingSummary?.thread,
         existingSummary?.commentId,
+        false,
       )
     }
   })

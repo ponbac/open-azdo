@@ -130,6 +130,7 @@ describe("thread reconciliation", () => {
     const actions = reconcileThreads({
       existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(previousFinding, 3)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
+      summaryVerdict: "concerns",
       inlineFindings: [currentFinding],
       resolvedManagedFindingIds: [],
       reviewMode: "follow-up",
@@ -198,6 +199,7 @@ describe("thread reconciliation", () => {
     const actions = reconcileThreads({
       existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(resolvedFinding, 3)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
+      summaryVerdict: "concerns",
       inlineFindings: [],
       resolvedManagedFindingIds: [3],
       reviewMode: "follow-up",
@@ -277,6 +279,7 @@ describe("thread reconciliation", () => {
         makeManagedFindingThread(explicitlyResolvedFinding, 3),
       ],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
+      summaryVerdict: "concerns",
       inlineFindings: [linkedFinding],
       resolvedManagedFindingIds: [999, 2, 3, 3],
       reviewMode: "full",
@@ -293,6 +296,7 @@ describe("thread reconciliation", () => {
     const actions = reconcileThreads({
       existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)],
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
+      summaryVerdict: "concerns",
       inlineFindings: [makeReviewFinding()],
       resolvedManagedFindingIds: [],
       reviewMode: "skipped",

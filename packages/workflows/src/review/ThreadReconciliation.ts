@@ -89,6 +89,8 @@ export type ThreadAction =
   | {
       readonly type: "upsert-summary"
       readonly content: string
+      /** Whether the summary thread should be left resolved rather than active (passing reviews). */
+      readonly resolved: boolean
       readonly existingThread: ExistingThread | undefined
       readonly commentId: number | undefined
     }
@@ -107,6 +109,7 @@ export type ThreadAction =
 type ReconcileThreadsInput = {
   readonly existingThreads: ReadonlyArray<ExistingThread>
   readonly summaryContent: string
+  readonly summaryVerdict: NormalizedReviewResult["verdict"]
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
   readonly resolvedManagedFindingIds: ReadonlyArray<number>
   readonly reviewMode: ReviewMode
@@ -560,6 +563,7 @@ export const mergeManagedReviewResult = ({
 export const reconcileThreads = ({
   existingThreads,
   summaryContent,
+  summaryVerdict,
   inlineFindings,
   resolvedManagedFindingIds,
   reviewMode,
@@ -572,6 +576,7 @@ export const reconcileThreads = ({
   actions.push({
     type: "upsert-summary",
     content: summaryContent,
+    resolved: summaryVerdict === "pass",
     existingThread: existingSummary?.thread,
     commentId: existingSummary?.commentId,
   })

@@ -10,9 +10,12 @@ export type AzureRequestContext = {
   readonly token: Redacted.Redacted<string>
 }
 
+/** Azure DevOps pull-request thread status codes this client writes: `1` active, `2` fixed/resolved. */
+export type WritableThreadStatus = 1 | 2
+
 export type UpdateThreadStatusInput = AzureRequestContext & {
   readonly threadId: number
-  readonly status: 1 | 2
+  readonly status: WritableThreadStatus
 }
 
 export type UpdateCommentInput = AzureRequestContext & {
@@ -24,6 +27,8 @@ export type UpdateCommentInput = AzureRequestContext & {
 export type CreateThreadInput = AzureRequestContext & {
   readonly content: string
   readonly threadContext: Record<string, unknown> | undefined
+  /** Azure DevOps thread status for the new thread. Defaults to `1` (active). */
+  readonly status?: WritableThreadStatus | undefined
 }
 
 export interface AzureDevOpsClientShape {

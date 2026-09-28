@@ -144,6 +144,7 @@ const SandboxPreviewActionSchema = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("upsert-summary"),
     content: Schema.String,
+    resolved: Schema.optionalKey(Schema.Boolean),
     existingThreadId: Schema.optionalKey(Schema.Int),
     commentId: Schema.optionalKey(Schema.Int),
   }),
@@ -220,6 +221,7 @@ export const toSandboxPreviewAction = (action: ThreadAction): SandboxPreviewActi
       return {
         type: action.type,
         content: action.content,
+        resolved: action.resolved,
         ...(action.existingThread ? { existingThreadId: action.existingThread.id } : {}),
         ...(action.commentId !== undefined ? { commentId: action.commentId } : {}),
       }
@@ -266,12 +268,14 @@ const upsertPreviewThread = ({
   commentId,
   content,
   threadContext,
+  status = 1,
 }: {
   readonly threads: SandboxThread[]
   readonly existingThreadId: number | undefined
   readonly commentId: number | undefined
   readonly content: string
   readonly threadContext?: SandboxThread["threadContext"]
+  readonly status?: 1 | 2
 }) => {
   if (existingThreadId !== undefined) {
     const index = threads.findIndex((thread) => thread.id === existingThreadId)
@@ -279,7 +283,7 @@ const upsertPreviewThread = ({
     if (index >= 0 && existing) {
       threads[index] = {
         ...existing,
-        status: 1,
+        status,
         comments: appendPreviewComment(existing.comments, commentId ?? -1, content),
       }
       return
@@ -288,7 +292,7 @@ const upsertPreviewThread = ({
 
   threads.push({
     id: nextPreviewThreadId(threads),
-    status: 1,
+    status,
     comments: appendPreviewComment([], -1, content),
     ...(threadContext ? { threadContext } : {}),
   })
@@ -308,6 +312,7 @@ export const projectPreviewThreads = (
           existingThreadId: action.existingThreadId,
           commentId: action.commentId,
           content: action.content,
+          status: action.resolved ? 2 : 1,
         })
         break
       }
