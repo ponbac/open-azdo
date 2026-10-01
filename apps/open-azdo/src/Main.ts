@@ -1,7 +1,7 @@
 import * as BunRuntime from "@effect/platform-bun/BunRuntime"
 
 import { Effect } from "effect"
-import * as Command from "effect/unstable/cli/Command"
+import * as Command from "effect/cli/Command"
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 
 import { openAzdoCli } from "./Cli"

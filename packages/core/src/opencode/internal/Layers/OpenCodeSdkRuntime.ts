@@ -2,8 +2,8 @@ import { createServer } from "node:net"
 
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 import type { AssistantMessage, Event, Part, SessionStatus, Todo, ToolPart } from "@opencode-ai/sdk/v2"
-import * as ChildProcess from "effect/unstable/process/ChildProcess"
-import { ChildProcessSpawner, type ChildProcessHandle } from "effect/unstable/process/ChildProcessSpawner"
+import * as ChildProcess from "effect/process/ChildProcess"
+import { ChildProcessSpawner, type ChildProcessHandle } from "effect/process/ChildProcessSpawner"
 
 import { Duration, Effect, Fiber, Layer, Option, Ref, Stream } from "effect"
 
@@ -736,7 +736,11 @@ const createSession = (
  * own cancellation for the async subscription handshake instead of introducing
  * a separate controller only to bridge into the foreign API.
  */
-export const subscribeToOpenCodeEvents = ({ client }: { readonly client: OpenCodeEventClient }) =>
+export const subscribeToOpenCodeEvents = ({
+  client,
+}: {
+  readonly client: OpenCodeEventClient
+}): Effect.Effect<Awaited<ReturnType<OpenCodeEventClient["event"]["subscribe"]>>, OpenCodeInvocationError> =>
   Effect.tryPromise({
     try: (signal) => client.event.subscribe({}, { signal }),
     catch: (error) =>

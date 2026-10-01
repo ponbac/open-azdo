@@ -1,4 +1,4 @@
-import { ServiceMap } from "effect"
+import { Context } from "effect"
 import type { Duration } from "effect/Duration"
 import type { Effect } from "effect"
 
@@ -24,4 +24,4 @@ export interface GitExecShape {
   readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>
 }
 
-export class GitExec extends ServiceMap.Service<GitExec, GitExecShape>()("open-azdo/git/GitExec") {}
+export class GitExec extends Context.Service<GitExec, GitExecShape>()("open-azdo/git/GitExec") {}

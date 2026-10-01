@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Cause, Effect, Exit, Layer, Result } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient } from "effect/http"
 
 import { AzureDevOpsClient, AzureDevOpsClientLive } from "@open-azdo/azdo/client"
 import { type FetchLike, makeFetchMock, makeAzureContext, systemToken } from "./helpers"

@@ -1,11 +1,11 @@
 import { Schema } from "effect"
 
-export class PromptFileError extends Schema.TaggedErrorClass<PromptFileError>()("PromptFileError", {
+export class PromptFileError extends Schema.TaggedError<PromptFileError>()("PromptFileError", {
   message: Schema.String,
   path: Schema.String,
 }) {}
 
-export class ReviewOutputValidationError extends Schema.TaggedErrorClass<ReviewOutputValidationError>()(
+export class ReviewOutputValidationError extends Schema.TaggedError<ReviewOutputValidationError>()(
   "ReviewOutputValidationError",
   {
     message: Schema.String,

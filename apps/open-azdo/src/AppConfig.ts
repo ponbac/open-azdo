@@ -1,4 +1,4 @@
-import { Config, Effect, Layer, Option, Redacted, Schema, ServiceMap } from "effect"
+import { Config, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
 import * as Duration from "effect/Duration"
 
 import { ConfigError } from "./errors"
@@ -65,7 +65,7 @@ export type AppConfigShape = {
   readonly buildUri?: string
 }
 
-export class AppConfig extends ServiceMap.Service<AppConfig, AppConfigShape>()("open-azdo/config/AppConfig") {}
+export class AppConfig extends Context.Service<AppConfig, AppConfigShape>()("open-azdo/config/AppConfig") {}
 
 const AppConfigSchema = Schema.Struct({
   command: Schema.Literal("review"),
@@ -118,7 +118,7 @@ type EnvConfig = {
 }
 
 const optionalStringConfig = (name: string) =>
-  Config.string(name).pipe(Config.option, Config.map(Option.getOrUndefined))
+  Config.String(name).pipe(Config.option, Config.map(Option.getOrUndefined))
 
 const EnvConfig = Config.all({
   openAzdoModel: optionalStringConfig("OPEN_AZDO_MODEL"),
@@ -233,7 +233,7 @@ export const inferOrganizationFromCollectionUrl = (collectionUrl: string) => {
 
 const resolveAppConfig = (cliInput: ReviewCliInput) =>
   Effect.gen(function* () {
-    const env = yield* EnvConfig.asEffect()
+    const env = yield* EnvConfig
     const opencodeTimeout = yield* resolveOpenCodeTimeout(
       optionOrUndefined(cliInput.opencodeTimeout) ?? env.openAzdoTimeout,
     )

@@ -1,4 +1,4 @@
-import { ServiceMap } from "effect"
+import { Context } from "effect"
 import type { Duration } from "effect/Duration"
 import type { Effect } from "effect"
 
@@ -26,6 +26,6 @@ export interface ProcessRunnerShape {
   readonly execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, CommandExecutionError>
 }
 
-export class ProcessRunner extends ServiceMap.Service<ProcessRunner, ProcessRunnerShape>()(
+export class ProcessRunner extends Context.Service<ProcessRunner, ProcessRunnerShape>()(
   "open-azdo/platform/ProcessRunner",
 ) {}
