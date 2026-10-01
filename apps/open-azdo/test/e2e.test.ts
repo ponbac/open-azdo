@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises"
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Option } from "effect"
 import * as ConfigProvider from "effect/ConfigProvider"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient } from "effect/http"
 
 import { executeReview } from "../src/Cli"
 import {

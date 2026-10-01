@@ -1,5 +1,5 @@
-import * as Command from "effect/unstable/cli/Command"
-import * as Flag from "effect/unstable/cli/Flag"
+import * as Command from "effect/cli/Command"
+import * as Flag from "effect/cli/Flag"
 
 import { Cause, Effect, Exit, Schema } from "effect"
 
@@ -93,35 +93,35 @@ const runSandboxCaptureCommand = (input: SandboxCaptureCliInput) =>
   })
 
 const reviewCommandConfig = {
-  model: Flag.string("model").pipe(Flag.optional, Flag.withDescription("Model id, for example openai/gpt-5.4.")),
-  opencodeVariant: Flag.string("opencode-variant").pipe(
+  model: Flag.String("model").pipe(Flag.optional, Flag.withDescription("Model id, for example openai/gpt-5.4.")),
+  opencodeVariant: Flag.String("opencode-variant").pipe(
     Flag.optional,
     Flag.withDescription("Provider-specific variant or reasoning level."),
   ),
-  opencodeTimeout: Flag.string("opencode-timeout").pipe(
+  opencodeTimeout: Flag.String("opencode-timeout").pipe(
     Flag.optional,
     Flag.withDescription('OpenCode timeout, for example "5 minutes" or "1 hour".'),
   ),
-  workspace: Flag.string("workspace").pipe(Flag.optional, Flag.withDescription("Workspace path.")),
-  organization: Flag.string("organization").pipe(Flag.optional, Flag.withDescription("Azure DevOps organization.")),
-  project: Flag.string("project").pipe(Flag.optional, Flag.withDescription("Azure DevOps project.")),
-  repositoryId: Flag.string("repository-id").pipe(Flag.optional, Flag.withDescription("Azure DevOps repository id.")),
-  pullRequestId: Flag.integer("pull-request-id").pipe(
+  workspace: Flag.String("workspace").pipe(Flag.optional, Flag.withDescription("Workspace path.")),
+  organization: Flag.String("organization").pipe(Flag.optional, Flag.withDescription("Azure DevOps organization.")),
+  project: Flag.String("project").pipe(Flag.optional, Flag.withDescription("Azure DevOps project.")),
+  repositoryId: Flag.String("repository-id").pipe(Flag.optional, Flag.withDescription("Azure DevOps repository id.")),
+  pullRequestId: Flag.Int("pull-request-id").pipe(
     Flag.withSchema(PositiveIntSchema),
     Flag.optional,
     Flag.withDescription("Azure DevOps pull request id."),
   ),
-  collectionUrl: Flag.string("collection-url").pipe(
+  collectionUrl: Flag.String("collection-url").pipe(
     Flag.optional,
     Flag.withDescription("Azure DevOps collection url."),
   ),
-  agent: Flag.string("agent").pipe(Flag.optional, Flag.withDescription("OpenCode agent name.")),
-  promptFile: Flag.string("prompt-file").pipe(
+  agent: Flag.String("agent").pipe(Flag.optional, Flag.withDescription("OpenCode agent name.")),
+  promptFile: Flag.String("prompt-file").pipe(
     Flag.optional,
     Flag.withDescription("Path to an additional prompt file."),
   ),
-  dryRun: Flag.boolean("dry-run").pipe(Flag.withDefault(false), Flag.withDescription("Do not publish comments.")),
-  json: Flag.boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Emit machine-readable JSON.")),
+  dryRun: Flag.Boolean("dry-run").pipe(Flag.withDefault(false), Flag.withDescription("Do not publish comments.")),
+  json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Emit machine-readable JSON.")),
 } as const
 
 export const reviewCommand = Command.make("review", reviewCommandConfig).pipe(
@@ -130,30 +130,30 @@ export const reviewCommand = Command.make("review", reviewCommandConfig).pipe(
 )
 
 const sandboxCaptureCommandConfig = {
-  model: Flag.string("model").pipe(Flag.optional, Flag.withDescription("Model id, for example openai/gpt-5.4.")),
-  opencodeVariant: Flag.string("opencode-variant").pipe(
+  model: Flag.String("model").pipe(Flag.optional, Flag.withDescription("Model id, for example openai/gpt-5.4.")),
+  opencodeVariant: Flag.String("opencode-variant").pipe(
     Flag.optional,
     Flag.withDescription("Provider-specific variant or reasoning level."),
   ),
-  opencodeTimeout: Flag.string("opencode-timeout").pipe(
+  opencodeTimeout: Flag.String("opencode-timeout").pipe(
     Flag.optional,
     Flag.withDescription('OpenCode timeout, for example "5 minutes" or "1 hour".'),
   ),
-  workspace: Flag.string("workspace").pipe(Flag.optional, Flag.withDescription("Workspace path.")),
-  organization: Flag.string("organization").pipe(Flag.optional, Flag.withDescription("Azure DevOps organization.")),
-  project: Flag.string("project").pipe(Flag.optional, Flag.withDescription("Azure DevOps project.")),
-  repositoryId: Flag.string("repository-id").pipe(Flag.optional, Flag.withDescription("Azure DevOps repository id.")),
-  pullRequestId: Flag.integer("pull-request-id").pipe(
+  workspace: Flag.String("workspace").pipe(Flag.optional, Flag.withDescription("Workspace path.")),
+  organization: Flag.String("organization").pipe(Flag.optional, Flag.withDescription("Azure DevOps organization.")),
+  project: Flag.String("project").pipe(Flag.optional, Flag.withDescription("Azure DevOps project.")),
+  repositoryId: Flag.String("repository-id").pipe(Flag.optional, Flag.withDescription("Azure DevOps repository id.")),
+  pullRequestId: Flag.Int("pull-request-id").pipe(
     Flag.withSchema(PositiveIntSchema),
     Flag.optional,
     Flag.withDescription("Azure DevOps pull request id."),
   ),
-  collectionUrl: Flag.string("collection-url").pipe(
+  collectionUrl: Flag.String("collection-url").pipe(
     Flag.optional,
     Flag.withDescription("Azure DevOps collection url."),
   ),
-  output: Flag.string("output").pipe(Flag.optional, Flag.withDescription("Output path for the sandbox capture JSON.")),
-  json: Flag.boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Emit machine-readable JSON.")),
+  output: Flag.String("output").pipe(Flag.optional, Flag.withDescription("Output path for the sandbox capture JSON.")),
+  json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Emit machine-readable JSON.")),
 } as const
 
 export const sandboxCaptureCommand = Command.make("capture", sandboxCaptureCommandConfig).pipe(

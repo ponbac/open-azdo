@@ -1,4 +1,4 @@
-import { ServiceMap } from "effect"
+import { Context } from "effect"
 import type { Effect, Redacted } from "effect"
 
 import type { AzureContext } from "../context"
@@ -54,6 +54,6 @@ export interface AzureDevOpsClientShape {
   ) => Effect.Effect<void, AzureDevOpsHttpError | AzureDevOpsDecodeError>
 }
 
-export class AzureDevOpsClient extends ServiceMap.Service<AzureDevOpsClient, AzureDevOpsClientShape>()(
+export class AzureDevOpsClient extends Context.Service<AzureDevOpsClient, AzureDevOpsClientShape>()(
   "open-azdo/azdo/AzureDevOpsClient",
 ) {}

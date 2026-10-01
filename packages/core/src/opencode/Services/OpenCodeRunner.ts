@@ -1,5 +1,5 @@
 import type { OutputFormat } from "@opencode-ai/sdk/v2"
-import { ServiceMap } from "effect"
+import { Context } from "effect"
 import type { Duration } from "effect/Duration"
 import type { Effect } from "effect"
 
@@ -53,6 +53,6 @@ export interface OpenCodeRunnerShape {
   ) => Effect.Effect<OpenCodeRunResult, OpenCodeInvocationError | OpenCodeOutputError>
 }
 
-export class OpenCodeRunner extends ServiceMap.Service<OpenCodeRunner, OpenCodeRunnerShape>()(
+export class OpenCodeRunner extends Context.Service<OpenCodeRunner, OpenCodeRunnerShape>()(
   "open-azdo/opencode/OpenCodeRunner",
 ) {}

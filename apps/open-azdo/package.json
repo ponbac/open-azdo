@@ -29,8 +29,8 @@
     "prepublishOnly": "bun install --cwd ../.. --frozen-lockfile && bun run --cwd ../.. check && bun run build"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-beta.33",
-    "effect": "4.0.0-beta.33"
+    "@effect/platform-bun": "4.0.0",
+    "effect": "4.0.0"
   },
   "devDependencies": {
     "@open-azdo/sandbox": "workspace:*"

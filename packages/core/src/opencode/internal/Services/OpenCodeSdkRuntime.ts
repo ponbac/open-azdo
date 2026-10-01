@@ -1,6 +1,6 @@
 import type { Config } from "@opencode-ai/sdk/v2"
 
-import { ServiceMap } from "effect"
+import { Context } from "effect"
 import type * as Duration from "effect/Duration"
 import type { Effect } from "effect"
 
@@ -36,6 +36,6 @@ export interface OpenCodeSdkRuntimeShape {
   ) => Effect.Effect<OpenCodeSdkPromptResult, OpenCodeInvocationError | OpenCodeOutputError>
 }
 
-export class OpenCodeSdkRuntime extends ServiceMap.Service<OpenCodeSdkRuntime, OpenCodeSdkRuntimeShape>()(
+export class OpenCodeSdkRuntime extends Context.Service<OpenCodeSdkRuntime, OpenCodeSdkRuntimeShape>()(
   "open-azdo/opencode/internal/OpenCodeSdkRuntime",
 ) {}

@@ -1,11 +1,5 @@
 import { Effect, Layer, Schema, type Redacted } from "effect"
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientError,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 
 import { logInfo } from "@open-azdo/core/logging"
 

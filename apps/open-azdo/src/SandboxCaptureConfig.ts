@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { dirname, join, parse, resolve } from "node:path"
 
-import { Config, Effect, Layer, Option, Redacted, Schema, ServiceMap } from "effect"
+import { Config, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
 import * as Duration from "effect/Duration"
 
 import { ConfigError } from "./errors"
@@ -42,12 +42,12 @@ export type SandboxCaptureConfigShape = {
   readonly accessToken: Redacted.Redacted<string>
 }
 
-export class SandboxCaptureConfig extends ServiceMap.Service<SandboxCaptureConfig, SandboxCaptureConfigShape>()(
+export class SandboxCaptureConfig extends Context.Service<SandboxCaptureConfig, SandboxCaptureConfigShape>()(
   "open-azdo/config/SandboxCaptureConfig",
 ) {}
 
 const optionalStringConfig = (name: string) =>
-  Config.string(name).pipe(Config.option, Config.map(Option.getOrUndefined))
+  Config.String(name).pipe(Config.option, Config.map(Option.getOrUndefined))
 
 const EnvConfig = Config.all({
   model: optionalStringConfig("OPEN_AZDO_LIVE_MODEL"),
@@ -186,7 +186,7 @@ const requireInt = (value: string | number | undefined, name: string) => {
 
 const resolveSandboxCaptureConfig = (input: SandboxCaptureCliInput) =>
   Effect.gen(function* () {
-    const env = yield* EnvConfig.asEffect()
+    const env = yield* EnvConfig
     const collectionUrl = optionOrUndefined(input.collectionUrl) ?? env.collectionUrl
     const organization =
       optionOrUndefined(input.organization) ??
