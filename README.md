@@ -113,3 +113,15 @@ Reference repositories and Effect API material live under `.reference/`. Refresh
 ```bash
 ./scripts/pull-ref-repos.sh
 ```
+
+The ignored Effect source clone lives at `.reference/effect` and is pinned to
+`Effect-TS/effect` tag `effect@4.0.0`, commit
+`67ba4e46a11ccda0b6761578bfd22c04ae00167d`, matching the workspace dependencies.
+To refresh only Effect without updating the other reference repositories, run:
+
+```bash
+./scripts/pull-ref-repos.sh --effect-only
+```
+
+This replaces the former `.reference/effect-smol` beta reference. Reference source
+files stay outside version control; the refresh script and release pin are tracked.
