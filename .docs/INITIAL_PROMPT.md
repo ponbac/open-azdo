@@ -11,9 +11,9 @@ Command mode risk — AI agent gets full repo write access and can push commits.
 Hardcoded port — OpenCode server always binds to 127.0.0.1:4096, so concurrent runs on the same agent would conflict
 Silent failures — Review comment script catches errors and exit(0), so the AI never knows a comment failed to post
 
-The CLI should be built with Effect v4 beta, here is a great inspiration for coding style: https://github.com/kitlangton/tailcode. Also copy the linting and formatting with ox from there, along with other great dependencies and patterns. Make sure that the newest versions of these packages are used.
+The CLI should be built with Effect v4 stable, here is a great inspiration for coding style: https://github.com/kitlangton/tailcode. Also copy the linting and formatting with ox from there, along with other great dependencies and patterns. Make sure that the newest versions of these packages are used.
 
-Also grab the entire Effect v4 beta: https://effect.website/blog/releases/effect/40-beta/ and put it under .reference
+Also grab the canonical Effect source from https://github.com/Effect-TS/effect.git at tag `effect@4.0.0` and put it under `.reference/effect`. Use https://effect.website/blog/releases/effect/40 for stable release context.
 
 Rememeber that Effect has a ton of great modules for practically everything, which can make this implementation secure, concise, and easy to read.
 

@@ -1,30 +1,33 @@
 # Open-AZDO Secure Review CLI
 
 ## Summary
+
 - Build `open-azdo` as a published Bun CLI, not a Marketplace extension.
 - V1 is review-only. No repo edits, commits, pushes, or comment-triggered command mode.
 - The CLI uses the Azure Pipeline checkout workspace, not PAT-based clone flows.
 - OpenCode is invoked with `opencode run --format json`; no local SDK server and no fixed port.
-- Bun built-ins are the default for `fetch`, process spawning, tempdirs, file IO, and hashing. Effect v4 beta is used for config loading, schemas, redacted secrets, structured errors, retries, scoped cleanup, and runtime composition.
+- Bun built-ins are the default for `fetch`, process spawning, tempdirs, file IO, and hashing. Effect v4 stable is used for config loading, schemas, redacted secrets, structured errors, retries, scoped cleanup, and runtime composition.
 
 ## Bootstrap / Reference Assets
+
 - Add `.reference/opencode-azdo-extension` from `https://github.com/trojanmartin/opencode-azdo-extension.git` via shallow clone.
 - Add `.reference/tailcode` from `https://github.com/kitlangton/tailcode.git` via shallow clone.
-- Add `.reference/effect-smol` from `https://github.com/Effect-TS/effect-smol.git` via shallow clone.
-- Add `.reference/effect-4.0-beta-article/index.html` as an archived snapshot of `https://effect.website/blog/releases/effect/40-beta/`.
+- Add `.reference/effect` from `https://github.com/Effect-TS/effect.git` via shallow clone, pinned to tag `effect@4.0.0` and commit `67ba4e46a11ccda0b6761578bfd22c04ae00167d`.
+- Use `https://effect.website/blog/releases/effect/40` for stable release context; consult `.reference/effect` for API source.
 - Add `scripts/pull-ref-repos.sh` with `set -euo pipefail`.
 - `scripts/pull-ref-repos.sh` removes only the managed reference directories before refresh.
-- `scripts/pull-ref-repos.sh` uses `git clone --depth 1 --filter=blob:none` for the three repos.
-- `scripts/pull-ref-repos.sh` recreates the article snapshot directory and redownloads the linked Effect 4.0 beta page.
+- `scripts/pull-ref-repos.sh` uses `git clone --depth 1 --filter=blob:none`; the Effect clone also selects `--branch 'effect@4.0.0'` and verifies the pinned commit.
+- `scripts/pull-ref-repos.sh --effect-only` refreshes only `.reference/effect`, replacing the legacy beta clone without updating unrelated reference repositories.
 - Add root `AGENTS.md` that lists each reference asset, its path, and its role.
 - `AGENTS.md` describes `opencode-azdo-extension` as the workflow reference and a negative security reference.
 - `AGENTS.md` describes `tailcode` as the Bun CLI layout, `ox` tooling, and Effect+Bun style reference.
-- `AGENTS.md` describes `effect-smol` as the canonical Effect v4 beta source reference.
-- `AGENTS.md` describes the archived article as release-context reference material.
+- `AGENTS.md` describes `.reference/effect` as the canonical Effect v4 stable source reference and records the release pin and Effect-only refresh command.
 
 ## Repository Layout
+
 - Create `package.json`, `README.md`, `SECURITY.md`, `build.ts`, `tsconfig.json`, `.oxfmtrc.json`, `bin/open-azdo.ts`, `examples/azure-pipelines.review.yml`, and the `src/` and `test/` trees.
 - Keep the main code layout as:
+
 ```text
 bin/open-azdo.ts
 src/main.ts
@@ -41,9 +44,11 @@ src/review-output.ts
 src/thread-reconciliation.ts
 test/*.test.ts
 ```
+
 - Update `.gitignore` to ignore `.reference/`, `dist/`, `node_modules/`, coverage artifacts, and temp output.
 
 ## Package / Tooling Decisions
+
 - Publish the package as `open-azdo`.
 - Use `type: "module"` and `bin: { "open-azdo": "./dist/open-azdo.js" }`.
 - Use `publishConfig.access: "public"`.
@@ -53,8 +58,9 @@ test/*.test.ts
 - Copy TailCode’s `ox` formatting style with `.oxfmtrc.json` set to `semi: false` and `printWidth: 120`.
 
 ## Dependency Baseline
-- Pin `effect` to `4.0.0-beta.33`.
-- Pin `@effect/platform-bun` to `4.0.0-beta.33`.
+
+- Pin `effect` to `4.0.0`.
+- Pin `@effect/platform-bun` to `4.0.0`.
 - Pin `@effect/language-service` to `0.80.0`.
 - Pin `oxfmt` to `0.41.0`.
 - Pin `oxlint` to `1.56.0`.
@@ -66,6 +72,7 @@ test/*.test.ts
 - Use Bun’s built-in test runner in v1 instead of Vitest.
 
 ## Scripts
+
 - `typecheck`: `tsc -p tsconfig.json --noEmit`
 - `fmt`: `oxfmt --write src bin test`
 - `fmt:check`: `oxfmt --check src bin test`
@@ -77,6 +84,7 @@ test/*.test.ts
 - `publish:npm`: `bun run check && bun run build && bun publish`
 
 ## CLI Contract
+
 - Publish one CLI binary: `open-azdo`.
 - Expose one v1 subcommand: `open-azdo review`.
 - Require `--model <provider/model>` or `OPEN_AZDO_MODEL`.
@@ -95,6 +103,7 @@ test/*.test.ts
 - Exit non-zero only for operational failures.
 
 ## Important Public Types / Interfaces
+
 - `ReviewConfig`: resolved CLI and environment configuration.
 - `AzureContext`: organization, project, collection URL, repository ID, pull request ID, and build metadata.
 - `ReviewFinding`: `severity`, `confidence`, `title`, `body`, `filePath`, `line`, optional `endLine`, and optional `suggestion`.
@@ -102,6 +111,7 @@ test/*.test.ts
 - `ManagedThreadMarker`: deterministic marker data for summary and inline thread reconciliation.
 
 ## Runtime Design
+
 - `bin/open-azdo.ts` is a thin Bun entrypoint that delegates to `src/main.ts`.
 - `src/config.ts` loads flags and env, validates them with Effect Schema, and wraps secrets with `Redacted`.
 - `src/logging.ts` provides sanitized structured logging and never renders redacted values.
@@ -127,6 +137,7 @@ test/*.test.ts
 - Reruns update matching managed threads in place and mark stale managed finding threads as `fixed`.
 
 ## Commenting Strategy
+
 - Post one top-level managed summary thread on every successful run.
 - Post inline threads only for findings that map to changed lines.
 - Post inline threads only for findings with `confidence` of `medium` or `high`.
@@ -137,6 +148,7 @@ test/*.test.ts
 - Never swallow comment-post failures.
 
 ## Security Defaults
+
 - No PAT or OAuth token may appear in stdout, stderr, or thrown error messages.
 - No authenticated git clone URLs.
 - No repo edits, commits, or pushes in v1.
@@ -148,6 +160,7 @@ test/*.test.ts
 - Treat PR text and repository content as untrusted input in prompts and agent instructions.
 
 ## Reference Pipeline File
+
 - Add `examples/azure-pipelines.review.yml` as the canonical published-package example.
 - The YAML is for Azure Repos build validation and uses `trigger: none`.
 - The YAML uses `pool.vmImage: ubuntu-latest`.
@@ -161,6 +174,7 @@ test/*.test.ts
 - The README explains that the pipeline should be attached as a branch build-validation policy.
 
 ## Documentation
+
 - `README.md` explains what `open-azdo` does and why it differs from the marketplace extension.
 - `README.md` shows published-package usage with `bunx open-azdo review`.
 - `README.md` includes the Azure Pipeline example and the required env vars.
@@ -170,6 +184,7 @@ test/*.test.ts
 - `SECURITY.md` explains how secret redaction and read-only OpenCode permissions work.
 
 ## Tests and Acceptance Criteria
+
 - Config tests verify required env and flags are enforced.
 - Config tests verify `SYSTEM_COLLECTIONURI` parsing works for Azure DevOps Services and Server-style collection URLs.
 - Logging tests verify secrets remain redacted in rendered config and error output.
@@ -190,6 +205,7 @@ test/*.test.ts
 - End-to-end fixture tests run the CLI against a mocked Azure DevOps API and a fixture git repo and verify summary posting, inline posting, reconciliation markers, and exit code `0` when findings exist.
 
 ## Assumptions and Defaults
+
 - Versions are pinned to the newest observed values as of March 17, 2026.
 - The package name will be `open-azdo`; it is currently available on npm.
 - The canonical consumer flow is the published-package path with `bunx open-azdo review`.
