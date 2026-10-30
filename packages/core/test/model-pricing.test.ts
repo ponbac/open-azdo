@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import { Schema } from "effect"
 
 import { lookupModelPricing } from "@open-azdo/core/model-pricing"
 
 import {
   MODELS_DEV_SOURCE_URL,
+  ModelsDevApiResponse,
   normalizeModelsDevPricingSnapshot,
 } from "../src/model-pricing/internal/ModelsDevPricingSnapshot"
 
@@ -30,7 +32,7 @@ describe("model pricing", () => {
 
   test("normalizes the provider-keyed models.dev payload into the compact snapshot", () => {
     const snapshot = normalizeModelsDevPricingSnapshot(
-      {
+      Schema.decodeUnknownSync(ModelsDevApiResponse)({
         openai: {
           models: {
             "gpt-5.4-mini": {
@@ -68,7 +70,7 @@ describe("model pricing", () => {
         empty: {
           models: {},
         },
-      },
+      }),
       "2026-03-28T10:00:00.000Z",
     )
 

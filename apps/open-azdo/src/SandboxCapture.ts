@@ -1,17 +1,58 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 
-import { Effect } from "effect"
+import { Effect, type Types } from "effect"
 
 import { AzureDevOpsClient, createAzureContext } from "@open-azdo/azdo/client"
+import { withoutAzureDevOpsCredentials, type OpenCodeRunResult } from "@open-azdo/core/opencode"
 import { compressChangedLines, splitDiffByFile } from "@open-azdo/core/git"
-import { stringifyJson } from "@open-azdo/core/json"
-import { planReviewWorkflow, type PlannedReviewWorkflow } from "@open-azdo/workflows/review"
-import { decodeSandboxCapture, projectPreviewThreads, toSandboxPreviewAction } from "@open-azdo/sandbox/capture"
+import { planReviewWorkflow, type PlannedReviewWorkflow, type ReviewWorkflowConfig } from "@open-azdo/workflows/review"
+import {
+  decodeSandboxCapture,
+  projectPreviewThreads,
+  toSandboxPreviewAction,
+  type SandboxCapture,
+} from "@open-azdo/sandbox/capture"
 
 import { SandboxCaptureConfig } from "./SandboxCaptureConfig"
 import { prepareSandboxWorkspace } from "./live/Workspace"
 
+/** Project runtime results into the capture schema, omitting absent optional fields before persistence. */
+const captureOpenCodeResult = (result: OpenCodeRunResult) => {
+  const captured: Types.Mutable<NonNullable<SandboxCapture["review"]["openCodeResult"]>> = {
+    response: result.response,
+  }
+
+  if (result.structured !== undefined) {
+    captured.structured = result.structured
+  }
+
+  if (result.modelError !== undefined) {
+    captured.modelError = result.modelError
+  }
+
+  if (result.sessionId !== undefined) {
+    captured.sessionId = result.sessionId
+  }
+
+  if (result.usage !== undefined) {
+    const usage: Types.Mutable<NonNullable<typeof captured.usage>> = {}
+
+    if (result.usage.costUsd !== undefined) {
+      usage.costUsd = result.usage.costUsd
+    }
+
+    if (result.usage.tokens !== undefined) {
+      usage.tokens = result.usage.tokens
+    }
+
+    captured.usage = usage
+  }
+
+  return captured
+}
+
+/** Build the persisted preview from the planned review without publishing Azure DevOps mutations. */
 const buildSandboxCapture = ({
   config,
   planned,
@@ -22,6 +63,52 @@ const buildSandboxCapture = ({
   readonly workspaceMode: "provided" | "temporary"
 }) => {
   const actions = planned.actions.map(toSandboxPreviewAction)
+
+  const summaryPass: Types.Mutable<SandboxCapture["review"]["summaryPass"]> = {
+    fallbackUsed: planned.summaryFallbackUsed,
+    subjects: [...planned.summarySubjects],
+  }
+
+  if (planned.summaryPrompt) {
+    summaryPass.prompt = planned.summaryPrompt
+  }
+
+  if (planned.summaryResultSource) {
+    summaryPass.resultSource = planned.summaryResultSource
+  }
+
+  if (planned.summaryOpenCodeResult) {
+    summaryPass.openCodeResult = captureOpenCodeResult(planned.summaryOpenCodeResult)
+  }
+
+  if (planned.summaryPassOutput) {
+    summaryPass.result = planned.summaryPassOutput
+  }
+
+  const review: Types.Mutable<SandboxCapture["review"]> = {
+    mode: planned.reviewMode,
+    summaryPass,
+    summaryState: planned.summaryState,
+    summaryContent: planned.summaryContent,
+    actions,
+    previewThreads: projectPreviewThreads(planned.existingThreads, actions),
+  }
+
+  if (planned.prompt) {
+    review.prompt = planned.prompt
+  }
+
+  if (planned.reviewResultSource) {
+    review.resultSource = planned.reviewResultSource
+  }
+
+  if (planned.openCodeResult) {
+    review.openCodeResult = captureOpenCodeResult(planned.openCodeResult)
+  }
+
+  if (planned.reviewResult) {
+    review.result = planned.reviewResult
+  }
 
   return {
     capture: decodeSandboxCapture({
@@ -50,25 +137,7 @@ const buildSandboxCapture = ({
           ),
         })),
       },
-      review: {
-        mode: planned.reviewMode,
-        ...(planned.prompt ? { prompt: planned.prompt } : {}),
-        ...(planned.reviewResultSource ? { resultSource: planned.reviewResultSource } : {}),
-        ...(planned.openCodeResult ? { openCodeResult: planned.openCodeResult } : {}),
-        ...(planned.reviewResult ? { result: planned.reviewResult } : {}),
-        summaryPass: {
-          ...(planned.summaryPrompt ? { prompt: planned.summaryPrompt } : {}),
-          ...(planned.summaryResultSource ? { resultSource: planned.summaryResultSource } : {}),
-          ...(planned.summaryOpenCodeResult ? { openCodeResult: planned.summaryOpenCodeResult } : {}),
-          ...(planned.summaryPassOutput ? { result: planned.summaryPassOutput } : {}),
-          fallbackUsed: planned.summaryFallbackUsed,
-          subjects: [...planned.summarySubjects],
-        },
-        summaryState: planned.summaryState,
-        summaryContent: planned.summaryContent,
-        actions,
-        previewThreads: projectPreviewThreads(planned.existingThreads, actions),
-      },
+      review,
     }),
     actions,
   }
@@ -91,19 +160,26 @@ export const executeSandboxCapture = Effect.scoped(
       token: config.accessToken,
     })
 
-    const plannedConfig = {
+    const plannedConfig: Types.Mutable<ReviewWorkflowConfig> = {
       ...config,
       systemAccessToken: config.accessToken,
       workspace: preparedWorkspace.path,
       agent: "azdo-review",
       dryRun: true,
-      inheritedEnv: Bun.env,
+      inheritedEnv: withoutAzureDevOpsCredentials(Bun.env),
       forceFullReview: true,
-      ...(metadata.sourceCommitId ? { sourceCommitId: metadata.sourceCommitId } : {}),
-      ...(metadata.targetRefName ? { targetBranch: metadata.targetRefName } : {}),
+    }
+
+    if (metadata.sourceCommitId) {
+      plannedConfig.sourceCommitId = metadata.sourceCommitId
+    }
+
+    if (metadata.targetRefName) {
+      plannedConfig.targetBranch = metadata.targetRefName
     }
 
     const planned = yield* planReviewWorkflow(plannedConfig, azureContext, undefined)
+
     const { actions, capture } = buildSandboxCapture({
       config,
       planned,
@@ -113,7 +189,7 @@ export const executeSandboxCapture = Effect.scoped(
     yield* Effect.tryPromise({
       try: async () => {
         await mkdir(dirname(config.output), { recursive: true })
-        await writeFile(config.output, `${stringifyJson(capture)}\n`, "utf8")
+        await writeFile(config.output, `${JSON.stringify(capture)}\n`, "utf8")
       },
       catch: (error) => new Error(String(error)),
     })
@@ -126,7 +202,8 @@ export const executeSandboxCapture = Effect.scoped(
       actionCount: actions.length,
     }
 
-    process.stdout.write(config.json ? `${stringifyJson(summary)}\n` : `Wrote sandbox capture to ${config.output}\n`)
+    process.stdout.write(config.json ? `${JSON.stringify(summary)}\n` : `Wrote sandbox capture to ${config.output}\n`)
+
     return 0
   }),
 )

@@ -1,6 +1,6 @@
 import { Context } from "effect"
 import type { Duration } from "effect/Duration"
-import type { Effect } from "effect"
+import type { Effect, Schema } from "effect"
 
 import type { OpenCodeInvocationError, OpenCodeOutputError } from "../../errors"
 
@@ -17,9 +17,10 @@ export type OpenCodeRunUsage = {
   readonly tokens?: OpenCodeRunTokens | undefined
 }
 
+/** JSON-compatible schema passed to the scoped OpenCode submission tool. */
 export type OpenCodeJsonSchemaOutputFormat = {
   readonly type: "json_schema"
-  readonly schema: Readonly<Record<string, unknown>>
+  readonly schema: Schema.JsonObject
 }
 
 /** Requested run output. V2 has no native format option; see the SDK runtime for how JSON schemas are enforced. */
@@ -32,7 +33,7 @@ export type OpenCodeModelError = {
 
 export type OpenCodeRunResult = {
   readonly response: string
-  readonly structured?: unknown
+  readonly structured?: Schema.Json
   readonly modelError?: OpenCodeModelError | undefined
   readonly sessionId?: string | undefined
   readonly usage?: OpenCodeRunUsage | undefined
@@ -49,12 +50,27 @@ export type OpenCodeRunRequest = {
   readonly format?: OpenCodeOutputFormat | undefined
 }
 
-export interface OpenCodeRunnerShape {
+/** Runs one bounded assistant review with repository inspection and shell-based verification. */
+export interface OpenCodeRunnerService {
   readonly run: (
     request: OpenCodeRunRequest,
   ) => Effect.Effect<OpenCodeRunResult, OpenCodeInvocationError | OpenCodeOutputError>
 }
 
-export class OpenCodeRunner extends Context.Service<OpenCodeRunner, OpenCodeRunnerShape>()(
+export class OpenCodeRunner extends Context.Service<OpenCodeRunner, OpenCodeRunnerService>()(
   "open-azdo/opencode/OpenCodeRunner",
 ) {}
+
+/**
+ * Build the model process environment without Azure job credentials, preserving provider credentials.
+ * Matching names without case protects Windows environments and explicitly supplied case variants.
+ * This does not isolate the parent process or remove credentials stored outside these variables.
+ */
+export const withoutAzureDevOpsCredentials = (environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
+  Object.fromEntries(
+    Object.entries(environment).filter(([name]) => {
+      const normalized = name.toUpperCase()
+
+      return normalized !== "SYSTEM_ACCESSTOKEN" && normalized !== "OPEN_AZDO_LIVE_ACCESS_TOKEN"
+    }),
+  )

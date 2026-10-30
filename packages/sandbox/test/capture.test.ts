@@ -191,15 +191,26 @@ describe("sandbox capture", () => {
     const decoded = Schema.decodeUnknownSync(SandboxCaptureSchema)(baseCapture)
 
     expect(decoded.target.pullRequestId).toBe(42)
-    expect(decoded.review.previewThreads.length).toBeGreaterThanOrEqual(decoded.baselineThreads.length)
     expect(decoded.review.summaryPass.fallbackUsed).toBe(false)
     expect(decoded.review.summaryPass.result?.highlights[0]?.subjectIds).toEqual(["inline-finding-1"])
   })
 
-  test("projects preview threads from thread actions", () => {
-    const projected = projectPreviewThreads(baseCapture.baselineThreads, baseCapture.review.actions)
+  test("updates and closes preview threads without mutating the baseline", () => {
+    const baselineThreads = [
+      ...baseCapture.baselineThreads,
+      { id: 9, status: 1, comments: [{ id: 90, content: "Resolved finding" }] },
+    ]
 
-    expect(projected.find((thread) => thread.id === 1)?.comments.at(-1)?.content).toContain("Updated finding body")
-    expect(projected.find((thread) => thread.id === 9)?.status).toBeUndefined()
+    const originalThreads = structuredClone(baselineThreads)
+
+    const actions = [...baseCapture.review.actions, { type: "close-thread" as const, existingThreadId: 99 }]
+
+    const projected = projectPreviewThreads(baselineThreads, actions)
+
+    expect(projected.find((thread) => thread.id === 1)?.comments.at(-1)?.content).toBe("Updated finding body")
+    expect(projected.find((thread) => thread.id === 9)?.status).toBe(2)
+    expect(projected.find((thread) => thread.id === 99)).toBeUndefined()
+    expect(projected).toHaveLength(baselineThreads.length)
+    expect(baselineThreads).toEqual(originalThreads)
   })
 })

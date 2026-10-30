@@ -7,7 +7,6 @@ describe("package manifest", () => {
     const runtimeDependencies = packageManifest.dependencies ?? {}
 
     for (const version of Object.values(runtimeDependencies)) {
-      expect(typeof version).toBe("string")
       expect(version.startsWith("workspace:")).toBeFalse()
     }
   })

@@ -3,40 +3,39 @@ import * as Flag from "effect/cli/Flag"
 
 import { Cause, Effect, Exit, Schema } from "effect"
 
-import { makeBaseRuntimeLayer } from "@open-azdo/core/base-runtime"
+import { BaseRuntimeLayer, JsonBaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { logError } from "@open-azdo/core/logging"
+import { withoutAzureDevOpsCredentials } from "@open-azdo/core/opencode"
 import { runReviewWorkflow } from "@open-azdo/workflows/review"
 
-import { AppConfig, type ReviewCliInput } from "./AppConfig"
+import { AppConfig, ReviewCommandInput, type ReviewCliInput } from "./AppConfig"
 import { OperationalError } from "./errors"
 import { executeSandboxCapture } from "./SandboxCapture"
-import { type SandboxCaptureCliInput } from "./SandboxCaptureConfig"
-import { makeRuntimeLayer, makeSandboxCaptureRuntimeLayer } from "./Runtime"
+import { SandboxCaptureCommandInput, type SandboxCaptureCliInput } from "./SandboxCaptureConfig"
+import { ReviewRuntimeLayer, SandboxCaptureRuntimeLayer } from "./Runtime"
 
 const PositiveIntSchema = Schema.Int.check(Schema.isGreaterThan(0))
 
 const withCliLogger = <A, E, R>(effect: Effect.Effect<A, E, R>, jsonLogs: boolean) =>
-  effect.pipe(
-    Effect.provide(
-      makeBaseRuntimeLayer({
-        jsonLogs,
-      }),
-    ),
-  )
+  effect.pipe(Effect.provide(jsonLogs ? JsonBaseRuntimeLayer : BaseRuntimeLayer))
 
 export const executeReview = Effect.gen(function* () {
   const config = yield* AppConfig
+
   return yield* runReviewWorkflow({
     ...config,
-    inheritedEnv: process.env,
+    inheritedEnv: withoutAzureDevOpsCredentials(process.env),
   })
 })
 
 export const executeReviewWithInput = (input: ReviewCliInput) =>
-  executeReview.pipe(Effect.provide(makeRuntimeLayer(input)))
+  executeReview.pipe(Effect.provide(ReviewRuntimeLayer), Effect.provideService(ReviewCommandInput, input))
 
 export const executeSandboxCaptureWithInput = (input: SandboxCaptureCliInput) =>
-  executeSandboxCapture.pipe(Effect.provide(makeSandboxCaptureRuntimeLayer(input)))
+  executeSandboxCapture.pipe(
+    Effect.provide(SandboxCaptureRuntimeLayer),
+    Effect.provideService(SandboxCaptureCommandInput, input),
+  )
 
 const runReviewCommand = (input: ReviewCliInput) =>
   Effect.gen(function* () {

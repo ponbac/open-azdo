@@ -1,15 +1,16 @@
 import { describe, expect, test } from "bun:test"
+import type { ExistingThread } from "@open-azdo/azdo/schemas"
 
 import {
   buildInlineComment,
   buildSummaryComment,
-  findManagedSummaryThread,
-  listManagedFindingThreads,
+  decodeManagedThreads,
   mergeManagedReviewResult,
   reconcileThreads,
 } from "../src/review/ThreadReconciliation"
 
 import {
+  BOT_ID,
   makeManagedReviewState,
   makeManagedFindingThread,
   makeManagedSummaryThread,
@@ -19,14 +20,42 @@ import {
 } from "./helpers"
 
 describe("thread reconciliation", () => {
+  test.each([
+    ["bot", BOT_ID, false, false, true],
+    ["human", "human-id", false, false, false],
+    ["deleted bot comment", BOT_ID, true, false, false],
+    ["deleted bot thread", BOT_ID, false, true, false],
+  ] as const)(
+    "recognizes failure-only identity from %s without granting a checkpoint",
+    (_scenario, authorId, deletedComment, deletedThread, trusted) => {
+      const comment = {
+        id: 10,
+        author: { id: authorId },
+        isDeleted: deletedComment,
+        content: 'Failed\n<!-- open-azdo-failure:{"kind":"failure"} -->',
+      }
+
+      const managed = decodeManagedThreads(
+        [{ id: 1, status: 1, isDeleted: deletedThread, comments: [comment] }],
+        BOT_ID,
+      )
+
+      expect(managed.failure?.thread.id).toBe(trusted ? 1 : undefined)
+      expect(managed.summary).toBeUndefined()
+      expect(managed.findings).toEqual([])
+      expect(managed.comments.has(comment)).toBe(trusted)
+    },
+  )
+
   test("round-trips managed review state through the summary comment", () => {
     const reviewState = makeManagedReviewState({
       reviewedCommit: "next-sha",
       pullRequestBaseRef: "base-sha",
     })
+
     const thread = makeManagedSummaryThread(reviewState)
 
-    expect(findManagedSummaryThread([thread])?.reviewState).toEqual(reviewState)
+    expect(decodeManagedThreads([thread], BOT_ID).summary?.reviewState).toEqual(reviewState)
   })
 
   test("renders summary comments with embedded review state", () => {
@@ -70,17 +99,32 @@ describe("thread reconciliation", () => {
   })
 
   test("decodes legacy v1 summary comments without review history", () => {
-    const legacyReviewState = {
-      ...makeManagedReviewState(),
-      schemaVersion: 1,
+    // This persisted v1 payload must stay independent of the current state builder and encoder.
+    const thread: ExistingThread = {
+      id: 1,
+      status: 1,
+      comments: [
+        {
+          id: 10,
+          author: { id: BOT_ID },
+          content:
+            'Verdict: **concerns**\n\n<!-- open-azdo-review:{"schemaVersion":1,"reviewedCommit":"legacy-sha","pullRequestBaseRef":"legacy-base","verdict":"concerns","severityCounts":{"low":0,"medium":0,"high":1,"critical":0},"findingsCount":1,"inlineFindingsCount":1,"unmappedNotesCount":0} -->',
+        },
+      ],
     }
-    delete legacyReviewState.reviewHistory
 
-    const thread = makeManagedSummaryThread(legacyReviewState)
+    const decoded = decodeManagedThreads([thread], BOT_ID).summary?.reviewState
 
-    const decoded = findManagedSummaryThread([thread])?.reviewState
-    expect(decoded?.schemaVersion).toBe(1)
-    expect(decoded?.reviewHistory).toBeUndefined()
+    expect(decoded).toEqual({
+      schemaVersion: 1,
+      reviewedCommit: "legacy-sha",
+      pullRequestBaseRef: "legacy-base",
+      verdict: "concerns",
+      severityCounts: { low: 0, medium: 0, high: 1, critical: 0 },
+      findingsCount: 1,
+      inlineFindingsCount: 1,
+      unmappedNotesCount: 0,
+    })
   })
 
   test("renders markdown-friendly inline comments with fenced suggestions", () => {
@@ -102,16 +146,20 @@ describe("thread reconciliation", () => {
       title: "Existing finding",
       filePath: "src/legacy.ts",
       line: 7,
+      body: `flow: A --> B\n${buildSummaryComment(makeSummarySnapshot())}`,
+      suggestion: "<!-- note -->",
     })
 
-    const managedFinding = listManagedFindingThreads([makeManagedFindingThread(finding, 12, 2)])[0]
+    const managedThreads = decodeManagedThreads([makeManagedFindingThread(finding, 12, 2)], BOT_ID)
+    const managedFinding = managedThreads.findings[0]
 
     expect(managedFinding?.thread.id).toBe(12)
     expect(managedFinding?.thread.status).toBe(2)
     expect(managedFinding?.commentId).toBe(120)
     expect(managedFinding?.filePath).toBe("/src/legacy.ts")
     expect(managedFinding?.line).toBe(7)
-    expect(managedFinding?.finding.title).toBe("Existing finding")
+    expect(managedFinding?.finding).toEqual(finding)
+    expect(managedThreads.summary).toBeUndefined()
   })
 
   test("updates an explicitly linked managed finding thread even when the wording changed", () => {
@@ -121,6 +169,7 @@ describe("thread reconciliation", () => {
       managedFindingId: 3,
       line: 5,
     })
+
     const previousFinding = makeReviewFinding({
       title: "Old wording",
       body: "Older phrasing.",
@@ -128,7 +177,10 @@ describe("thread reconciliation", () => {
     })
 
     const actions = reconcileThreads({
-      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(previousFinding, 3)],
+      managedThreads: decodeManagedThreads(
+        [makeManagedSummaryThread(), makeManagedFindingThread(previousFinding, 3)],
+        BOT_ID,
+      ),
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       summaryVerdict: "concerns",
       inlineFindings: [currentFinding],
@@ -138,7 +190,7 @@ describe("thread reconciliation", () => {
       scopedDeletedLinesByFile: new Map(),
     })
 
-    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding"])
+    expect(actions.map((action) => action.type)).toEqual(["upsert-finding", "upsert-summary"])
     const findingAction = actions.find((action) => action.type === "upsert-finding")
     expect(findingAction && "existingThread" in findingAction ? findingAction.existingThread?.id : undefined).toBe(3)
   })
@@ -149,16 +201,20 @@ describe("thread reconciliation", () => {
       filePath: "src/other.ts",
       line: 20,
     })
+
     const currentFinding = makeReviewFinding({
       title: "Current finding",
       line: 5,
     })
 
     const result = mergeManagedReviewResult({
-      existingThreads: [
-        makeManagedFindingThread(retainedFinding, 2),
-        makeManagedFindingThread(makeReviewFinding({ title: "Closed finding", line: 99 }), 3, 2),
-      ],
+      managedThreads: decodeManagedThreads(
+        [
+          makeManagedFindingThread(retainedFinding, 2),
+          makeManagedFindingThread(makeReviewFinding({ title: "Closed finding", line: 99 }), 3, 2),
+        ],
+        BOT_ID,
+      ),
       scopedChangedLinesByFile: new Map([
         ["src/example.ts", new Set([5])],
         ["src/other.ts", new Set([99])],
@@ -190,24 +246,48 @@ describe("thread reconciliation", () => {
     expect(result.retainedFindingsCount).toBe(1)
   })
 
-  test("closes only explicitly resolved managed findings", () => {
+  test.each([
+    ["unchanged", "src/example.ts", 20, 20],
+    ["moved", "src/moved.ts", 30, 30],
+    ["moved start-only", "src/moved.ts", 30, undefined],
+    ["literal backslash", "back\\slash.ts", 20, 20],
+  ] as const)("closes explicitly resolved findings with %s coordinates", (_scenario, filePath, line, endLine) => {
     const resolvedFinding = makeReviewFinding({
       title: "Resolved finding",
       line: 20,
+      endLine: 22,
     })
 
+    let threadContext: NonNullable<ExistingThread["threadContext"]> = {
+      filePath: `/${filePath}`,
+      rightFileStart: { line },
+    }
+
+    if (endLine !== undefined) {
+      threadContext = { ...threadContext, rightFileEnd: { line: endLine } }
+    }
+
     const actions = reconcileThreads({
-      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(resolvedFinding, 3)],
+      managedThreads: decodeManagedThreads(
+        [
+          makeManagedSummaryThread(),
+          {
+            ...makeManagedFindingThread(resolvedFinding, 3),
+            threadContext,
+          },
+        ],
+        BOT_ID,
+      ),
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       summaryVerdict: "concerns",
       inlineFindings: [],
       resolvedManagedFindingIds: [3],
       reviewMode: "follow-up",
       scopedChangedLinesByFile: new Map(),
-      scopedDeletedLinesByFile: new Map([["src/example.ts", new Set([20])]]),
+      scopedDeletedLinesByFile: new Map([[filePath, new Set([line])]]),
     })
 
-    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "close-thread"])
+    expect(actions.map((action) => action.type)).toEqual(["close-thread", "upsert-summary"])
     const closedThread = actions.find((action) => action.type === "close-thread")
     expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
   })
@@ -218,6 +298,7 @@ describe("thread reconciliation", () => {
       line: 40,
       endLine: 42,
     })
+
     const untouchedFinding = makeReviewFinding({
       title: "Untouched finding",
       filePath: "src/other.ts",
@@ -225,10 +306,10 @@ describe("thread reconciliation", () => {
     })
 
     const result = mergeManagedReviewResult({
-      existingThreads: [
-        makeManagedFindingThread(deletedRangeFinding, 2),
-        makeManagedFindingThread(untouchedFinding, 3),
-      ],
+      managedThreads: decodeManagedThreads(
+        [makeManagedFindingThread(deletedRangeFinding, 2), makeManagedFindingThread(untouchedFinding, 3)],
+        BOT_ID,
+      ),
       scopedChangedLinesByFile: new Map(),
       scopedDeletedLinesByFile: new Map([["src/example.ts", new Set([41])]]),
       reviewResult: {
@@ -267,17 +348,21 @@ describe("thread reconciliation", () => {
       title: "Linked finding",
       managedFindingId: 2,
     })
+
     const explicitlyResolvedFinding = makeReviewFinding({
       title: "Resolved finding",
       line: 3,
     })
 
     const actions = reconcileThreads({
-      existingThreads: [
-        makeManagedSummaryThread(),
-        makeManagedFindingThread(linkedFinding, 2),
-        makeManagedFindingThread(explicitlyResolvedFinding, 3),
-      ],
+      managedThreads: decodeManagedThreads(
+        [
+          makeManagedSummaryThread(),
+          makeManagedFindingThread(linkedFinding, 2),
+          makeManagedFindingThread(explicitlyResolvedFinding, 3),
+        ],
+        BOT_ID,
+      ),
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       summaryVerdict: "concerns",
       inlineFindings: [linkedFinding],
@@ -287,14 +372,27 @@ describe("thread reconciliation", () => {
       scopedDeletedLinesByFile: new Map(),
     })
 
-    expect(actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding", "close-thread"])
+    expect(actions.map((action) => action.type)).toEqual(["upsert-finding", "close-thread", "upsert-summary"])
     const closedThread = actions.find((action) => action.type === "close-thread")
     expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
   })
 
-  test("skipped mode only updates the summary thread", () => {
+  test("skipped mode only closes an active failure notice", () => {
     const actions = reconcileThreads({
-      existingThreads: [makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)],
+      managedThreads: decodeManagedThreads(
+        [
+          makeManagedSummaryThread(),
+          makeManagedFindingThread(makeReviewFinding(), 2),
+          {
+            id: 8,
+            status: 1,
+            comments: [
+              { id: 80, author: { id: BOT_ID }, content: 'Failed\n<!-- open-azdo-failure:{"kind":"failure"} -->' },
+            ],
+          },
+        ],
+        BOT_ID,
+      ),
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
       summaryVerdict: "concerns",
       inlineFindings: [makeReviewFinding()],
@@ -305,6 +403,7 @@ describe("thread reconciliation", () => {
     })
 
     expect(actions).toHaveLength(1)
-    expect(actions[0]?.type).toBe("upsert-summary")
+    expect(actions.map((action) => action.type)).toEqual(["close-thread"])
+    expect(actions[0]?.existingThread?.id).toBe(8)
   })
 })

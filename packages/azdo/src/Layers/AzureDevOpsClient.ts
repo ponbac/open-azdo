@@ -1,5 +1,7 @@
-import { Effect, Layer, Schema, type Redacted } from "effect"
+import { Effect, Layer, Option, Schema, type Redacted } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+
+import type { HttpBody } from "effect/http"
 
 import { logInfo } from "@open-azdo/core/logging"
 
@@ -14,13 +16,16 @@ import {
   type UpdateThreadStatusInput,
 } from "../Services/AzureDevOpsClient"
 import {
+  ConnectionDataResponseSchema,
   ExistingThreadsResponseSchema,
   PullRequestMetadataResponseSchema,
   PullRequestWorkItemsResponseSchema,
   WorkItemCommentsResponseSchema,
   WorkItemsBatchResponseSchema,
+  WorkItemIntegerSchema,
   readAssignedToDisplayName,
   type PullRequestWorkItem,
+  type PullRequestMetadata,
   type PullRequestWorkItemRef,
   type WorkItemBatchItem,
 } from "../Schemas"
@@ -29,20 +34,6 @@ const MAX_CONNECTED_WORK_ITEMS = 4
 const MAX_WORK_ITEM_COMMENTS = 3
 const MAX_WORK_ITEM_BATCH_IDS = 200
 const MAX_RELATED_TITLES_PER_WORK_ITEM = 4
-const WORK_ITEM_FIELDS = [
-  "System.Id",
-  "System.Title",
-  "System.WorkItemType",
-  "System.State",
-  "Microsoft.VSTS.Common.Priority",
-  "System.AssignedTo",
-  "System.Description",
-  "Microsoft.VSTS.Common.AcceptanceCriteria",
-  "Microsoft.VSTS.TCM.ReproSteps",
-  "System.IterationPath",
-  "System.AreaPath",
-  "System.Tags",
-] as const
 
 const normalizeCollectionUrl = (collectionUrl: string) => collectionUrl.replace(/\/+$/, "")
 
@@ -56,28 +47,14 @@ const buildPullRequestWorkItemsPath = (context: AzureContext) => `${buildPullReq
 
 const normalizeOptionalString = (value: string | null | undefined) => {
   const trimmed = value?.trim()
+
   return trimmed && trimmed.length > 0 ? trimmed : undefined
 }
 
-const readStringField = (fields: Record<string, unknown> | undefined, key: string) => {
-  const value = fields?.[key]
-  return typeof value === "string" ? normalizeOptionalString(value) : undefined
-}
+const decodeWorkItemId = Schema.decodeUnknownOption(WorkItemIntegerSchema.check(Schema.isGreaterThan(0)))
 
-const parseIntegerLike = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value
-  }
-
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number.parseInt(value, 10)
-    return Number.isFinite(parsed) ? parsed : undefined
-  }
-
-  return undefined
-}
-
-const readNumberField = (fields: Record<string, unknown> | undefined, key: string) => parseIntegerLike(fields?.[key])
+/** Refines external work-item IDs with the same decimal integer policy used for sparse Azure fields. */
+const parseWorkItemId = (value: string | undefined) => Option.getOrUndefined(decodeWorkItemId(value))
 
 const splitTags = (tags: string | undefined) =>
   tags
@@ -99,15 +76,14 @@ const parseWorkItemIdFromUrl = (url: string | undefined): number | undefined => 
       return undefined
     }
 
-    return parseIntegerLike(segments[apisIndex + 3])
+    return parseWorkItemId(segments[apisIndex + 3])
   } catch {
     return undefined
   }
 }
 
 const readRelationWorkItemId = (relation: NonNullable<WorkItemBatchItem["relations"]>[number]) =>
-  parseWorkItemIdFromUrl(normalizeOptionalString(relation.url ?? undefined)) ??
-  parseIntegerLike(relation.attributes?.id)
+  parseWorkItemIdFromUrl(normalizeOptionalString(relation.url ?? undefined)) ?? relation.attributes?.id
 
 const readRelationWorkItemIds = (
   relations: WorkItemBatchItem["relations"],
@@ -145,15 +121,16 @@ const chunkIds = (ids: ReadonlyArray<number>, size: number) => {
   return chunks
 }
 
-const makeProjectClient = (
-  context: AzureContext,
+/** Binds bearer authorization to requests within an explicit Azure collection or project API base. */
+const makeAuthenticatedClient = (
+  baseUrl: string,
   token: Redacted.Redacted<string>,
   httpClient: HttpClient.HttpClient,
 ) =>
   httpClient.pipe(
     HttpClient.mapRequest((request) =>
       request.pipe(
-        HttpClientRequest.prependUrl(buildProjectApiBaseUrl(context)),
+        HttpClientRequest.prependUrl(baseUrl),
         HttpClientRequest.bearerToken(token),
         HttpClientRequest.acceptJson,
       ),
@@ -162,7 +139,9 @@ const makeProjectClient = (
 
 const toAzureDevOpsClientError =
   (request: HttpClientRequest.HttpClientRequest) =>
-  (error: unknown): AzureDevOpsHttpError | AzureDevOpsDecodeError => {
+  (
+    error: HttpClientError.HttpClientError | HttpBody.HttpBodyError | Schema.SchemaError,
+  ): AzureDevOpsHttpError | AzureDevOpsDecodeError => {
     if (Schema.isSchemaError(error)) {
       return new AzureDevOpsDecodeError({
         message: "Azure DevOps response did not match the expected schema.",
@@ -224,7 +203,11 @@ const withLoggedEmptyFallback = <A>(
   }: {
     readonly onHttpMessage: string
     readonly onDecodeMessage: string
-    readonly fields: Record<string, unknown>
+    readonly fields: {
+      readonly pullRequestId?: number
+      readonly referencedWorkItems?: number
+      readonly workItemId?: number
+    }
     readonly empty: A
   },
 ): Effect.Effect<A> =>
@@ -254,7 +237,7 @@ const parseWorkItemIds = Effect.fn("AzureDevOpsClient.parseWorkItemIds")(functio
   const workItemIds: number[] = []
 
   for (const workItemRef of workItemRefs) {
-    const parsedId = parseIntegerLike(workItemRef.id)
+    const parsedId = parseWorkItemId(workItemRef.id)
     const workItemId = parseWorkItemIdFromUrl(normalizeOptionalString(workItemRef.url)) ?? parsedId
 
     if (workItemId !== undefined) {
@@ -277,11 +260,15 @@ const mapPullRequestWorkItemRefs = (
     readonly url?: string | null | undefined
   }>,
 ): PullRequestWorkItemRef[] =>
-  workItemRefs.map((workItemRef) => ({
-    id: workItemRef.id,
-    ...(workItemRef.url ? { url: workItemRef.url } : {}),
-  }))
+  workItemRefs.map((workItemRef) => {
+    let ref: PullRequestWorkItemRef = { id: workItemRef.id }
 
+    if (workItemRef.url) ref = { ...ref, url: workItemRef.url }
+
+    return ref
+  })
+
+/** Projects decoded sparse fields into prompt context, omitting unavailable enrichment values. */
 const toPullRequestWorkItem = Effect.fn("AzureDevOpsClient.toPullRequestWorkItem")(function* ({
   workItem,
   titleMap,
@@ -291,84 +278,117 @@ const toPullRequestWorkItem = Effect.fn("AzureDevOpsClient.toPullRequestWorkItem
   readonly titleMap: ReadonlyMap<number, string>
   readonly comments: PullRequestWorkItem["recentComments"]
 }) {
-  const descriptionMarkdown = yield* renderWorkItemMarkdown(readStringField(workItem.fields, "System.Description"))
-  const acceptanceCriteriaMarkdown = yield* renderWorkItemMarkdown(
-    readStringField(workItem.fields, "Microsoft.VSTS.Common.AcceptanceCriteria"),
+  const descriptionMarkdown = yield* renderWorkItemMarkdown(
+    normalizeOptionalString(workItem.fields?.["System.Description"]),
   )
+
+  const acceptanceCriteriaMarkdown = yield* renderWorkItemMarkdown(
+    normalizeOptionalString(workItem.fields?.["Microsoft.VSTS.Common.AcceptanceCriteria"]),
+  )
+
   const reproStepsMarkdown = yield* renderWorkItemMarkdown(
-    readStringField(workItem.fields, "Microsoft.VSTS.TCM.ReproSteps"),
+    normalizeOptionalString(workItem.fields?.["Microsoft.VSTS.TCM.ReproSteps"]),
   )
 
   const parentRelations = readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Hierarchy-Reverse")
   const relatedRelations = readRelationWorkItemIds(workItem.relations, "System.LinkTypes.Related")
-  const priority = readNumberField(workItem.fields, "Microsoft.VSTS.Common.Priority")
+  const priority = workItem.fields?.["Microsoft.VSTS.Common.Priority"]
   const assignedTo = readAssignedToDisplayName(workItem.fields?.["System.AssignedTo"])
-  const iterationPath = readStringField(workItem.fields, "System.IterationPath")
-  const areaPath = readStringField(workItem.fields, "System.AreaPath")
+  const iterationPath = normalizeOptionalString(workItem.fields?.["System.IterationPath"])
+  const areaPath = normalizeOptionalString(workItem.fields?.["System.AreaPath"])
   const parentId = parentRelations[0]
 
-  return {
+  let item: PullRequestWorkItem = {
     id: workItem.id,
-    title: readStringField(workItem.fields, "System.Title") ?? `Work item ${workItem.id}`,
-    workItemType: readStringField(workItem.fields, "System.WorkItemType") ?? "Work Item",
-    state: readStringField(workItem.fields, "System.State") ?? "Unknown",
-    ...(priority !== undefined ? { priority } : {}),
-    ...(assignedTo ? { assignedTo } : {}),
-    ...(iterationPath ? { iterationPath } : {}),
-    ...(areaPath ? { areaPath } : {}),
-    tags: splitTags(readStringField(workItem.fields, "System.Tags")),
-    ...(descriptionMarkdown ? { descriptionMarkdown } : {}),
-    ...(acceptanceCriteriaMarkdown ? { acceptanceCriteriaMarkdown } : {}),
-    ...(reproStepsMarkdown ? { reproStepsMarkdown } : {}),
-    ...(parentId !== undefined
-      ? {
-          parent: {
-            id: parentId,
-            ...(titleMap.get(parentId) ? { title: titleMap.get(parentId) } : {}),
-          },
-        }
-      : {}),
-    related: relatedRelations.map((id) => ({
-      id,
-      ...(titleMap.get(id) ? { title: titleMap.get(id) } : {}),
-    })),
+    title: normalizeOptionalString(workItem.fields?.["System.Title"]) ?? `Work item ${workItem.id}`,
+    workItemType: normalizeOptionalString(workItem.fields?.["System.WorkItemType"]) ?? "Work Item",
+    state: normalizeOptionalString(workItem.fields?.["System.State"]) ?? "Unknown",
+    tags: splitTags(normalizeOptionalString(workItem.fields?.["System.Tags"])),
+    related: relatedRelations.map((id) => {
+      let relation: PullRequestWorkItem["related"][number] = { id }
+      const title = titleMap.get(id)
+
+      if (title) relation = { ...relation, title }
+
+      return relation
+    }),
     recentComments: comments,
-  } satisfies PullRequestWorkItem
+  }
+
+  if (priority !== undefined) item = { ...item, priority }
+
+  if (assignedTo) item = { ...item, assignedTo }
+
+  if (iterationPath) item = { ...item, iterationPath }
+
+  if (areaPath) item = { ...item, areaPath }
+
+  if (descriptionMarkdown) item = { ...item, descriptionMarkdown }
+
+  if (acceptanceCriteriaMarkdown) item = { ...item, acceptanceCriteriaMarkdown }
+
+  if (reproStepsMarkdown) item = { ...item, reproStepsMarkdown }
+
+  if (parentId !== undefined) {
+    let parent: NonNullable<PullRequestWorkItem["parent"]> = { id: parentId }
+    const title = titleMap.get(parentId)
+
+    if (title) parent = { ...parent, title }
+    item = { ...item, parent }
+  }
+
+  return item
 })
 
 const makeAzureDevOpsClient = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient
 
+  /** Resolves collection-scoped connection data with the same bearer token used to write PR comments. */
+  const getAuthenticatedIdentity: AzureDevOpsClient["Service"]["getAuthenticatedIdentity"] = Effect.fn(
+    "AzureDevOpsClient.getAuthenticatedIdentity",
+  )(function* ({ context, token }: AzureRequestContext) {
+    const client = makeAuthenticatedClient(normalizeCollectionUrl(context.collectionUrl), token, httpClient)
+    // Microsoft uses this collection endpoint without a project segment or api-version query.
+    // https://github.com/microsoft/azure-devops-mcp/blob/main/src/tools/auth.ts
+    const request = HttpClientRequest.get("/_apis/connectionData")
+    const connectionData = yield* executeJson(client, request, ConnectionDataResponseSchema)
+
+    return connectionData.authenticatedUser.id
+  })
+
+  /** Fetches full work items with relations for the prompt, or only titles for relation enrichment. */
   const fetchWorkItemsBatch = Effect.fn("AzureDevOpsClient.fetchWorkItemsBatch")(function* ({
     context,
     token,
     ids,
-    fields,
     includeRelations,
   }: AzureRequestContext & {
     readonly ids: ReadonlyArray<number>
-    readonly fields: ReadonlyArray<string>
     readonly includeRelations: boolean
   }) {
     if (ids.length === 0) {
-      return [] as WorkItemBatchItem[]
+      return Array<WorkItemBatchItem>()
     }
 
-    const client = makeProjectClient(context, token, httpClient)
+    const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
     const request = HttpClientRequest.post("/wit/workitemsbatch").pipe(
       HttpClientRequest.setUrlParams({
         "api-version": "7.1",
       }),
     )
+
     const requestBody = {
       ids,
       errorPolicy: "omit",
       // Azure DevOps rejects workitemsbatch bodies that combine $expand=Relations with an explicit fields filter.
-      ...(includeRelations ? { $expand: "Relations" } : { fields }),
+      ...(includeRelations ? { $expand: "Relations" } : { fields: ["System.Title"] }),
     }
+
     const requestWithBody = yield* HttpClientRequest.bodyJson(request, requestBody).pipe(
       Effect.mapError(toAzureDevOpsClientError(request)),
     )
+
     const response = yield* executeJson(client, requestWithBody, WorkItemsBatchResponseSchema)
 
     return response.value ?? []
@@ -392,7 +412,6 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
           context,
           token,
           ids: chunk,
-          fields: ["System.Title"],
           includeRelations: false,
         }),
       { concurrency: "unbounded" },
@@ -400,7 +419,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
 
     return new Map(
       items
-        .map((item) => [item.id, readStringField(item.fields, "System.Title")] as const)
+        .map((item) => [item.id, normalizeOptionalString(item.fields?.["System.Title"])] as const)
         .filter((entry): entry is readonly [number, string] => entry[1] !== undefined),
     )
   })
@@ -412,7 +431,8 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
   }: AzureRequestContext & {
     readonly workItemId: number
   }) {
-    const client = makeProjectClient(context, token, httpClient)
+    const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
     const request = HttpClientRequest.get(`/wit/workItems/${workItemId}/comments`).pipe(
       HttpClientRequest.setUrlParams({
         $top: "20",
@@ -421,7 +441,9 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         "api-version": "7.1-preview.4",
       }),
     )
+
     const response = yield* executeJson(client, request, WorkItemCommentsResponseSchema)
+
     const comments = yield* Effect.forEach(
       response.comments ?? [],
       Effect.fn("AzureDevOpsClient.fetchWorkItemComments.map")(function* (comment) {
@@ -432,6 +454,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         const markdown = comment.renderedText
           ? yield* renderWorkItemMarkdown(comment.renderedText)
           : yield* normalizeWorkItemMarkdown(comment.text)
+
         if (!markdown) {
           return undefined
         }
@@ -459,7 +482,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
     readonly ids: ReadonlyArray<number>
   }) {
     if (ids.length === 0) {
-      return [] as WorkItemBatchItem[]
+      return Array<WorkItemBatchItem>()
     }
 
     const selectedWorkItems: WorkItemBatchItem[] = []
@@ -474,9 +497,9 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         context,
         token,
         ids: chunk,
-        fields: WORK_ITEM_FIELDS,
         includeRelations: true,
       })
+
       const workItemsById = new Map(workItems.map((workItem) => [workItem.id, workItem] as const))
 
       for (const workItemId of chunk) {
@@ -500,14 +523,17 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
   const getPullRequestMetadata: AzureDevOpsClient["Service"]["getPullRequestMetadata"] = Effect.fn(
     "AzureDevOpsClient.getPullRequestMetadata",
   )(function* ({ context, token }: AzureRequestContext) {
-    const client = makeProjectClient(context, token, httpClient)
+    const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
     const request = HttpClientRequest.get(buildPullRequestPath(context)).pipe(
       HttpClientRequest.setUrlParams({
         includeWorkItemRefs: "true",
         "api-version": "7.1",
       }),
     )
+
     const metadata = yield* executeJson(client, request, PullRequestMetadataResponseSchema)
+
     const rawWorkItemRefs =
       metadata.workItemRefs ??
       (yield* withLoggedEmptyFallback(
@@ -532,47 +558,52 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         },
       ))
 
-    return {
-      ...(metadata.pullRequestId !== null && metadata.pullRequestId !== undefined
-        ? { pullRequestId: metadata.pullRequestId }
-        : {}),
+    let result: PullRequestMetadata = {
       title: metadata.title,
       description: metadata.description ?? "",
-      ...(metadata.url ? { url: metadata.url } : {}),
-      ...(normalizeOptionalString(metadata.sourceRefName ?? undefined)
-        ? { sourceRefName: normalizeOptionalString(metadata.sourceRefName ?? undefined) }
-        : {}),
-      ...(normalizeOptionalString(metadata.targetRefName ?? undefined)
-        ? { targetRefName: normalizeOptionalString(metadata.targetRefName ?? undefined) }
-        : {}),
-      ...(normalizeOptionalString(metadata.createdBy?.displayName ?? undefined)
-        ? { createdByDisplayName: normalizeOptionalString(metadata.createdBy?.displayName ?? undefined) }
-        : {}),
-      ...(metadata.repository
-        ? {
-            repository: {
-              ...(normalizeOptionalString(metadata.repository.id ?? undefined)
-                ? { id: normalizeOptionalString(metadata.repository.id ?? undefined) }
-                : {}),
-              ...(normalizeOptionalString(metadata.repository.name ?? undefined)
-                ? { name: normalizeOptionalString(metadata.repository.name ?? undefined) }
-                : {}),
-              ...(normalizeOptionalString(metadata.repository.remoteUrl ?? undefined)
-                ? { remoteUrl: normalizeOptionalString(metadata.repository.remoteUrl ?? undefined) }
-                : {}),
-              ...(normalizeOptionalString(metadata.repository.webUrl ?? undefined)
-                ? { webUrl: normalizeOptionalString(metadata.repository.webUrl ?? undefined) }
-                : {}),
-            },
-          }
-        : {}),
-      ...(normalizeOptionalString(metadata.lastMergeSourceCommit?.commitId ?? undefined)
-        ? { sourceCommitId: normalizeOptionalString(metadata.lastMergeSourceCommit?.commitId ?? undefined) }
-        : {}),
       workItemRefs: mapPullRequestWorkItemRefs(rawWorkItemRefs),
     }
+
+    const sourceRefName = normalizeOptionalString(metadata.sourceRefName)
+    const targetRefName = normalizeOptionalString(metadata.targetRefName)
+    const createdByDisplayName = normalizeOptionalString(metadata.createdBy?.displayName)
+    const sourceCommitId = normalizeOptionalString(metadata.lastMergeSourceCommit?.commitId)
+
+    if (metadata.pullRequestId !== null && metadata.pullRequestId !== undefined) {
+      result = { ...result, pullRequestId: metadata.pullRequestId }
+    }
+
+    if (metadata.url) result = { ...result, url: metadata.url }
+
+    if (sourceRefName) result = { ...result, sourceRefName }
+
+    if (targetRefName) result = { ...result, targetRefName }
+
+    if (createdByDisplayName) result = { ...result, createdByDisplayName }
+
+    if (sourceCommitId) result = { ...result, sourceCommitId }
+
+    if (metadata.repository) {
+      let repository: NonNullable<PullRequestMetadata["repository"]> = {}
+      const id = normalizeOptionalString(metadata.repository.id)
+      const name = normalizeOptionalString(metadata.repository.name)
+      const remoteUrl = normalizeOptionalString(metadata.repository.remoteUrl)
+      const webUrl = normalizeOptionalString(metadata.repository.webUrl)
+
+      if (id) repository = { ...repository, id }
+
+      if (name) repository = { ...repository, name }
+
+      if (remoteUrl) repository = { ...repository, remoteUrl }
+
+      if (webUrl) repository = { ...repository, webUrl }
+      result = { ...result, repository }
+    }
+
+    return result
   })
 
+  /** Select a bounded, ordered prompt context and enrich each work item with optional titles and comments. */
   const getPullRequestWorkItems: AzureDevOpsClient["Service"]["getPullRequestWorkItems"] = Effect.fn(
     "AzureDevOpsClient.getPullRequestWorkItems",
   )(function* ({
@@ -603,9 +634,8 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
       return []
     }
 
-    const selectedIds = workItems.map((workItem) => workItem.id)
-    const workItemsById = new Map(workItems.map((workItem) => [workItem.id, workItem] as const))
     const relatedIds = extractRelationTitleIds(workItems)
+
     const titleMap = yield* withLoggedEmptyFallback(
       fetchWorkItemTitleMap({
         context,
@@ -619,55 +649,45 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
         empty: new Map<number, string>(),
       },
     )
-    const commentsByWorkItem = new Map(
-      yield* Effect.forEach(
-        selectedIds,
-        (workItemId) =>
-          withLoggedEmptyFallback(
-            fetchWorkItemComments({
-              context,
-              token,
-              workItemId,
-            }),
-            {
-              onHttpMessage: "Failed to fetch work item comments. Continuing without comments for this work item.",
-              onDecodeMessage: "Failed to decode work item comments. Continuing without comments for this work item.",
-              fields: { workItemId },
-              empty: [],
-            },
-          ).pipe(Effect.map((comments) => [workItemId, comments] as const)),
-        { concurrency: "unbounded" },
-      ),
-    )
 
-    const items: PullRequestWorkItem[] = []
+    // Selection is bounded to four items; forEach keeps their order while fetching comments concurrently.
+    return yield* Effect.forEach(
+      workItems,
+      Effect.fn("AzureDevOpsClient.enrichWorkItem")(function* (workItem) {
+        const comments = yield* withLoggedEmptyFallback(
+          fetchWorkItemComments({
+            context,
+            token,
+            workItemId: workItem.id,
+          }),
+          {
+            onHttpMessage: "Failed to fetch work item comments. Continuing without comments for this work item.",
+            onDecodeMessage: "Failed to decode work item comments. Continuing without comments for this work item.",
+            fields: { workItemId: workItem.id },
+            empty: [],
+          },
+        )
 
-    for (const workItemId of selectedIds) {
-      const workItem = workItemsById.get(workItemId)
-      if (!workItem) {
-        continue
-      }
-
-      items.push(
-        yield* toPullRequestWorkItem({
+        return yield* toPullRequestWorkItem({
           workItem,
           titleMap,
-          comments: commentsByWorkItem.get(workItemId) ?? [],
-        }),
-      )
-    }
-
-    return items
+          comments,
+        })
+      }),
+      { concurrency: "unbounded" },
+    )
   })
 
   const listThreads: AzureDevOpsClient["Service"]["listThreads"] = Effect.fn("AzureDevOpsClient.listThreads")(
     function* ({ context, token }: AzureRequestContext) {
-      const client = makeProjectClient(context, token, httpClient)
+      const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
       const request = HttpClientRequest.get(`${buildPullRequestPath(context)}/threads`).pipe(
         HttpClientRequest.setUrlParams({
           "api-version": "7.1",
         }),
       )
+
       const response = yield* executeJson(client, request, ExistingThreadsResponseSchema)
 
       return response.value ?? []
@@ -677,12 +697,14 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
   const updateThreadStatus: AzureDevOpsClient["Service"]["updateThreadStatus"] = Effect.fn(
     "AzureDevOpsClient.updateThreadStatus",
   )(function* ({ context, token, threadId, status }: UpdateThreadStatusInput) {
-    const client = makeProjectClient(context, token, httpClient)
+    const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
     const request = HttpClientRequest.patch(`${buildPullRequestPath(context)}/threads/${threadId}`).pipe(
       HttpClientRequest.setUrlParams({
         "api-version": "7.1",
       }),
     )
+
     const requestWithBody = yield* HttpClientRequest.bodyJson(request, { status }).pipe(
       Effect.mapError(toAzureDevOpsClientError(request)),
     )
@@ -692,7 +714,8 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
 
   const updateComment: AzureDevOpsClient["Service"]["updateComment"] = Effect.fn("AzureDevOpsClient.updateComment")(
     function* ({ context, token, threadId, commentId, content }: UpdateCommentInput) {
-      const client = makeProjectClient(context, token, httpClient)
+      const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
       const request = HttpClientRequest.patch(
         `${buildPullRequestPath(context)}/threads/${threadId}/comments/${commentId}`,
       ).pipe(
@@ -700,6 +723,7 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
           "api-version": "7.1",
         }),
       )
+
       const requestWithBody = yield* HttpClientRequest.bodyJson(request, { content }).pipe(
         Effect.mapError(toAzureDevOpsClientError(request)),
       )
@@ -710,12 +734,14 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
 
   const createThread: AzureDevOpsClient["Service"]["createThread"] = Effect.fn("AzureDevOpsClient.createThread")(
     function* ({ context, token, content, threadContext, status = 1 }: CreateThreadInput) {
-      const client = makeProjectClient(context, token, httpClient)
+      const client = makeAuthenticatedClient(buildProjectApiBaseUrl(context), token, httpClient)
+
       const request = HttpClientRequest.post(`${buildPullRequestPath(context)}/threads`).pipe(
         HttpClientRequest.setUrlParams({
           "api-version": "7.1",
         }),
       )
+
       const requestWithBody = yield* HttpClientRequest.bodyJson(request, {
         comments: [
           {
@@ -732,14 +758,15 @@ const makeAzureDevOpsClient = Effect.gen(function* () {
     },
   )
 
-  return {
+  return AzureDevOpsClient.of({
+    getAuthenticatedIdentity,
     getPullRequestMetadata,
     getPullRequestWorkItems,
     listThreads,
     updateThreadStatus,
     updateComment,
     createThread,
-  }
+  })
 })
 
 export const AzureDevOpsClientLive = Layer.effect(AzureDevOpsClient, makeAzureDevOpsClient).pipe(

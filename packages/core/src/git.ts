@@ -1,4 +1,5 @@
-export { GitExec, type ExecuteGitInput, type ExecuteGitResult, type GitExecShape } from "./git/Services/GitExec"
+export { GitExec, type ExecuteGitInput, type ExecuteGitResult } from "./git/Services/GitExec"
+
 export {
   buildTargetRefCandidates,
   compressChangedLines,
@@ -20,4 +21,5 @@ export {
   type ResolvePullRequestDiffInput,
   type ResolveReviewedSourceCommitInput,
 } from "./git/PullRequestDiff"
+
 export { GitExecLive } from "./git/Layers/GitExec"

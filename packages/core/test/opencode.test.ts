@@ -1,19 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Exit, Fiber, Layer, Logger } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Logger, Schema } from "effect"
 import * as Duration from "effect/Duration"
 import * as TestClock from "effect/testing/TestClock"
 import * as TestConsole from "effect/testing/TestConsole"
 import type { EventSubscribeOutput as Event, SessionMessageAssistant, SessionMessageIdle } from "@opencode/client"
 
 import { OpenCodeInvocationError, OpenCodeOutputError } from "@open-azdo/core/errors"
-import { makeRuntimeLogger } from "@open-azdo/core/logging"
+import { JsonLoggerLayer } from "@open-azdo/core/logging"
 import { OpenCodeRunner, buildOpenCodeConfig } from "@open-azdo/core/opencode"
 
 import { makeOpenCodeLiveLayer, makeOpenCodeRunRequest, makeOpenCodeSdkRuntime, withSilentLogs } from "./helpers"
 import {
   decodePromptResult,
   initialOpenCodeProgressState,
-  isOpenCodeProgressEventForSession,
   reduceOpenCodeProgressBatch,
   runOpenCodeProgressLogger,
   subscribeToOpenCodeEvents,
@@ -30,20 +29,17 @@ const runOpenCode = (
 ) =>
   Effect.gen(function* () {
     const service = yield* OpenCodeRunner
+
     return yield* service.run(request)
   }).pipe(Effect.provide(makeOpenCodeLiveLayer(sdkRuntime)), withSilentLogs)
 
 type TestOpenCodeEventClient = Parameters<typeof subscribeToOpenCodeEvents>[0]["client"]
+
 type TestSubscribe = TestOpenCodeEventClient["event"]["subscribe"]
 
-const makeEventClient = (subscribe: TestSubscribe): TestOpenCodeEventClient =>
-  ({
-    event: {
-      subscribe,
-    },
-  }) as TestOpenCodeEventClient
+const makeEventClient = (subscribe: TestSubscribe): TestOpenCodeEventClient => ({ event: { subscribe } })
 
-const connectedEvent = { id: "evt-connected", type: "server.connected", data: {} } as Event
+const connectedEvent = { id: "evt-connected", type: "server.connected", data: {} } satisfies Event
 
 const makeEventStream = (
   events: ReadonlyArray<Event>,
@@ -60,42 +56,69 @@ const makeEventStream = (
   },
 })
 
-const sessionEvent = (type: Event["type"], data: Record<string, unknown>, created = 1_000): Event =>
-  ({
-    id: `evt-${type}`,
-    created,
-    type,
-    data,
-  }) as Event
+const sessionEventMetadata = <Version extends 1 | 2>(sessionID: string, version: Version) => ({
+  id: `evt-${sessionID}`,
+  created: 1_000,
+  durable: { aggregateID: sessionID, seq: 1, version },
+})
 
-const executionStarted = (sessionID: string) => sessionEvent("session.execution.started", { sessionID })
+const executionStarted = (sessionID: string): Extract<Event, { type: "session.execution.started" }> => ({
+  ...sessionEventMetadata(sessionID, 1),
+  type: "session.execution.started",
+  data: { sessionID },
+})
 
-const toolStarted = (sessionID: string, id: string, name: string) =>
-  sessionEvent("session.tool.input.started", { sessionID, assistantMessageID: "msg", id, name })
+const toolStarted = (
+  sessionID: string,
+  id: string,
+  name: string,
+): Extract<Event, { type: "session.tool.input.started" }> => ({
+  ...sessionEventMetadata(sessionID, 1),
+  type: "session.tool.input.started",
+  data: { sessionID, assistantMessageID: "msg", id, name },
+})
 
-const toolCalled = (sessionID: string, id: string, input: Record<string, unknown>) =>
-  sessionEvent("session.tool.called", { sessionID, assistantMessageID: "msg", id, input, executed: true })
+const toolCalled = (
+  sessionID: string,
+  id: string,
+  input: Schema.JsonObject,
+): Extract<Event, { type: "session.tool.called" }> => ({
+  ...sessionEventMetadata(sessionID, 1),
+  type: "session.tool.called",
+  data: { sessionID, assistantMessageID: "msg", id, input, executed: true },
+})
 
-const toolFailed = (sessionID: string, id: string, message: string) =>
-  sessionEvent("session.tool.failed", {
-    sessionID,
-    assistantMessageID: "msg",
-    id,
-    error: { type: "tool.execution", message },
-    executed: true,
-  })
+const toolFailed = (
+  sessionID: string,
+  id: string,
+  message: string,
+): Extract<Event, { type: "session.tool.failed" }> => ({
+  ...sessionEventMetadata(sessionID, 2),
+  type: "session.tool.failed",
+  data: { sessionID, assistantMessageID: "msg", id, error: { type: "tool.execution", message }, executed: true },
+})
 
-const retryScheduled = (sessionID: string, attempt: number) =>
-  sessionEvent("session.retry.scheduled", {
+const retryScheduled = (sessionID: string, attempt: number): Extract<Event, { type: "session.retry.scheduled" }> => ({
+  ...sessionEventMetadata(sessionID, 1),
+  type: "session.retry.scheduled",
+  data: {
     sessionID,
     assistantMessageID: "msg",
     attempt,
     at: 1_500,
     error: { type: "provider.rate-limit", message: "Rate limited" },
-  })
+  },
+})
 
-const executionFailed = (sessionID: string, type: string, message: string) =>
-  sessionEvent("session.execution.failed", { sessionID, error: { type, message } })
+const executionFailed = (
+  sessionID: string,
+  type: string,
+  message: string,
+): Extract<Event, { type: "session.execution.failed" }> => ({
+  ...sessionEventMetadata(sessionID, 1),
+  type: "session.execution.failed",
+  data: { sessionID, error: { type, message } },
+})
 
 const assistantMessage = (overrides: Partial<SessionMessageAssistant>): SessionMessageAssistant => ({
   id: "msg_123",
@@ -129,12 +152,19 @@ const collectProgressLogs = async (events: AsyncIterable<Event>, sessionId = "se
       })
 
       return yield* TestConsole.errorLines
-    }).pipe(Effect.provide(Logger.layer([makeRuntimeLogger(true)])), Effect.provide(TestConsole.layer)),
+    }).pipe(Effect.provide(JsonLoggerLayer), Effect.provide(TestConsole.layer)),
   )
 
-  return errorLines.map(
-    (line) => JSON.parse(String(line)) as { readonly message: string; readonly annotations?: Record<string, unknown> },
+  const decodeLog = Schema.decodeUnknownSync(
+    Schema.fromJsonString(
+      Schema.Struct({
+        message: Schema.String,
+        annotations: Schema.optionalKey(Schema.Struct({ detail: Schema.optionalKey(Schema.String) })),
+      }),
+    ),
   )
+
+  return errorLines.map((line) => decodeLog(String(line)))
 }
 
 const collectEffectConsole = <A, E>(effect: Effect.Effect<A, E>) =>
@@ -147,20 +177,18 @@ const collectEffectConsole = <A, E>(effect: Effect.Effect<A, E>) =>
       logLines: yield* TestConsole.logLines,
     }
   }).pipe(
-    Effect.provide(Logger.layer([makeRuntimeLogger(true)])),
+    Effect.provide(JsonLoggerLayer),
     Effect.provide(Layer.succeed(Logger.LogToStderr)(true)),
     Effect.provide(TestConsole.layer),
   )
 
-const reduceProgressLogs = (events: ReadonlyArray<Event>, sessionId = "ses_target") =>
-  reduceOpenCodeProgressBatch(
-    initialOpenCodeProgressState,
-    events.filter((event) => isOpenCodeProgressEventForSession(event, sessionId)),
-  ).logs
+const reduceProgressLogs = (events: ReadonlyArray<Event>) =>
+  reduceOpenCodeProgressBatch(initialOpenCodeProgressState, events).logs
 
 describe("opencode", () => {
   test("passes parsed model, prompt, config, format, and variant to the sdk runtime", async () => {
     let receivedRequest: OpenCodeSdkPromptRequest | undefined
+
     const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
       receivedRequest = request
 
@@ -173,6 +201,7 @@ describe("opencode", () => {
       workspace: process.cwd(),
       model: "azure/deployments/gpt-5.4-mini",
       variant: "high",
+      timeout: Duration.seconds(450),
       format: {
         type: "json_schema",
         schema: {
@@ -202,6 +231,7 @@ describe("opencode", () => {
 
   test("passes through native openai gpt-5.4-mini models without provider overrides", async () => {
     let receivedRequest: OpenCodeSdkPromptRequest | undefined
+
     const sdkRuntime = makeOpenCodeSdkRuntime((request) => {
       receivedRequest = request
 
@@ -224,7 +254,7 @@ describe("opencode", () => {
     expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
-  test("denies by default and only allows read-only tools for the review agent", () => {
+  test("denies by default and allows inspection plus unrestricted shell verification", () => {
     const config = buildOpenCodeConfig("azdo-review")
     const permissions = config.agents["azdo-review"]?.permissions ?? []
 
@@ -232,9 +262,13 @@ describe("opencode", () => {
     expect(permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" })
     expect(permissions.slice(1).every((rule) => rule.effect === "allow")).toBe(true)
     expect(new Set(permissions.slice(1).map((rule) => rule.action))).toEqual(
-      new Set(["read", "glob", "grep", "shell", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
+      new Set(["read", "glob", "grep", "shell", "external_directory", "skill", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
     )
-    expect(permissions.filter((rule) => rule.action === "shell").map((rule) => rule.resource)).not.toContain("*")
+    expect(permissions.find((rule) => rule.action === "shell")).toEqual({
+      action: "shell",
+      resource: "*",
+      effect: "allow",
+    })
   })
 
   test("returns structured output and model error metadata from the sdk runtime", async () => {
@@ -296,44 +330,27 @@ describe("opencode", () => {
     })
   })
 
-  test("fails when the model has no provider separator", async () => {
-    const exit = await Effect.runPromiseExit(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          model: "gpt-5.4",
-        }),
-      ),
+  test.each(["gpt-5.4", "/gpt-5.4", "openai/"])("rejects malformed model %s before invoking the SDK", async (model) => {
+    let prompts = 0
+
+    const sdkRuntime = makeOpenCodeSdkRuntime(() => {
+      prompts += 1
+
+      return Effect.succeed({ response: "usable response" })
+    })
+
+    const failure = await Effect.runPromise(
+      runOpenCode(makeOpenCodeRunRequest({ model }), sdkRuntime).pipe(Effect.flip),
     )
 
-    expect(exit._tag).toBe("Failure")
-  })
-
-  test("fails when the model provider segment is empty", async () => {
-    const exit = await Effect.runPromiseExit(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          model: "/gpt-5.4",
-        }),
-      ),
-    )
-
-    expect(exit._tag).toBe("Failure")
-  })
-
-  test("fails when the model id segment is empty", async () => {
-    const exit = await Effect.runPromiseExit(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          model: "openai/",
-        }),
-      ),
-    )
-
-    expect(exit._tag).toBe("Failure")
+    expect(failure).toBeInstanceOf(OpenCodeOutputError)
+    expect(failure).toMatchObject({ output: model })
+    expect(prompts).toBe(0)
   })
 
   test("salvages partial text for assistant output errors", async () => {
     const response = '{"verdict":"concerns","findings":[],"unmappedNotes":[]}'
+
     const result = await Effect.runPromise(
       decodePromptResult({
         sessionId: "ses_123",
@@ -361,6 +378,7 @@ describe("opencode", () => {
   test("keeps a submitted result when a later model call fails", async () => {
     const structured = { verdict: "pass", findings: [], unmappedNotes: [] }
     const error = { type: "provider.invalid-request", message: "Context too long" }
+
     const result = await Effect.runPromise(
       decodePromptResult({
         sessionId: "ses_456",
@@ -386,6 +404,7 @@ describe("opencode", () => {
       message: "Provider request failed.",
       response: { body: "echoed-request-secret" },
     }
+
     const failure = await Effect.runPromise(
       decodePromptResult({
         sessionId: "ses_789",
@@ -420,10 +439,11 @@ describe("opencode", () => {
 
     const fiber = Effect.runFork(
       subscribeToOpenCodeEvents({
-        client: makeEventClient(((options) => {
+        client: makeEventClient((options) => {
           capturedSignal = options?.signal
+
           return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }) }
-        }) as TestSubscribe),
+        }),
         lifetime: new AbortController().signal,
       }),
     )
@@ -438,13 +458,15 @@ describe("opencode", () => {
 
     const program = Effect.gen(function* () {
       const subscribed = yield* Deferred.make<void>()
+
       const fiber = yield* withOpenCodeProgressSubscription(
         {
-          client: makeEventClient(((options) => {
+          client: makeEventClient((options) => {
             capturedSignal = options?.signal
             Deferred.doneUnsafe(subscribed, Exit.void)
+
             return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }) }
-          }) as TestSubscribe),
+          }),
           sessionId: "ses_target",
         },
         Effect.succeed("prompted"),
@@ -466,16 +488,14 @@ describe("opencode", () => {
   test("cleans up the progress subscription without logging abort warnings", async () => {
     let capturedSignal: AbortSignal | undefined
     let streamClosed = false
-    let resolveStreamStarted!: () => void
-    const streamStarted = new Promise<void>((resolve) => {
-      resolveStreamStarted = resolve
-    })
+    const streamStarted = Promise.withResolvers<void>()
+    const streamSettled = Promise.withResolvers<void>()
 
     const output = await Effect.runPromise(
       collectEffectConsole(
         withOpenCodeProgressSubscription(
           {
-            client: makeEventClient(((options) => {
+            client: makeEventClient((options) => {
               capturedSignal = options?.signal
 
               return {
@@ -483,7 +503,7 @@ describe("opencode", () => {
                   yield connectedEvent
 
                   try {
-                    resolveStreamStarted()
+                    streamStarted.resolve()
 
                     await new Promise((_, reject) => {
                       options?.signal?.addEventListener(
@@ -498,19 +518,19 @@ describe("opencode", () => {
                     })
                   } finally {
                     streamClosed = true
+                    streamSettled.resolve()
                   }
                 },
               }
-            }) as TestSubscribe),
+            }),
             sessionId: "ses_target",
           },
-          Effect.tryPromise(() => streamStarted).pipe(Effect.as("done")),
+          Effect.tryPromise(() => streamStarted.promise).pipe(Effect.as("done")),
         ),
       ),
     )
 
-    // Allow the abort-driven stream shutdown to settle before asserting.
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await streamSettled.promise
 
     expect(output.value).toBe("done")
     expect(capturedSignal?.aborted).toBe(true)
@@ -522,13 +542,15 @@ describe("opencode", () => {
     ).toBe(false)
   })
 
-  test("filters progress events to the active session", () => {
-    const logs = reduceProgressLogs([
-      executionStarted("ses_other"),
-      executionStarted("ses_target"),
-      toolStarted("ses_other", "call_other", "shell"),
-      toolCalled("ses_other", "call_other", { command: "echo ignored" }),
-    ])
+  test("filters progress events to the active session", async () => {
+    const logs = await collectProgressLogs(
+      makeEventStream([
+        executionStarted("ses_other"),
+        executionStarted("ses_target"),
+        toolStarted("ses_other", "call_other", "shell"),
+        toolCalled("ses_other", "call_other", { command: "echo ignored" }),
+      ]),
+    )
 
     expect(logs.map((log) => log.message)).toEqual(["OpenCode assistant is working."])
   })
@@ -591,26 +613,5 @@ describe("opencode", () => {
       "OpenCode event stream failed. Continuing without live progress updates.",
     ])
     expect(logs[0]?.annotations?.detail).toEqual(expect.stringContaining("stream broke"))
-  })
-
-  test("passes the configured timeout through to the sdk runtime", async () => {
-    let timeout: Duration.Duration | undefined
-
-    await Effect.runPromise(
-      runOpenCode(
-        makeOpenCodeRunRequest({
-          timeout: Duration.seconds(450),
-        }),
-        makeOpenCodeSdkRuntime((request) => {
-          timeout = request.timeout
-
-          return Effect.succeed({
-            response: '{"summary":"Summary","verdict":"pass","findings":[],"unmappedNotes":[]}',
-          })
-        }),
-      ),
-    )
-
-    expect(timeout === undefined ? undefined : Duration.toMillis(timeout)).toBe(450_000)
   })
 })

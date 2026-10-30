@@ -24,14 +24,28 @@ export type UpdateCommentInput = AzureRequestContext & {
   readonly content: string
 }
 
+/** File coordinates attached to a newly created pull-request discussion thread. */
+export interface CreateThreadContext {
+  readonly filePath?: string
+  readonly leftFileStart?: { readonly line: number; readonly offset: number }
+  readonly leftFileEnd?: { readonly line: number; readonly offset: number }
+  readonly rightFileStart?: { readonly line: number; readonly offset: number }
+  readonly rightFileEnd?: { readonly line: number; readonly offset: number }
+}
+
 export type CreateThreadInput = AzureRequestContext & {
   readonly content: string
-  readonly threadContext: Record<string, unknown> | undefined
+  readonly threadContext: CreateThreadContext | undefined
   /** Azure DevOps thread status for the new thread. Defaults to `1` (active). */
   readonly status?: WritableThreadStatus | undefined
 }
 
-export interface AzureDevOpsClientShape {
+/** Azure DevOps operations and the precise failure algebra exposed to workflow callers. */
+export interface AzureDevOpsClientService {
+  /** Resolves the token's authenticated identity; failure cannot authorize existing managed comments. */
+  readonly getAuthenticatedIdentity: (
+    input: AzureRequestContext,
+  ) => Effect.Effect<string, AzureDevOpsHttpError | AzureDevOpsDecodeError>
   readonly getPullRequestMetadata: (
     input: AzureRequestContext,
   ) => Effect.Effect<PullRequestMetadata, AzureDevOpsHttpError | AzureDevOpsDecodeError>
@@ -54,6 +68,6 @@ export interface AzureDevOpsClientShape {
   ) => Effect.Effect<void, AzureDevOpsHttpError | AzureDevOpsDecodeError>
 }
 
-export class AzureDevOpsClient extends Context.Service<AzureDevOpsClient, AzureDevOpsClientShape>()(
+export class AzureDevOpsClient extends Context.Service<AzureDevOpsClient, AzureDevOpsClientService>()(
   "open-azdo/azdo/AzureDevOpsClient",
 ) {}

@@ -1,19 +1,19 @@
 import { Effect } from "effect"
 import type { Redacted } from "effect"
 import type { AzureContext } from "@open-azdo/azdo/context"
-import { AzureDevOpsClient, type WritableThreadStatus } from "@open-azdo/azdo/client"
+import { AzureDevOpsClient, type CreateThreadContext, type WritableThreadStatus } from "@open-azdo/azdo/client"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
-import { normalizePath } from "@open-azdo/core/paths"
 
 import type { ReviewMode } from "./ReviewContext"
-import type { ManagedReviewState, ThreadAction } from "./ThreadReconciliation"
-import { buildSummaryComment, findManagedSummaryThread, reconcileThreads } from "./ThreadReconciliation"
+import type { ThreadAction, ManagedThreads } from "./ThreadReconciliation"
+import { buildFailureSummaryComment, decodeManagedThreads, reconcileThreads } from "./ThreadReconciliation"
 import type { NormalizedReviewResult, ReviewFinding } from "./ReviewOutput"
 
 export type PublishReviewInput = {
   readonly context: AzureContext
   readonly token: Redacted.Redacted<string>
   readonly dryRun: boolean
+  readonly authenticatedIdentity: string
   readonly summaryContent: string
   readonly summaryVerdict: NormalizedReviewResult["verdict"]
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
@@ -28,9 +28,8 @@ export type PublishFailureSummaryInput = {
   readonly token: Redacted.Redacted<string>
   readonly dryRun: boolean
   readonly buildLink: string | undefined
-  readonly existingThreads?: ReadonlyArray<ExistingThread> | undefined
+  readonly managedThreads: ManagedThreads
   readonly failureReason: string
-  readonly preservedSummaryState?: ManagedReviewState | undefined
 }
 
 export type PublishReviewResult = {
@@ -38,15 +37,9 @@ export type PublishReviewResult = {
   readonly summaryContent: string
 }
 
-const EMPTY_SEVERITY_COUNTS = {
-  low: 0,
-  medium: 0,
-  high: 0,
-  critical: 0,
-} as const
-
 const createInlineThreadContext = (finding: ReviewFinding) => ({
-  filePath: `/${normalizePath(finding.filePath)}`,
+  // Normalization already resolved the exact Git path; backslashes can be filename characters.
+  filePath: `/${finding.filePath}`,
   rightFileStart: { line: finding.line, offset: 1 },
   rightFileEnd: { line: finding.endLine ?? finding.line, offset: 1 },
 })
@@ -54,35 +47,26 @@ const createInlineThreadContext = (finding: ReviewFinding) => ({
 /**
  * Creates a thread with the given comment, or rewrites the managed comment of an existing thread.
  * Either way the thread ends up in `status`, so a resolved thread is reopened (or vice versa) to
- * match the latest review.
+ * match the latest review. Status is written first so summary checkpoint content is the final
+ * remote mutation after every required finding and status write has succeeded.
  */
-const upsertThreadComment = (
+const upsertThreadComment = Effect.fn("ReviewPublisher.upsertThreadComment")(function* (
   client: AzureDevOpsClient["Service"],
   context: AzureContext,
   token: Redacted.Redacted<string>,
   content: string,
-  threadContext: Record<string, unknown> | undefined,
+  threadContext: CreateThreadContext | undefined,
   existingThread: ExistingThread | undefined,
   commentId: number | undefined,
   status: WritableThreadStatus,
-) =>
-  !existingThread || !commentId
-    ? client.createThread({ context, token, content, threadContext, status })
-    : Effect.all([
-        client.updateComment({
-          context,
-          token,
-          threadId: existingThread.id,
-          commentId,
-          content,
-        }),
-        client.updateThreadStatus({
-          context,
-          token,
-          threadId: existingThread.id,
-          status,
-        }),
-      ]).pipe(Effect.asVoid)
+) {
+  if (!existingThread || !commentId) {
+    return yield* client.createThread({ context, token, content, threadContext, status })
+  }
+
+  yield* client.updateThreadStatus({ context, token, threadId: existingThread.id, status })
+  yield* client.updateComment({ context, token, threadId: existingThread.id, commentId, content })
+})
 
 const upsertSummaryThread = (
   client: AzureDevOpsClient["Service"],
@@ -142,10 +126,12 @@ const applyThreadAction = (
   }
 }
 
-export const publishReview = ({
+/** Reconciles a fresh trusted listing and applies findings before the summary commit point. */
+export const publishReview = Effect.fn("ReviewPublisher.publishReview")(function* ({
   context,
   token,
   dryRun,
+  authenticatedIdentity,
   summaryContent,
   summaryVerdict,
   inlineFindings,
@@ -153,63 +139,57 @@ export const publishReview = ({
   reviewMode,
   scopedChangedLinesByFile,
   scopedDeletedLinesByFile,
-}: PublishReviewInput): Effect.Effect<PublishReviewResult, unknown, AzureDevOpsClient> =>
-  Effect.gen(function* () {
-    const client = yield* AzureDevOpsClient
-    const existingThreads = yield* client.listThreads({ context, token })
-    const actions = reconcileThreads({
-      existingThreads,
-      summaryContent,
-      summaryVerdict,
-      inlineFindings,
-      resolvedManagedFindingIds,
-      reviewMode,
-      scopedChangedLinesByFile,
-      scopedDeletedLinesByFile,
-    })
+}: PublishReviewInput) {
+  const client = yield* AzureDevOpsClient
+  const existingThreads = yield* client.listThreads({ context, token })
 
-    if (!dryRun) {
-      yield* Effect.forEach(actions, (action) => applyThreadAction(client, context, token, action), {
-        discard: true,
-      })
-    }
-
-    return { actions, summaryContent }
+  const actions = reconcileThreads({
+    managedThreads: decodeManagedThreads(existingThreads, authenticatedIdentity),
+    summaryContent,
+    summaryVerdict,
+    inlineFindings,
+    resolvedManagedFindingIds,
+    reviewMode,
+    scopedChangedLinesByFile,
+    scopedDeletedLinesByFile,
   })
 
-export const publishFailureSummary = ({
+  if (!dryRun) {
+    yield* Effect.forEach(actions, (action) => applyThreadAction(client, context, token, action), {
+      discard: true,
+    })
+  }
+
+  return { actions, summaryContent }
+})
+
+/** Reports failure in its own authenticated notice, leaving the committed summary untouched. */
+export const publishFailureSummary = Effect.fn("ReviewPublisher.publishFailureSummary")(function* ({
   context,
   token,
   dryRun,
   buildLink,
-  existingThreads: providedExistingThreads,
+  managedThreads,
   failureReason,
-  preservedSummaryState,
-}: PublishFailureSummaryInput): Effect.Effect<void, unknown, AzureDevOpsClient> =>
-  Effect.gen(function* () {
-    const client = yield* AzureDevOpsClient
-    const existingThreads = providedExistingThreads
-      ? providedExistingThreads
-      : yield* client.listThreads({ context, token })
-    const existingSummary = findManagedSummaryThread(existingThreads)
-    const summaryContent = buildSummaryComment({
-      verdict: "fail",
-      summary: `Review execution failed.\n\n${failureReason}`,
-      unmappedNotes: [],
-      severityCounts: EMPTY_SEVERITY_COUNTS,
-      buildLink,
-      persistedState: preservedSummaryState,
-    })
+}: PublishFailureSummaryInput) {
+  const client = yield* AzureDevOpsClient
 
-    if (!dryRun) {
-      yield* upsertSummaryThread(
-        client,
-        context,
-        token,
-        summaryContent,
-        existingSummary?.thread,
-        existingSummary?.commentId,
-        false,
-      )
-    }
+  const existingFailure = managedThreads.failure
+
+  const summaryContent = buildFailureSummaryComment({
+    summary: `Review execution failed.\n\n${failureReason}`,
+    buildLink,
   })
+
+  if (!dryRun) {
+    yield* upsertSummaryThread(
+      client,
+      context,
+      token,
+      summaryContent,
+      existingFailure?.thread,
+      existingFailure?.commentId,
+      false,
+    )
+  }
+})

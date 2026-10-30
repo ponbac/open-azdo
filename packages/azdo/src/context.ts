@@ -13,18 +13,28 @@ export type AzureContext = {
 
 export type AzureContextInput = AzureContext
 
-export const createAzureContext = (input: AzureContextInput): AzureContext => ({
-  organization: input.organization,
-  project: input.project,
-  collectionUrl: input.collectionUrl.replace(/\/+$/, ""),
-  repositoryId: input.repositoryId,
-  pullRequestId: input.pullRequestId,
-  ...(input.buildId !== undefined ? { buildId: input.buildId } : {}),
-  ...(input.buildNumber !== undefined ? { buildNumber: input.buildNumber } : {}),
-  ...(input.buildUri !== undefined ? { buildUri: input.buildUri } : {}),
-  ...(input.sourceVersion !== undefined ? { sourceVersion: input.sourceVersion } : {}),
-  ...(input.targetBranch !== undefined ? { targetBranch: input.targetBranch } : {}),
-})
+/** Normalizes the collection base URL while preserving omission of unavailable build metadata. */
+export const createAzureContext = (input: AzureContextInput): AzureContext => {
+  let context: AzureContext = {
+    organization: input.organization,
+    project: input.project,
+    collectionUrl: input.collectionUrl.replace(/\/+$/, ""),
+    repositoryId: input.repositoryId,
+    pullRequestId: input.pullRequestId,
+  }
+
+  if (input.buildId !== undefined) context = { ...context, buildId: input.buildId }
+
+  if (input.buildNumber !== undefined) context = { ...context, buildNumber: input.buildNumber }
+
+  if (input.buildUri !== undefined) context = { ...context, buildUri: input.buildUri }
+
+  if (input.sourceVersion !== undefined) context = { ...context, sourceVersion: input.sourceVersion }
+
+  if (input.targetBranch !== undefined) context = { ...context, targetBranch: input.targetBranch }
+
+  return context
+}
 
 export const buildBuildLink = (input: Pick<AzureContext, "buildUri" | "collectionUrl" | "project" | "buildId">) => {
   if (input.buildUri) {

@@ -21,11 +21,6 @@ export class MissingGitHistoryError extends Schema.TaggedError<MissingGitHistory
   remediation: Schema.String,
 }) {}
 
-export class JsonParseError extends Schema.TaggedError<JsonParseError>()("JsonParseError", {
-  message: Schema.String,
-  input: Schema.String,
-}) {}
-
 export class OpenCodeInvocationError extends Schema.TaggedError<OpenCodeInvocationError>()("OpenCodeInvocationError", {
   message: Schema.String,
   stderr: Schema.String,

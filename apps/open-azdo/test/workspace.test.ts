@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs"
+import { rm } from "node:fs/promises"
 
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer, Redacted } from "effect"
+import { Effect, Exit, Layer, Redacted } from "effect"
 
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { GitCommandError } from "@open-azdo/core/errors"
@@ -13,6 +14,7 @@ import { createFixtureRepo } from "./helpers"
 
 const makeGitLayer = () => {
   const processRunnerLayer = ProcessRunnerLive.pipe(Layer.provide(BaseRuntimeLayer))
+
   return GitExecLive.pipe(Layer.provide(processRunnerLayer))
 }
 
@@ -128,5 +130,51 @@ describe("sandbox workspace", () => {
       ["fetch", "--no-tags", "origin", "abc123"],
       ["checkout", "--detach", "abc123"],
     ])
+  })
+
+  test.each(["failure", "interruption"] as const)("cleans up a temporary workspace after setup %s", async (mode) => {
+    let temporaryPath = ""
+
+    const gitLayer = Layer.succeed(GitExec, {
+      execute: (input) => {
+        temporaryPath = input.cwd
+
+        return mode === "interruption"
+          ? Effect.interrupt
+          : Effect.fail(
+              new GitCommandError({
+                operation: input.operation,
+                command: "git init",
+                cwd: input.cwd,
+                detail: "setup failed",
+              }),
+            )
+      },
+    })
+
+    try {
+      const exit = await Effect.scoped(
+        prepareSandboxWorkspace({
+          requestedWorkspace: undefined,
+          metadata: {
+            title: "Feature PR",
+            description: "",
+            sourceRefName: "refs/heads/feature",
+            targetRefName: "refs/heads/main",
+            repository: { remoteUrl: "https://example.invalid/repo.git" },
+            workItemRefs: [],
+          },
+          token: Redacted.make("system-token"),
+        }),
+      ).pipe(Effect.provide(gitLayer), Effect.runPromiseExit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(temporaryPath.length).toBeGreaterThan(0)
+      expect(existsSync(temporaryPath)).toBe(false)
+    } finally {
+      if (temporaryPath) {
+        await rm(temporaryPath, { recursive: true, force: true })
+      }
+    }
   })
 })

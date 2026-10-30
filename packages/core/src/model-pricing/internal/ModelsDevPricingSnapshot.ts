@@ -1,3 +1,5 @@
+import { Schema } from "effect"
+
 export type ModelPricing = {
   readonly input: number
   readonly output: number
@@ -15,35 +17,58 @@ export type PricingSnapshot = {
 const MODELS_DEV_SOURCE = "models.dev" as const
 export const MODELS_DEV_SOURCE_URL = "https://models.dev/api.json" as const
 
-type ModelsDevProviderModel = {
-  readonly cost?: {
-    readonly input?: number
-    readonly output?: number
-    readonly cache_read?: number
-    readonly cache_write?: number
-  }
-}
+const ModelsDevProviderModel = Schema.Struct({
+  cost: Schema.optionalKey(
+    Schema.Struct({
+      input: Schema.optionalKey(Schema.Number),
+      output: Schema.optionalKey(Schema.Number),
+      cache_read: Schema.optionalKey(Schema.Number),
+      cache_write: Schema.optionalKey(Schema.Number),
+    }),
+  ),
+})
 
-type ModelsDevProvider = {
-  readonly models?: Readonly<Record<string, ModelsDevProviderModel>>
-}
+interface ModelsDevProviderModel extends Schema.Schema.Type<typeof ModelsDevProviderModel> {}
 
-type ModelsDevApiResponse = Readonly<Record<string, ModelsDevProvider>>
+/** The pricing projection decoded from models.dev; unrelated provider metadata is discarded. */
+export const ModelsDevApiResponse = Schema.Record(
+  Schema.String,
+  Schema.Struct({
+    models: Schema.optionalKey(Schema.Record(Schema.String, ModelsDevProviderModel)),
+  }),
+)
 
-const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
+/** Validated models.dev provider and model pricing data. */
+export interface ModelsDevApiResponse extends Schema.Schema.Type<typeof ModelsDevApiResponse> {}
 
+/** Keeps complete finite token rates and omits cache rates when no finite price is supplied. */
 const normalizeModelPricing = (model: ModelsDevProviderModel): ModelPricing | undefined => {
   const cost = model.cost
-  if (!cost || !isFiniteNumber(cost.input) || !isFiniteNumber(cost.output)) {
+
+  if (
+    !cost ||
+    cost.input === undefined ||
+    cost.output === undefined ||
+    !Number.isFinite(cost.input) ||
+    !Number.isFinite(cost.output)
+  ) {
     return undefined
   }
 
-  return {
+  let pricing: ModelPricing = {
     input: cost.input,
     output: cost.output,
-    ...(isFiniteNumber(cost.cache_read) ? { cacheRead: cost.cache_read } : {}),
-    ...(isFiniteNumber(cost.cache_write) ? { cacheWrite: cost.cache_write } : {}),
   }
+
+  if (cost.cache_read !== undefined && Number.isFinite(cost.cache_read)) {
+    pricing = { ...pricing, cacheRead: cost.cache_read }
+  }
+
+  if (cost.cache_write !== undefined && Number.isFinite(cost.cache_write)) {
+    pricing = { ...pricing, cacheWrite: cost.cache_write }
+  }
+
+  return pricing
 }
 
 /**
@@ -63,6 +88,7 @@ export const normalizeModelsDevPricingSnapshot = (
             .sort(([left], [right]) => left.localeCompare(right))
             .flatMap(([modelID, model]) => {
               const pricing = normalizeModelPricing(model)
+
               return pricing ? ([[modelID, pricing]] as const) : []
             }),
         )

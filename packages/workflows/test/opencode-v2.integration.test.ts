@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { Duration, Effect, Layer } from "effect"
+import { Duration, Effect, Layer, Schema, Option } from "effect"
 
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { OpenCodeInvocationError, OpenCodeOutputError } from "@open-azdo/core/errors"
@@ -18,40 +18,96 @@ import { ReviewResultJsonSchema } from "../src/review/ReviewOutput"
  */
 const binary = process.env.OPEN_AZDO_OPENCODE_BIN
 
-type MockStep =
-  | { readonly tool: string; readonly input: Record<string, unknown> }
+type MockStep = (
+  | { readonly tool: string; readonly input: Record<string, Schema.Json> }
   | { readonly text: string }
   | { readonly status: number; readonly message: string }
   | { readonly hang: true }
+  | { readonly recoverTask: true; readonly offset?: number; readonly limit?: number }
+  | { readonly readSavedOutput: true; readonly offset: number; readonly limit: number }
+) & { readonly inputTokens?: number }
 
-const usageChunk = { usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 }, choices: [] }
+const usageChunk = (inputTokens = 11) => ({
+  usage: { prompt_tokens: inputTokens, completion_tokens: 7, total_tokens: inputTokens + 7 },
+  choices: [],
+})
 
-const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) => ({
+const chunk = (delta: Record<string, Schema.Json>, finishReason: string | null = null) => ({
   choices: [{ index: 0, delta, finish_reason: finishReason }],
 })
 
-const toSse = (chunks: ReadonlyArray<unknown>) =>
+const toSse = (chunks: ReadonlyArray<Schema.Json>) =>
   new Response([...chunks.map((value) => `data: ${JSON.stringify(value)}\n\n`), "data: [DONE]\n\n"].join(""), {
     headers: { "content-type": "text/event-stream" },
   })
 
+const ChatRequest = Schema.Struct({
+  messages: Schema.Array(
+    Schema.Struct({
+      role: Schema.String,
+      content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    }),
+  ),
+})
+
+const decodeChatRequest = Schema.decodeUnknownSync(Schema.fromJsonString(ChatRequest))
+
+const taskFileFromSystem = (request: typeof ChatRequest.Type) => {
+  const system = request.messages
+    .flatMap((message) => (message.role === "system" && message.content ? [message.content] : []))
+    .join("\n")
+
+  const path = /^Task file: (.+)$/mu.exec(system)?.[1]
+
+  return path
+    ? Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(Schema.String))(path))
+    : undefined
+}
+
 /** Minimal OpenAI-compatible chat endpoint that replays a scripted conversation. */
 const startMockProvider = () => {
   let steps: Array<MockStep> = []
+
   const state = {
     requests: 0,
+    transcripts: new Array<typeof ChatRequest.Type>(),
+    authorizations: new Array<string | null>(),
     script: (next: ReadonlyArray<MockStep>) => {
       steps = [...next]
       state.requests = 0
+      state.transcripts.length = 0
+      state.authorizations.length = 0
     },
   }
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     idleTimeout: 0,
-    fetch: () => {
+    fetch: async (request) => {
       state.requests += 1
-      const step = steps.shift() ?? { text: "Done." }
+      const transcript = decodeChatRequest(await request.text())
+      state.transcripts.push(transcript)
+      state.authorizations.push(request.headers.get("authorization"))
+      const scriptedStep = steps.shift() ?? { text: "Done." }
+      let step: Exclude<MockStep, { readonly recoverTask: true } | { readonly readSavedOutput: true }>
+
+      if ("recoverTask" in scriptedStep || "readSavedOutput" in scriptedStep) {
+        const savedOutput = transcript.messages.findLast(
+          (message) => message.role === "tool" && message.content?.includes("full output saved to "),
+        )?.content
+
+        const path =
+          "recoverTask" in scriptedStep
+            ? taskFileFromSystem(transcript)
+            : /full output saved to (.+)\]/u.exec(savedOutput ?? "")?.[1]
+
+        step = path
+          ? { tool: "read", input: { path, offset: scriptedStep.offset ?? 1, limit: scriptedStep.limit ?? 2_000 } }
+          : { text: "No readable file was provided by the task or tool output." }
+      } else {
+        step = scriptedStep
+      }
 
       if ("hang" in step) {
         return new Promise<Response>(() => undefined)
@@ -75,9 +131,9 @@ const startMockProvider = () => {
               ],
             }),
             chunk({}, "tool_calls"),
-            usageChunk,
+            usageChunk(step.inputTokens),
           ])
-        : toSse([chunk({ role: "assistant", content: step.text }), chunk({}, "stop"), usageChunk])
+        : toSse([chunk({ role: "assistant", content: step.text }), chunk({}, "stop"), usageChunk(step.inputTokens)])
     },
   })
 
@@ -91,7 +147,7 @@ const validResult = {
   unmappedNotes: [],
 }
 
-const submit = (input: Record<string, unknown>) => ({ tool: "open_azdo_submit_result", input })
+const submit = (input: Record<string, Schema.Json>) => ({ tool: "open_azdo_submit_result", input })
 
 describe.skipIf(!binary)("OpenCode V2 runtime", () => {
   const mock = startMockProvider()
@@ -105,6 +161,13 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     await mkdir(workspace, { recursive: true })
     await mkdir(join(root, "config/opencode"), { recursive: true })
     await writeFile(join(workspace, "example.txt"), "hello\n")
+    await mkdir(join(workspace, ".opencode/skills/review-proof"), { recursive: true })
+    await writeFile(
+      join(workspace, ".opencode/skills/review-proof/SKILL.md"),
+      "---\nname: review-proof\ndescription: Use this repo verification skill during review.\n---\nRepository skill proof sentinel.\n",
+    )
+    await mkdir(join(root, "scratch"), { recursive: true })
+    await writeFile(join(root, "scratch/external-evidence.txt"), "External file proof sentinel.\n")
     await Bun.$`git init -q`.cwd(workspace)
 
     // The provider stays in the isolated global config so the runtime's generated config is exercised unchanged.
@@ -115,8 +178,15 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
           mock: {
             name: "Mock",
             package: "aisdk:@ai-sdk/openai-compatible",
-            settings: { baseURL: `http://127.0.0.1:${mock.server.port}/v1`, apiKey: "mock" },
-            models: { "mock-1": { name: "Mock", limit: { context: 1_000_000, output: 4_000 } } },
+            settings: {
+              baseURL: `http://127.0.0.1:${mock.server.port}/v1`,
+              apiKey:
+                "{env:OPEN_AZDO_PROVIDER_SENTINEL}:{env:SYSTEM_ACCESSTOKEN}:{env:OPEN_AZDO_LIVE_ACCESS_TOKEN}:{env:system_accesstoken}:{env:open_azdo_live_access_token}",
+            },
+            models: {
+              "mock-1": { name: "Mock", limit: { context: 1_000_000, output: 4_000 } },
+              "compact-1": { name: "Compact", limit: { context: 50_000, output: 4_000 } },
+            },
           },
         },
       }),
@@ -130,6 +200,11 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
       XDG_CACHE_HOME: join(root, "cache"),
       XDG_STATE_HOME: join(root, "state"),
       OPENCODE_DISABLE_MODELS_FETCH: "1",
+      OPEN_AZDO_PROVIDER_SENTINEL: "provider-sentinel",
+      SYSTEM_ACCESSTOKEN: "system-token-sentinel",
+      OPEN_AZDO_LIVE_ACCESS_TOKEN: "live-token-sentinel",
+      system_accesstoken: "lowercase-system-token-sentinel",
+      open_azdo_live_access_token: "lowercase-live-token-sentinel",
     }
   })
 
@@ -141,6 +216,7 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
   const run = (overrides: Partial<OpenCodeRunRequest> = {}) =>
     Effect.gen(function* () {
       const runner = yield* OpenCodeRunner
+
       return yield* runner.run({
         workspace,
         model: "mock/mock-1",
@@ -189,12 +265,188 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     expect(result.modelError?.message).toBe("Context too long")
   }, 60_000)
 
-  test("denies tools outside the read-only rules", async () => {
-    mock.state.script([{ tool: "shell", input: { command: "touch escaped.txt" } }, submit(validResult)])
+  test.each([
+    {
+      command: "bash -lc 'grep -qx hello example.txt && printf bash-verification-ok'",
+      expected: "bash-verification-ok",
+    },
+    {
+      command: `python3 -c 'from pathlib import Path; assert Path("example.txt").read_text() == "hello\\n"; print("python-verification-ok")'`,
+      expected: "python-verification-ok",
+    },
+  ])(
+    "allows workspace verification with $expected",
+    async ({ command, expected }) => {
+      mock.state.script([{ tool: "shell", input: { command } }, submit(validResult)])
+
+      const result = await Effect.runPromise(run())
+
+      expect(result.structured).toEqual(validResult)
+      expect(
+        mock.state.transcripts.some((request) =>
+          request.messages.some((message) => message.role === "tool" && message.content?.includes(expected)),
+        ),
+      ).toBe(true)
+    },
+    60_000,
+  )
+
+  test("uses scratch cwd and native reads for external evidence and saved long shell output", async () => {
+    mock.state.script([
+      { tool: "read", input: { path: join(root, "scratch/external-evidence.txt") } },
+      {
+        tool: "shell",
+        input: {
+          workdir: join(root, "scratch"),
+          command: `python3 -c 'from pathlib import Path; assert Path.cwd().name == "scratch"; [print("saved-output-proof-sentinel" if i == 5000 else str(i) + "x"*100) for i in range(10000)]'`,
+        },
+      },
+      { readSavedOutput: true, offset: 4_999, limit: 5 },
+      submit(validResult),
+    ])
+
+    const result = await Effect.runPromise(run())
+
+    const outputs = mock.state.transcripts.flatMap((request) =>
+      request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+    )
+
+    expect(result.structured).toEqual(validResult)
+    expect(outputs.some((output) => output.includes("External file proof sentinel."))).toBe(true)
+    expect(outputs.some((output) => output.includes("5001: saved-output-proof-sentinel"))).toBe(true)
+  }, 60_000)
+
+  test("discovers and loads repository skills through the native skill tool", async () => {
+    mock.state.script([{ tool: "skill", input: { id: "review-proof" } }, submit(validResult)])
+
+    const result = await Effect.runPromise(run())
+
+    expect(result.structured).toEqual(validResult)
+    expect(mock.state.transcripts[0]?.messages.some((message) => message.content?.includes("review-proof"))).toBe(true)
+    expect(
+      mock.state.transcripts.some((request) =>
+        request.messages.some(
+          (message) => message.role === "tool" && message.content?.includes("Repository skill proof sentinel."),
+        ),
+      ),
+    ).toBe(true)
+  }, 60_000)
+
+  test("awaits background-requested verification before accepting a structured submission", async () => {
+    mock.state.script([
+      {
+        tool: "shell",
+        input: {
+          command: `python3 -c 'import time; time.sleep(2.5); print("foreground-proof-sentinel")'`,
+          background: true,
+          timeout: 10_000,
+        },
+      },
+      submit(validResult),
+    ])
+
+    const result = await Effect.runPromise(run())
+
+    const outputs = mock.state.transcripts.flatMap((request) =>
+      request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+    )
+
+    expect(result.structured).toEqual(validResult)
+    expect(outputs.some((output) => output.includes("foreground-proof-sentinel"))).toBe(true)
+    expect(outputs.some((output) => output.includes("Command moved to the background"))).toBe(false)
+  }, 60_000)
+
+  test("omits Azure job credentials from the real server environment while preserving provider credentials", async () => {
+    mock.state.script([submit(validResult)])
 
     await Effect.runPromise(run())
 
-    expect(await Bun.file(join(workspace, "escaped.txt")).exists()).toBe(false)
+    expect(mock.state.authorizations.length).toBeGreaterThan(0)
+    expect(mock.state.authorizations.every((header) => header === "Bearer provider-sentinel::::")).toBe(true)
+  }, 60_000)
+
+  test("recovers the original task through native read after mid-run compaction", async () => {
+    const lateEvidence = {
+      baseRef: "base-ref-late-sentinel",
+      headRef: "head-ref-late-sentinel",
+      candidate: "candidate-late-sentinel",
+    }
+
+    const prompt =
+      "Original task scope sentinel: inspect the exact supplied refs.\n" +
+      JSON.stringify({ filler: "x".repeat(988) + "🚀".repeat(1_200) + "tail".repeat(1_000), ...lateEvidence })
+
+    mock.state.script([
+      { tool: "read", input: { path: "example.txt" }, inputTokens: 45_000 },
+      { text: "## Objective\n- Continue reviewing.\n\n## Next Move\n1. Recover the original task." },
+      { recoverTask: true, offset: 1, limit: 3 },
+      { recoverTask: true, offset: 4, limit: 3 },
+      { recoverTask: true, offset: 7, limit: 3 },
+      { recoverTask: true, offset: 10, limit: 3 },
+      submit(validResult),
+      { text: "Done." },
+    ])
+
+    const result = await Effect.runPromise(run({ model: "mock/compact-1", prompt }))
+
+    const afterCompaction = mock.state.transcripts.filter((request) =>
+      request.messages.some((message) => message.content?.includes("<conversation-checkpoint>")),
+    )
+
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(result.structured).toEqual(validResult)
+    expect(afterCompaction.length).toBeGreaterThan(0)
+    expect(afterCompaction.every((request) => taskFileFromSystem(request) === taskPath)).toBe(true)
+    expect(
+      afterCompaction.every((request) =>
+        request.messages.some(
+          (message) =>
+            message.role === "system" && message.content?.includes("You are an AI agent running in OpenCode"),
+        ),
+      ),
+    ).toBe(true)
+
+    const recovered = afterCompaction
+      .flatMap((request) =>
+        request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+      )
+      .join("\n")
+
+    for (const sentinel of Object.values(lateEvidence)) expect(recovered).toContain(sentinel)
+    expect(recovered).toContain("open_azdo_submit_result")
+    expect(recovered).toContain("🚀")
+    expect(recovered).not.toContain("\uFFFD")
+    expect(recovered).not.toContain("line truncated to")
+    expect(
+      mock.state.transcripts[0]?.messages.find((message) => message.role === "user")?.content?.startsWith(prompt),
+    ).toBe(true)
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
+  }, 60_000)
+
+  test("provides and cleans a recoverable task file for text requests", async () => {
+    const prompt = "Text task scope sentinel: inspect example.txt and explain the result."
+    mock.state.script([{ recoverTask: true }, { text: "Text task complete." }])
+
+    const result = await Effect.runPromise(run({ prompt, format: { type: "text" } }))
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(result.response).toBe("Text task complete.")
+    expect(
+      mock.state.transcripts[0]?.messages.some(
+        (message) => message.role === "system" && message.content?.includes("You are an AI agent running in OpenCode"),
+      ),
+    ).toBe(true)
+    expect(
+      mock.state.transcripts.some((request) =>
+        request.messages.some((message) => message.role === "tool" && message.content?.includes(prompt)),
+      ),
+    ).toBe(true)
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
   }, 60_000)
 
   test("fails provider errors without a usable payload", async () => {
@@ -224,14 +476,22 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     expect(failure).toBeInstanceOf(OpenCodeInvocationError)
     expect(failure.message).toContain("Timed out waiting for the OpenCode prompt")
 
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
+
     // Only the managed service resumes unreleased execution claims at boot, private servers never do.
     mock.state.script([])
+
     const service = Bun.spawn(["opencode", "serve", "--service", "--hostname=127.0.0.1", "--port=0"], {
       cwd: workspace,
       env: inheritedEnv,
       stdout: "ignore",
       stderr: "ignore",
     })
+
     await Bun.sleep(3_000)
     service.kill()
     await service.exited

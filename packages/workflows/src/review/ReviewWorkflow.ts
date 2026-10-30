@@ -1,9 +1,8 @@
 import { jsonrepair } from "jsonrepair"
 
-import type * as FileSystem from "effect/FileSystem"
 import * as Stdio from "effect/Stdio"
 import * as Stream from "effect/Stream"
-import { Cause, Effect, Exit, type Redacted } from "effect"
+import { Cause, Effect, Exit, Option, Schema, type Redacted } from "effect"
 import type * as Duration from "effect/Duration"
 
 import { type AzureContext, buildBuildLink, createAzureContext } from "@open-azdo/azdo/context"
@@ -15,11 +14,10 @@ import {
   resolveDiffRange,
   resolvePullRequestDiff,
   resolveReviewedSourceCommit,
-  type GitExec,
   type PullRequestDiff,
 } from "@open-azdo/core/git"
-import { stringifyJson } from "@open-azdo/core/json"
 import { logError, logInfo } from "@open-azdo/core/logging"
+import { OpenCodeOutputError } from "@open-azdo/core/errors"
 import { OpenCodeRunner, type OpenCodeRunResult, type OpenCodeRunUsage } from "@open-azdo/core/opencode"
 
 import { publishFailureSummary, publishReview } from "./ReviewPublisher"
@@ -43,9 +41,10 @@ import {
 } from "./ReviewSummary"
 import { buildReviewSummaryPrompt } from "./ReviewSummaryPrompt"
 import {
+  SKIPPED_REVIEW_SUMMARY,
   buildManagedReviewState,
   buildSummaryComment,
-  findManagedSummaryThread,
+  decodeManagedThreads,
   mergeManagedReviewResult,
   reconcileThreads,
   type ManagedReviewState,
@@ -80,10 +79,12 @@ type ReviewWorkflowOutput = {
 }
 
 type ResolvedReviewScope = {
-  readonly reviewMode: ReviewMode
   readonly scopedDiff: PullRequestDiff
   readonly previousReviewedCommit: string | undefined
-}
+} & (
+  | { readonly reviewMode: "full" | "follow-up" }
+  | { readonly reviewMode: "skipped"; readonly previousSummaryState: ManagedReviewState }
+)
 
 export type ReviewResultSource = "structured" | "repaired" | "fallback"
 
@@ -152,7 +153,7 @@ const resolveReviewScope = ({
     const previousReviewedCommit = previousSummaryState?.reviewedCommit
     const previousPullRequestBaseRef = previousSummaryState?.pullRequestBaseRef
 
-    if (!previousReviewedCommit) {
+    if (!previousSummaryState || !previousReviewedCommit) {
       return {
         reviewMode: "full",
         scopedDiff: fullPullRequestDiff,
@@ -179,6 +180,7 @@ const resolveReviewScope = ({
       if (previousPullRequestBaseRef === fullPullRequestDiff.baseRef) {
         return {
           reviewMode: "skipped",
+          previousSummaryState,
           scopedDiff: fullPullRequestDiff,
           previousReviewedCommit,
         } satisfies ResolvedReviewScope
@@ -279,7 +281,47 @@ const resolveReviewScope = ({
     } satisfies ResolvedReviewScope
   })
 
-const decodeStructuredReviewResult = ({
+/**
+ * Decodes either the provider's structured payload or repaired response text. Invalid payloads
+ * are absence here so each pass can apply its own fallback without hiding decoder defects.
+ */
+const decodeModelOutput = Effect.fn("ReviewWorkflow.decodeModelOutput")(function* <A, E>(
+  openCodeResult: OpenCodeRunResult,
+  decode: (payload: Schema.Json) => Effect.Effect<A, E>,
+) {
+  const decodeCandidate = (payload: Schema.Json) => decode(payload).pipe(Effect.orElseSucceed(() => undefined))
+
+  if (openCodeResult.structured !== undefined) {
+    const output = yield* decodeCandidate(openCodeResult.structured)
+
+    if (output !== undefined) {
+      return { output, source: "structured" as const }
+    }
+  }
+
+  // Repair can itself fail; a syntax error must still reach the pass's deterministic fallback.
+  const repairedText = Option.getOrUndefined(Option.liftThrowable(jsonrepair)(openCodeResult.response))
+
+  const repairedPayload =
+    repairedText === undefined
+      ? undefined
+      : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Json))(repairedText).pipe(
+          Effect.orElseSucceed(() => undefined),
+        )
+
+  if (repairedPayload !== undefined) {
+    const output = yield* decodeCandidate(repairedPayload)
+
+    if (output !== undefined) {
+      return { output, source: "repaired" as const }
+    }
+  }
+
+  return undefined
+})
+
+/** Rejects undecodable review output so a failed review never advances the persisted checkpoint. */
+const decodeStructuredReviewResult = Effect.fn("ReviewWorkflow.decodeReviewResult")(function* ({
   openCodeResult,
   changedLinesByFile,
   managedFindingCandidateIds,
@@ -287,85 +329,21 @@ const decodeStructuredReviewResult = ({
   readonly openCodeResult: OpenCodeRunResult
   readonly changedLinesByFile: Map<string, Set<number>>
   readonly managedFindingCandidateIds: ReadonlySet<number>
-}) =>
-  Effect.gen(function* () {
-    const decodeCandidate = (payload: unknown) =>
-      decodeReviewResult(payload, changedLinesByFile, managedFindingCandidateIds).pipe(
-        Effect.orElseSucceed(() => undefined),
-      )
+}) {
+  const decoded = yield* decodeModelOutput(openCodeResult, (payload) =>
+    decodeReviewResult(payload, changedLinesByFile, managedFindingCandidateIds),
+  )
 
-    if (openCodeResult.structured !== undefined) {
-      const structuredReviewResult = yield* decodeCandidate(openCodeResult.structured)
-      if (structuredReviewResult) {
-        return {
-          reviewResult: structuredReviewResult,
-          source: "structured" as const,
-        } as const
-      }
-    }
+  if (decoded) {
+    return { reviewResult: decoded.output, source: decoded.source }
+  }
 
-    const repairedPayload = yield* Effect.try({
-      try: () => JSON.parse(jsonrepair(openCodeResult.response)) as unknown,
-      catch: () => undefined,
-    })
-
-    if (repairedPayload !== undefined) {
-      const repairedReviewResult = yield* decodeCandidate(repairedPayload)
-      if (repairedReviewResult) {
-        return {
-          reviewResult: repairedReviewResult,
-          source: "repaired" as const,
-        } as const
-      }
-    }
-
-    return {
-      reviewResult: yield* decodeReviewResult(
-        {
-          verdict: "concerns",
-          findings: [],
-          resolvedManagedFindingIds: [],
-          unmappedNotes: [],
-        },
-        changedLinesByFile,
-        managedFindingCandidateIds,
-      ),
-      source: "fallback" as const,
-    } as const
+  return yield* new OpenCodeOutputError({
+    message: "OpenCode returned no valid review result. The commit remains unreviewed; rerun the review.",
+    // Model output is untrusted content and must not be echoed into failure comments or logs.
+    output: "",
   })
-
-const decodeStructuredSummaryPassResult = ({ openCodeResult }: { readonly openCodeResult: OpenCodeRunResult }) =>
-  Effect.gen(function* () {
-    const decodeCandidate = (payload: unknown) =>
-      decodeReviewSummaryPassOutput(payload).pipe(Effect.orElseSucceed(() => undefined))
-
-    if (openCodeResult.structured !== undefined) {
-      const structuredSummaryResult = yield* decodeCandidate(openCodeResult.structured)
-      if (structuredSummaryResult) {
-        return {
-          output: structuredSummaryResult,
-          source: "structured" as const,
-        } as const
-      }
-    }
-
-    const repairedPayload = yield* Effect.try({
-      try: () => JSON.parse(jsonrepair(openCodeResult.response)) as unknown,
-      catch: () => undefined,
-    })
-
-    if (repairedPayload !== undefined) {
-      const repairedSummaryResult = yield* decodeCandidate(repairedPayload)
-      if (repairedSummaryResult) {
-        return {
-          output: repairedSummaryResult,
-          source: "repaired" as const,
-        } as const
-      }
-    }
-
-    return undefined
-  })
+})
 
 const mapUsageTokens = (usage: OpenCodeRunUsage | undefined): ReviewHistoryTokens | undefined =>
   usage?.tokens
@@ -416,10 +394,17 @@ const aggregateUsage = (usages: ReadonlyArray<OpenCodeRunUsage | undefined>): Op
       )
     : undefined
 
-  return {
-    ...(hasAnyCost ? { costUsd: totalCostUsd } : {}),
-    ...(totalTokens ? { tokens: totalTokens } : {}),
+  let usage: OpenCodeRunUsage = {}
+
+  if (hasAnyCost) {
+    usage = { ...usage, costUsd: totalCostUsd }
   }
+
+  if (totalTokens) {
+    usage = { ...usage, tokens: totalTokens }
+  }
+
+  return usage
 }
 
 /**
@@ -442,6 +427,7 @@ const runReviewSummaryPass = ({
   Effect.gen(function* () {
     if (summarySubjects.length === 0) {
       yield* logInfo("Skipped summary pass because there were no summary subjects to group.")
+
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
@@ -455,24 +441,48 @@ const runReviewSummaryPass = ({
     const summaryPrompt = buildReviewSummaryPrompt(summarySubjects)
     yield* logInfo(`Built summary prompt for ${summarySubjects.length} summary subject(s).`)
 
-    const summaryOpenCodeResult = yield* openCodeRunner.run({
-      workspace: config.workspace,
-      model: config.model,
-      agent: config.agent,
-      variant: config.opencodeVariant,
-      timeout: config.opencodeTimeout,
-      prompt: summaryPrompt,
-      inheritedEnv: config.inheritedEnv,
-      format: REVIEW_SUMMARY_OUTPUT_FORMAT,
-    })
+    const summaryRunExit = yield* Effect.exit(
+      openCodeRunner.run({
+        workspace: config.workspace,
+        model: config.model,
+        agent: config.agent,
+        variant: config.opencodeVariant,
+        timeout: config.opencodeTimeout,
+        prompt: summaryPrompt,
+        inheritedEnv: config.inheritedEnv,
+        format: REVIEW_SUMMARY_OUTPUT_FORMAT,
+      }),
+    )
+
+    if (Exit.isFailure(summaryRunExit)) {
+      // A typed runner error cannot invalidate a completed review. Defects and cancellation still propagate.
+      if (Cause.hasInterrupts(summaryRunExit.cause) || Cause.hasDies(summaryRunExit.cause)) {
+        return yield* Effect.failCause(summaryRunExit.cause)
+      }
+
+      yield* logInfo("Falling back to deterministic summary rendering because the optional summary run failed.")
+
+      return {
+        renderedSummary: renderReviewSummaryFallback({
+          verdict: reviewResult.verdict,
+          reviewMode,
+          subjects: summarySubjects,
+        }),
+        summaryPrompt,
+        summaryResultSource: "fallback",
+        summaryFallbackUsed: true,
+      } satisfies SummaryRenderResult
+    }
+
+    const summaryOpenCodeResult = summaryRunExit.value
+
     yield* logInfo("Received OpenCode summary response.")
 
-    const decodedSummaryResult = yield* decodeStructuredSummaryPassResult({
-      openCodeResult: summaryOpenCodeResult,
-    })
+    const decodedSummaryResult = yield* decodeModelOutput(summaryOpenCodeResult, decodeReviewSummaryPassOutput)
 
     if (!decodedSummaryResult) {
       yield* logInfo("Falling back to deterministic summary rendering because summary output was not decodable.")
+
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
@@ -495,6 +505,7 @@ const runReviewSummaryPass = ({
       yield* logInfo("Falling back to deterministic summary rendering because summary validation failed.", {
         issues: validatedSummaryResult.issues,
       })
+
       return {
         renderedSummary: renderReviewSummaryFallback({
           verdict: reviewResult.verdict,
@@ -523,6 +534,7 @@ const runReviewSummaryPass = ({
     } satisfies SummaryRenderResult
   })
 
+/** Builds a persisted run record while preserving absence for usage and build fields not supplied. */
 const buildReviewHistoryEntry = ({
   reviewedCommit,
   reviewMode,
@@ -538,18 +550,38 @@ const buildReviewHistoryEntry = ({
 }): ReviewHistoryEntry => {
   const tokens = mapUsageTokens(usage)
 
-  return {
+  let entry: ReviewHistoryEntry = {
     reviewedCommit,
     reviewedAt: new Date().toISOString(),
     reviewMode,
     model: config.model,
-    ...(config.opencodeVariant ? { variant: config.opencodeVariant } : {}),
-    ...(config.buildNumber ? { buildNumber: config.buildNumber } : {}),
-    ...(config.buildId ? { buildId: config.buildId } : {}),
-    ...(buildLink ? { buildLink } : {}),
-    ...(usage?.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
-    ...(tokens ? { tokens } : {}),
   }
+
+  if (config.opencodeVariant) {
+    entry = { ...entry, variant: config.opencodeVariant }
+  }
+
+  if (config.buildNumber) {
+    entry = { ...entry, buildNumber: config.buildNumber }
+  }
+
+  if (config.buildId) {
+    entry = { ...entry, buildId: config.buildId }
+  }
+
+  if (buildLink) {
+    entry = { ...entry, buildLink }
+  }
+
+  if (usage?.costUsd !== undefined) {
+    entry = { ...entry, costUsd: usage.costUsd }
+  }
+
+  if (tokens) {
+    entry = { ...entry, tokens }
+  }
+
+  return entry
 }
 
 const appendReviewHistoryEntry = ({
@@ -580,7 +612,7 @@ const appendReviewHistoryEntry = ({
 const writeReviewWorkflowOutput = (config: ReviewWorkflowConfig, output: ReviewWorkflowOutput) => {
   if (config.json) {
     return writeStdout(
-      `${stringifyJson({
+      `${JSON.stringify({
         status: "ok",
         verdict: output.verdict,
         findings: output.findingsCount,
@@ -607,323 +639,359 @@ const writeReviewWorkflowOutput = (config: ReviewWorkflowConfig, output: ReviewW
   )
 }
 
-export const planReviewWorkflow = (
+const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(function* (
   config: ReviewWorkflowConfig,
   azureContext: AzureContext,
   buildLink: string | undefined,
-): Effect.Effect<
-  PlannedReviewWorkflow,
-  unknown,
-  AzureDevOpsClient | OpenCodeRunner | GitExec | FileSystem.FileSystem
-> =>
-  Effect.gen(function* () {
-    const azureClient = yield* AzureDevOpsClient
-    const openCodeRunner = yield* OpenCodeRunner
+  authenticatedIdentity: string,
+) {
+  const azureClient = yield* AzureDevOpsClient
+  const openCodeRunner = yield* OpenCodeRunner
 
-    yield* logInfo(`Resolved review configuration for ${config.model}.`)
-    yield* logInfo("Loading pull request metadata, git diff, source commit, and existing threads.")
+  yield* logInfo(`Resolved review configuration for ${config.model}.`)
+  yield* logInfo("Loading pull request metadata, git diff, source commit, and existing threads.")
 
-    const [metadata, fullPullRequestDiff, reviewedSourceCommit, existingThreads] = yield* Effect.all(
-      [
-        azureClient.getPullRequestMetadata({
-          context: azureContext,
-          token: config.systemAccessToken,
-        }),
-        resolvePullRequestDiff({
-          workspace: config.workspace,
-          targetBranch: config.targetBranch,
-        }),
-        resolveReviewedSourceCommit({
-          workspace: config.workspace,
-          sourceCommitId: config.sourceCommitId,
-        }),
-        azureClient.listThreads({
-          context: azureContext,
-          token: config.systemAccessToken,
-        }),
-      ],
-      { concurrency: "unbounded" },
-    )
-
-    yield* logInfo(`Loaded review inputs for ${fullPullRequestDiff.changedFiles.length} changed file(s).`)
-
-    const previousSummaryState = findManagedSummaryThread(existingThreads)?.reviewState
-    const { reviewMode, scopedDiff, previousReviewedCommit } = yield* resolveReviewScope({
-      config,
-      fullPullRequestDiff,
-      reviewedSourceCommit,
-      previousSummaryState,
-    })
-
-    if (reviewMode === "skipped" && previousSummaryState) {
-      const summaryContent = buildSummaryComment({
-        verdict: previousSummaryState.verdict,
-        summary: "⏭️ No new commits since the last managed review. Previous verdict still applies.",
-        unmappedNotes: [],
-        severityCounts: previousSummaryState.severityCounts,
-        buildLink,
-        persistedState: previousSummaryState,
-      })
-      const actions = reconcileThreads({
-        existingThreads,
-        summaryContent,
-        summaryVerdict: previousSummaryState.verdict,
-        inlineFindings: [],
-        resolvedManagedFindingIds: [],
-        reviewMode,
-        scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
-        scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
-      })
-
-      yield* logInfo("Skipped review because no new commits were added since the last managed review.")
-
-      return {
-        metadata,
-        connectedWorkItems: [],
-        existingThreads,
-        fullPullRequestDiff,
-        scopedDiff,
-        reviewContext: buildReviewContext({
-          metadata,
-          reviewMode,
-          previousReviewedCommit,
-          pullRequestBaseRef: fullPullRequestDiff.baseRef,
-          gitDiff: scopedDiff,
-          existingThreads,
-        }),
-        summaryFallbackUsed: false,
-        summarySubjects: [],
-        summaryState: previousSummaryState,
-        summaryContent,
-        inlineFindings: [],
-        resolvedManagedFindingIds: [],
-        actions,
-        reviewMode,
-        output: {
-          findingsCount: previousSummaryState.findingsCount,
-          inlineFindingsCount: previousSummaryState.inlineFindingsCount,
-          unmappedNotesCount: previousSummaryState.unmappedNotesCount,
-          verdict: previousSummaryState.verdict,
-          buildSummary: summaryContent,
-          actionCount: actions.length,
-          reviewMode,
-          skipped: true,
-        },
-      } satisfies PlannedReviewWorkflow
-    }
-
-    const connectedWorkItems = yield* azureClient
-      .getPullRequestWorkItems({
+  const [metadata, fullPullRequestDiff, reviewedSourceCommit, existingThreads] = yield* Effect.all(
+    [
+      azureClient.getPullRequestMetadata({
         context: azureContext,
         token: config.systemAccessToken,
-        workItemRefs: metadata.workItemRefs,
-      })
-      .pipe(
-        Effect.tap((workItems) =>
-          logInfo(
-            workItems.length > 0
-              ? `Loaded ${workItems.length} connected work item(s).`
-              : "No connected work items found.",
-          ),
-        ),
-        Effect.catchTags({
-          AzureDevOpsHttpError: (error) =>
-            logInfo("Failed to load connected work item context. Continuing without work item enrichment.", {
-              workItemRefs: metadata.workItemRefs.length,
-              status: error.status,
-              url: error.url,
-            }).pipe(Effect.as(undefined)),
-          AzureDevOpsDecodeError: (error) =>
-            logInfo("Failed to decode connected work item context. Continuing without work item enrichment.", {
-              workItemRefs: metadata.workItemRefs.length,
-              url: error.url,
-            }).pipe(Effect.as(undefined)),
-        }),
-      )
+      }),
+      resolvePullRequestDiff({
+        workspace: config.workspace,
+        targetBranch: config.targetBranch,
+      }),
+      resolveReviewedSourceCommit({
+        workspace: config.workspace,
+        sourceCommitId: config.sourceCommitId,
+      }),
+      azureClient.listThreads({
+        context: azureContext,
+        token: config.systemAccessToken,
+      }),
+    ],
+    { concurrency: "unbounded" },
+  )
 
-    const reviewContext = buildReviewContext({
-      metadata,
-      reviewMode,
-      previousReviewedCommit,
-      pullRequestBaseRef: fullPullRequestDiff.baseRef,
-      gitDiff: scopedDiff,
-      existingThreads,
-      ...(connectedWorkItems ? { connectedWorkItems } : {}),
-    })
-    yield* logInfo(`Built ${reviewMode} review context.`)
+  yield* logInfo(
+    `Loaded review inputs for ${fullPullRequestDiff.changedFiles.length + fullPullRequestDiff.deletedFiles.length} changed file(s).`,
+  )
 
-    const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext)
-    yield* logInfo("Built review prompt.")
-    const managedFindingCandidateIds = new Set(
-      reviewContext.managedFindingCandidates?.items.map((item) => item.id) ?? [],
-    )
+  const managedThreads = decodeManagedThreads(existingThreads, authenticatedIdentity)
+  const previousSummaryState = managedThreads.summary?.reviewState
 
-    const openCodeResult = yield* openCodeRunner.run({
-      workspace: config.workspace,
-      model: config.model,
-      agent: config.agent,
-      variant: config.opencodeVariant,
-      timeout: config.opencodeTimeout,
-      prompt,
-      inheritedEnv: config.inheritedEnv,
-      format: REVIEW_OUTPUT_FORMAT,
-    })
-    yield* logInfo("Received OpenCode response.")
+  const scope = yield* resolveReviewScope({
+    config,
+    fullPullRequestDiff,
+    reviewedSourceCommit,
+    previousSummaryState,
+  })
 
-    const { reviewResult, source } = yield* decodeStructuredReviewResult({
-      openCodeResult,
-      changedLinesByFile: scopedDiff.changedLinesByFile,
-      managedFindingCandidateIds,
-    })
-    yield* logInfo(`Decoded review result: ${reviewResult.verdict} with ${reviewResult.findings.length} finding(s).`)
+  // The skipped scope carries its prior state, so later review history needs no mode assertion.
+  const { reviewMode, scopedDiff, previousReviewedCommit } = scope
 
-    const mergedReview = mergeManagedReviewResult({
-      existingThreads,
-      scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
-      scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
-      reviewResult,
-    })
-    const outstandingReviewResult = mergedReview.reviewResult
-    const summarySubjects = buildReviewSummarySubjects({
-      reviewResult: outstandingReviewResult,
-      retainedFindings: mergedReview.retainedFindings,
-    })
-    const summaryRender = yield* runReviewSummaryPass({
-      config,
-      openCodeRunner,
-      reviewMode,
-      reviewResult: outstandingReviewResult,
-      summarySubjects,
-    })
+  if (reviewMode === "skipped") {
+    const previousSummaryState = scope.previousSummaryState
 
-    const reviewHistory = appendReviewHistoryEntry({
-      previousSummaryState,
-      reviewedCommit: reviewedSourceCommit,
-      reviewMode: reviewMode as Exclude<ReviewMode, "skipped">,
-      config,
-      buildLink,
-      usage: aggregateUsage([openCodeResult.usage, summaryRender.summaryOpenCodeResult?.usage]),
-    })
-
-    const summaryState = buildManagedReviewState({
-      reviewedCommit: reviewedSourceCommit,
-      pullRequestBaseRef: fullPullRequestDiff.baseRef,
-      reviewResult: outstandingReviewResult,
-      reviewHistory,
-    })
-    const summaryContent = buildSummaryComment({
-      verdict: summaryState.verdict,
-      summary: summaryRender.renderedSummary,
-      unmappedNotes: outstandingReviewResult.unmappedNotes,
-      severityCounts: summaryState.severityCounts,
-      buildLink,
-      persistedState: summaryState,
-    })
+    const summaryContent = SKIPPED_REVIEW_SUMMARY
 
     const actions = reconcileThreads({
-      existingThreads,
+      managedThreads,
       summaryContent,
-      summaryVerdict: summaryState.verdict,
-      inlineFindings: reviewResult.inlineFindings,
-      resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
+      summaryVerdict: previousSummaryState.verdict,
+      inlineFindings: [],
+      resolvedManagedFindingIds: [],
       reviewMode,
       scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
       scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
     })
-    yield* logInfo(`Prepared ${actions.length} review action(s).`)
+
+    yield* logInfo("Skipped review because no new commits were added since the last managed review.")
 
     return {
       metadata,
-      connectedWorkItems: connectedWorkItems ?? [],
+      connectedWorkItems: [],
       existingThreads,
       fullPullRequestDiff,
       scopedDiff,
-      reviewContext,
-      prompt,
-      openCodeResult,
-      reviewResult: outstandingReviewResult,
-      reviewResultSource: source,
-      summaryFallbackUsed: summaryRender.summaryFallbackUsed,
-      summarySubjects,
-      ...(summaryRender.summaryPrompt ? { summaryPrompt: summaryRender.summaryPrompt } : {}),
-      ...(summaryRender.summaryOpenCodeResult ? { summaryOpenCodeResult: summaryRender.summaryOpenCodeResult } : {}),
-      ...(summaryRender.summaryPassOutput ? { summaryPassOutput: summaryRender.summaryPassOutput } : {}),
-      ...(summaryRender.summaryResultSource ? { summaryResultSource: summaryRender.summaryResultSource } : {}),
-      summaryState,
+      reviewContext: buildReviewContext({
+        metadata,
+        reviewMode,
+        previousReviewedCommit,
+        pullRequestBaseRef: fullPullRequestDiff.baseRef,
+        gitDiff: scopedDiff,
+        existingThreads,
+        managedThreads,
+      }),
+      summaryFallbackUsed: false,
+      summarySubjects: [],
+      summaryState: previousSummaryState,
       summaryContent,
-      inlineFindings: reviewResult.inlineFindings,
-      resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
+      inlineFindings: [],
+      resolvedManagedFindingIds: [],
       actions,
       reviewMode,
       output: {
-        findingsCount: summaryState.findingsCount,
-        inlineFindingsCount: summaryState.inlineFindingsCount,
-        unmappedNotesCount: summaryState.unmappedNotesCount,
-        verdict: summaryState.verdict,
+        findingsCount: previousSummaryState.findingsCount,
+        inlineFindingsCount: previousSummaryState.inlineFindingsCount,
+        unmappedNotesCount: previousSummaryState.unmappedNotesCount,
+        verdict: previousSummaryState.verdict,
         buildSummary: summaryContent,
         actionCount: actions.length,
         reviewMode,
-        skipped: false,
+        skipped: true,
       },
     } satisfies PlannedReviewWorkflow
-  }).pipe(Effect.withLogSpan("open-azdo.review"))
+  }
 
-export const runReviewWorkflow = (config: ReviewWorkflowConfig) =>
-  Effect.gen(function* () {
-    const azureContext = createAzureContext(config)
-    const buildLink = buildBuildLink(config)
-    const azureClient = yield* AzureDevOpsClient
-    const exit = yield* Effect.exit(planReviewWorkflow(config, azureContext, buildLink))
+  const connectedWorkItems = yield* azureClient
+    .getPullRequestWorkItems({
+      context: azureContext,
+      token: config.systemAccessToken,
+      workItemRefs: metadata.workItemRefs,
+    })
+    .pipe(
+      Effect.tap((workItems) =>
+        logInfo(
+          workItems.length > 0
+            ? `Loaded ${workItems.length} connected work item(s).`
+            : "No connected work items found.",
+        ),
+      ),
+      Effect.catchTags({
+        AzureDevOpsHttpError: (error) =>
+          logInfo("Failed to load connected work item context. Continuing without work item enrichment.", {
+            workItemRefs: metadata.workItemRefs.length,
+            status: error.status,
+            url: error.url,
+          }).pipe(Effect.as(undefined)),
+        AzureDevOpsDecodeError: (error) =>
+          logInfo("Failed to decode connected work item context. Continuing without work item enrichment.", {
+            workItemRefs: metadata.workItemRefs.length,
+            url: error.url,
+          }).pipe(Effect.as(undefined)),
+      }),
+    )
 
-    if (Exit.isSuccess(exit)) {
-      const publishResult = yield* publishReview({
+  const reviewContext = buildReviewContext({
+    metadata,
+    reviewMode,
+    previousReviewedCommit,
+    pullRequestBaseRef: fullPullRequestDiff.baseRef,
+    gitDiff: scopedDiff,
+    existingThreads,
+    managedThreads,
+    connectedWorkItems,
+  })
+
+  yield* logInfo(`Built ${reviewMode} review context.`, {
+    omittedThreads: reviewContext.pullRequestThreads?.omittedCount,
+    omittedWorkItems: reviewContext.connectedWorkItems?.omittedCount,
+    omittedHistoricalFindings: reviewContext.managedFindings?.omittedCount,
+    managedFindingCandidates: reviewContext.managedFindingCandidates?.items.length ?? 0,
+  })
+
+  const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext, config.opencodeTimeout)
+  yield* logInfo("Built review prompt.")
+
+  const managedFindingCandidateIds = new Set(reviewContext.managedFindingCandidates?.items.map((item) => item.id) ?? [])
+
+  const openCodeResult = yield* openCodeRunner.run({
+    workspace: config.workspace,
+    model: config.model,
+    agent: config.agent,
+    variant: config.opencodeVariant,
+    timeout: config.opencodeTimeout,
+    prompt,
+    inheritedEnv: config.inheritedEnv,
+    format: REVIEW_OUTPUT_FORMAT,
+  })
+
+  yield* logInfo("Received OpenCode response.")
+
+  const { reviewResult, source } = yield* decodeStructuredReviewResult({
+    openCodeResult,
+    changedLinesByFile: scopedDiff.changedLinesByFile,
+    managedFindingCandidateIds,
+  })
+
+  yield* logInfo(`Decoded review result: ${reviewResult.verdict} with ${reviewResult.findings.length} finding(s).`)
+
+  const mergedReview = mergeManagedReviewResult({
+    managedThreads,
+    scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
+    scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
+    reviewResult,
+  })
+
+  const outstandingReviewResult = mergedReview.reviewResult
+
+  const summarySubjects = buildReviewSummarySubjects({
+    reviewResult: outstandingReviewResult,
+    retainedFindings: mergedReview.retainedFindings,
+  })
+
+  const summaryRender = yield* runReviewSummaryPass({
+    config,
+    openCodeRunner,
+    reviewMode,
+    reviewResult: outstandingReviewResult,
+    summarySubjects,
+  })
+
+  const reviewHistory = appendReviewHistoryEntry({
+    previousSummaryState,
+    reviewedCommit: reviewedSourceCommit,
+    reviewMode,
+    config,
+    buildLink,
+    usage: aggregateUsage([openCodeResult.usage, summaryRender.summaryOpenCodeResult?.usage]),
+  })
+
+  const summaryState = buildManagedReviewState({
+    reviewedCommit: reviewedSourceCommit,
+    pullRequestBaseRef: fullPullRequestDiff.baseRef,
+    reviewResult: outstandingReviewResult,
+    reviewHistory,
+  })
+
+  const { renderedSummary, ...summaryArtifacts } = summaryRender
+
+  const summaryContent = buildSummaryComment({
+    verdict: summaryState.verdict,
+    summary: renderedSummary,
+    summaryOnlyFindings: outstandingReviewResult.summaryOnlyFindings,
+    unmappedNotes: outstandingReviewResult.unmappedNotes,
+    severityCounts: summaryState.severityCounts,
+    buildLink,
+    persistedState: summaryState,
+  })
+
+  const actions = reconcileThreads({
+    managedThreads,
+    summaryContent,
+    summaryVerdict: summaryState.verdict,
+    inlineFindings: reviewResult.inlineFindings,
+    resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
+    reviewMode,
+    scopedChangedLinesByFile: scopedDiff.changedLinesByFile,
+    scopedDeletedLinesByFile: scopedDiff.deletedLinesByFile,
+  })
+
+  yield* logInfo(`Prepared ${actions.length} review action(s).`)
+
+  const plan: PlannedReviewWorkflow = {
+    metadata,
+    connectedWorkItems: connectedWorkItems ?? [],
+    existingThreads,
+    fullPullRequestDiff,
+    scopedDiff,
+    reviewContext,
+    prompt,
+    openCodeResult,
+    reviewResult: outstandingReviewResult,
+    reviewResultSource: source,
+    ...summaryArtifacts,
+    summarySubjects,
+    summaryState,
+    summaryContent,
+    inlineFindings: reviewResult.inlineFindings,
+    resolvedManagedFindingIds: reviewResult.resolvedManagedFindingIds,
+    actions,
+    reviewMode,
+    output: {
+      findingsCount: summaryState.findingsCount,
+      inlineFindingsCount: summaryState.inlineFindingsCount,
+      unmappedNotesCount: summaryState.unmappedNotesCount,
+      verdict: summaryState.verdict,
+      buildSummary: summaryContent,
+      actionCount: actions.length,
+      reviewMode,
+      skipped: false,
+    },
+  }
+
+  return plan
+}, Effect.withLogSpan("open-azdo.review"))
+
+/** Plans a review or capture after resolving the access token's marker authority exactly once. */
+export const planReviewWorkflow = Effect.fn("ReviewWorkflow.plan")(function* (
+  config: ReviewWorkflowConfig,
+  azureContext: AzureContext,
+  buildLink: string | undefined,
+) {
+  const azureClient = yield* AzureDevOpsClient
+
+  const authenticatedIdentity = yield* azureClient.getAuthenticatedIdentity({
+    context: azureContext,
+    token: config.systemAccessToken,
+  })
+
+  return yield* planAuthenticatedReview(config, azureContext, buildLink, authenticatedIdentity)
+})
+
+/** Publishes finding mutations before committing the summary checkpoint; any failure remains retryable. */
+export const runReviewWorkflow = Effect.fn("ReviewWorkflow.run")(function* (config: ReviewWorkflowConfig) {
+  const azureContext = createAzureContext(config)
+  const buildLink = buildBuildLink(config)
+  const azureClient = yield* AzureDevOpsClient
+
+  const authenticatedIdentity = yield* azureClient.getAuthenticatedIdentity({
+    context: azureContext,
+    token: config.systemAccessToken,
+  })
+
+  const exit = yield* Effect.exit(
+    Effect.gen(function* () {
+      const planned = yield* planAuthenticatedReview(config, azureContext, buildLink, authenticatedIdentity)
+
+      const published = yield* publishReview({
+        context: azureContext,
+        token: config.systemAccessToken,
+        authenticatedIdentity,
+        dryRun: config.dryRun,
+        summaryContent: planned.summaryContent,
+        summaryVerdict: planned.summaryState.verdict,
+        inlineFindings: planned.inlineFindings,
+        resolvedManagedFindingIds: planned.resolvedManagedFindingIds,
+        reviewMode: planned.reviewMode,
+        scopedChangedLinesByFile: planned.scopedDiff.changedLinesByFile,
+        scopedDeletedLinesByFile: planned.scopedDiff.deletedLinesByFile,
+      })
+
+      return { ...planned.output, buildSummary: published.summaryContent, actionCount: published.actions.length }
+    }),
+  )
+
+  if (Exit.isSuccess(exit)) {
+    yield* writeReviewWorkflowOutput(config, exit.value)
+
+    return 0
+  }
+
+  if (Cause.hasInterrupts(exit.cause)) {
+    return yield* Effect.failCause(exit.cause)
+  }
+
+  const failureReason = "The review could not be completed. See the pipeline logs for details."
+
+  // A failed listing is not an empty authoritative view. Failure publication remains best effort,
+  // and can only reuse state freshly decoded from this token's nondeleted comments.
+  yield* azureClient.listThreads({ context: azureContext, token: config.systemAccessToken }).pipe(
+    Effect.flatMap((threads) =>
+      publishFailureSummary({
         context: azureContext,
         token: config.systemAccessToken,
         dryRun: config.dryRun,
-        summaryContent: exit.value.summaryContent,
-        summaryVerdict: exit.value.summaryState.verdict,
-        inlineFindings: exit.value.inlineFindings,
-        resolvedManagedFindingIds: exit.value.resolvedManagedFindingIds,
-        reviewMode: exit.value.reviewMode,
-        scopedChangedLinesByFile: exit.value.scopedDiff.changedLinesByFile,
-        scopedDeletedLinesByFile: exit.value.scopedDiff.deletedLinesByFile,
-      })
+        buildLink,
+        managedThreads: decodeManagedThreads(threads, authenticatedIdentity),
+        failureReason,
+      }),
+    ),
+    Effect.ignore,
+  )
 
-      yield* writeReviewWorkflowOutput(config, {
-        ...exit.value.output,
-        buildSummary: publishResult.summaryContent,
-        actionCount: publishResult.actions.length,
-      })
+  yield* logError("open-azdo failed.", { cause: Cause.pretty(exit.cause) })
 
-      return 0
-    }
-
-    const failureReason = Cause.pretty(exit.cause)
-    const existingThreads = yield* azureClient
-      .listThreads({
-        context: azureContext,
-        token: config.systemAccessToken,
-      })
-      .pipe(
-        Effect.match({
-          onFailure: () => [],
-          onSuccess: (threads) => threads,
-        }),
-      )
-
-    yield* publishFailureSummary({
-      context: azureContext,
-      token: config.systemAccessToken,
-      dryRun: config.dryRun,
-      buildLink,
-      existingThreads,
-      failureReason,
-      preservedSummaryState: findManagedSummaryThread(existingThreads)?.reviewState,
-    }).pipe(Effect.ignore)
-
-    yield* logError("open-azdo failed.", {
-      cause: failureReason,
-    })
-
-    return 1
-  })
+  return 1
+})

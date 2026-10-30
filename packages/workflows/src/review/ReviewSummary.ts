@@ -1,7 +1,5 @@
 import { Effect, Match, Schema } from "effect"
 
-import { normalizePath } from "@open-azdo/core/paths"
-
 import { ReviewOutputValidationError } from "../errors"
 import {
   type NormalizedReviewResult,
@@ -22,6 +20,7 @@ export const ReviewSummarySubjectKindSchema = Schema.Literals([
   "unmapped-note",
   "carried-forward-finding",
 ])
+
 export type ReviewSummarySubjectKind = Schema.Schema.Type<typeof ReviewSummarySubjectKindSchema>
 
 export const ReviewSummarySubjectSchema = Schema.Struct({
@@ -35,17 +34,20 @@ export const ReviewSummarySubjectSchema = Schema.Struct({
   line: Schema.optionalKey(PositiveInt),
   retentionReason: Schema.optionalKey(ReviewSummaryRetentionReasonSchema),
 })
+
 export type ReviewSummarySubject = Schema.Schema.Type<typeof ReviewSummarySubjectSchema>
 
 export const ReviewSummaryHighlightSchema = Schema.Struct({
   subjectIds: Schema.Array(NonEmptyString),
   text: NonEmptyString,
 })
+
 export type ReviewSummaryHighlight = Schema.Schema.Type<typeof ReviewSummaryHighlightSchema>
 
 export const ReviewSummaryPassOutputSchema = Schema.Struct({
   highlights: Schema.Array(ReviewSummaryHighlightSchema),
 })
+
 export type ReviewSummaryPassOutput = Schema.Schema.Type<typeof ReviewSummaryPassOutputSchema>
 
 export const ReviewSummaryPassOutputJsonSchema = {
@@ -105,7 +107,7 @@ const createFindingSubject = (
   body: finding.body,
   severity: finding.severity,
   confidence: finding.confidence,
-  filePath: normalizePath(finding.filePath),
+  filePath: finding.filePath,
   line: finding.line,
 })
 
@@ -129,6 +131,7 @@ export const buildReviewSummarySubjects = ({
   readonly retainedFindings?: ReadonlyArray<RetainedManagedFinding> | undefined
 }): ReadonlyArray<ReviewSummarySubject> => {
   const subjects: ReviewSummarySubject[] = []
+
   const retainedManagedFindingIds = new Set(
     (retainedFindings ?? []).flatMap((retainedFinding) =>
       retainedFinding.finding.managedFindingId !== undefined ? [retainedFinding.finding.managedFindingId] : [],
@@ -136,6 +139,7 @@ export const buildReviewSummarySubjects = ({
   )
 
   let inlineFindingIndex = 1
+
   for (const finding of reviewResult.inlineFindings) {
     if (finding.managedFindingId !== undefined && retainedManagedFindingIds.has(finding.managedFindingId)) {
       continue
@@ -146,6 +150,7 @@ export const buildReviewSummarySubjects = ({
   }
 
   let summaryOnlyFindingIndex = 1
+
   for (const finding of reviewResult.summaryOnlyFindings) {
     subjects.push(
       createFindingSubject(`summary-only-finding-${summaryOnlyFindingIndex}`, "summary-only-finding", finding),
@@ -154,12 +159,14 @@ export const buildReviewSummarySubjects = ({
   }
 
   let unmappedNoteIndex = 1
+
   for (const note of reviewResult.unmappedNotes) {
     subjects.push(createUnmappedNoteSubject(`unmapped-note-${unmappedNoteIndex}`, note))
     unmappedNoteIndex += 1
   }
 
   let carriedForwardFindingIndex = 1
+
   for (const retainedFinding of retainedFindings ?? []) {
     subjects.push({
       ...createFindingSubject(
@@ -175,7 +182,8 @@ export const buildReviewSummarySubjects = ({
   return subjects
 }
 
-export const decodeReviewSummaryPassOutput = (payload: unknown) =>
+/** Decodes model JSON into grouped highlights before subject-reference validation. */
+export const decodeReviewSummaryPassOutput = (payload: Schema.Json) =>
   Schema.decodeUnknownEffect(ReviewSummaryPassOutputSchema)(payload).pipe(
     Effect.mapError(
       (error) =>
@@ -297,7 +305,8 @@ export const renderReviewSummaryFromHighlights = ({
 
 /**
  * Renders the plain fallback summary used when the summary pass is skipped or rejected.
- * The output is intentionally simple and can only mention the validated subject list.
+ * Only inline and retained findings need short bullets here; final comment composition renders
+ * complete summary-only findings and genuine notes once, independently of the highlights.
  */
 export const renderReviewSummaryFallback = ({
   verdict,
@@ -314,7 +323,14 @@ export const renderReviewSummaryFallback = ({
     return overview
   }
 
-  return `${overview}\n\n${subjects.map((subject) => `- ${renderSubjectFallbackText(subject)}`).join("\n")}`
+  // Complete summary-only evidence and genuine notes are rendered once by the final comment owner.
+  const highlights = subjects.flatMap((subject) =>
+    subject.kind === "inline-finding" || subject.kind === "carried-forward-finding"
+      ? [`- ${renderSubjectFallbackText(subject)}`]
+      : [],
+  )
+
+  return highlights.length > 0 ? `${overview}\n\n${highlights.join("\n")}` : overview
 }
 
 export const validateReviewSummaryPassOutput = ({

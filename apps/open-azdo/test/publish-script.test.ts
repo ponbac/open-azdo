@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Schema } from "effect"
 
 import { runPublishRelease } from "../src/PublishRelease"
 
@@ -21,6 +22,17 @@ type CommandCall = {
 }
 
 type TestDeps = Parameters<typeof runPublishRelease>[1]
+
+const decodeTestManifest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.String,
+      description: Schema.String,
+      files: Schema.Array(Schema.String),
+      scripts: Schema.Struct({ build: Schema.String }),
+    }),
+  ),
+)
 
 const createTestRepo = async (): Promise<TestSetup> => {
   const repoRoot = await mkdtemp(join(tmpdir(), "open-azdo-publish-"))
@@ -82,14 +94,16 @@ const makeRunner = (
 
     if (request.command === "npm") {
       expect(request.args).toEqual(["view", "open-azdo", "version", "--silent"])
+
       return {
         stdout: `${options.latestReleasedVersion}\n`,
       }
     }
 
     if (request.command === "bun" && request.args[0] === "install") {
-      const packageManifest = JSON.parse(await readFile(repo.packageManifestPath, "utf8")) as { version: string }
+      const packageManifest = decodeTestManifest(await readFile(repo.packageManifestPath, "utf8"))
       await writeFile(repo.lockfilePath, `apps/open-azdo version = "${packageManifest.version}"\n`, "utf8")
+
       return {
         stdout: "",
       }
@@ -159,7 +173,10 @@ describe("publish release script", () => {
     }
 
     expect(failure).toBeInstanceOf(Error)
-    expect((failure as Error).message).toContain("already published at 0.2.9")
+
+    if (failure instanceof Error) {
+      expect(failure.message).toContain("already published at 0.2.9")
+    }
 
     expect(commandCalls).toEqual([
       {
@@ -190,6 +207,7 @@ describe("publish release script", () => {
         latestReleasedVersion: "0.2.9",
         prompt: async () => {
           promptCount += 1
+
           return "0.2.10"
         },
       }),
@@ -197,14 +215,8 @@ describe("publish release script", () => {
 
     expect(promptCount).toBe(1)
 
-    const packageManifest = JSON.parse(await readFile(repo.packageManifestPath, "utf8")) as {
-      version: string
-      description: string
-      files: string[]
-      scripts: {
-        build: string
-      }
-    }
+    const packageManifest = decodeTestManifest(await readFile(repo.packageManifestPath, "utf8"))
+
     expect(packageManifest.version).toBe("0.2.10")
     expect(packageManifest.description).toBe("Secure Azure DevOps pull request review CLI powered by OpenCode")
     expect(packageManifest.files).toEqual(["dist", "README.md", "SECURITY.md", "examples"])
@@ -253,6 +265,7 @@ describe("publish release script", () => {
         latestReleasedVersion: "0.2.8",
         prompt: async () => {
           promptCount += 1
+
           return "0.2.10"
         },
       }),
@@ -348,6 +361,7 @@ describe("publish release script", () => {
           latestReleasedVersion: "0.2.9",
           prompt: async () => {
             promptCount += 1
+
             return "0.2.10"
           },
         }),
@@ -367,7 +381,11 @@ describe("publish release script", () => {
 
     expect(promptCount).toBe(0)
     expect(failure).toBeInstanceOf(Error)
-    expect((failure as Error).message).toContain("npm authentication failed")
+
+    if (failure instanceof Error) {
+      expect(failure.message).toContain("npm authentication failed")
+    }
+
     expect(commandCalls).toEqual([
       {
         command: "npm",
@@ -402,8 +420,12 @@ describe("publish release script", () => {
     }
 
     expect(failure).toBeInstanceOf(Error)
-    expect((failure as Error).message).toContain(repo.pnpmPipelinePath)
-    expect((failure as Error).message).toContain("Failed to locate OpenAzdoVersion")
+
+    if (failure instanceof Error) {
+      expect(failure.message).toContain(repo.pnpmPipelinePath)
+      expect(failure.message).toContain("Failed to locate OpenAzdoVersion")
+    }
+
     expect(commandCalls).toEqual([
       {
         command: "npm",

@@ -1,20 +1,12 @@
 import { BunServices } from "@effect/platform-bun"
 
 import { Layer } from "effect"
-import * as Logger from "effect/Logger"
-
-import { makeRuntimeLogger } from "./Logging"
+import { JsonLoggerLayer, PrettyLoggerLayer } from "./Logging"
 
 /**
- * Builds the shared Bun platform runtime with the selected operational logger.
+ * Shared Bun platform runtime with human-readable operational logs on stderr.
  */
-export const makeBaseRuntimeLayer = ({ jsonLogs }: { readonly jsonLogs: boolean }) =>
-  Layer.mergeAll(
-    BunServices.layer,
-    Logger.layer([makeRuntimeLogger(jsonLogs)]),
-    Layer.succeed(Logger.LogToStderr)(true),
-  )
+export const BaseRuntimeLayer = Layer.mergeAll(BunServices.layer, PrettyLoggerLayer)
 
-export const BaseRuntimeLayer = makeBaseRuntimeLayer({
-  jsonLogs: false,
-})
+/** Shared Bun platform runtime with machine-readable operational logs on stderr. */
+export const JsonBaseRuntimeLayer = Layer.mergeAll(BunServices.layer, JsonLoggerLayer)

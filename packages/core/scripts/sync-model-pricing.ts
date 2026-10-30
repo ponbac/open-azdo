@@ -2,8 +2,11 @@ import { fileURLToPath } from "node:url"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 
+import { Schema } from "effect"
+
 import {
   MODELS_DEV_SOURCE_URL,
+  ModelsDevApiResponse,
   normalizeModelsDevPricingSnapshot,
   renderModelsDevPricingSnapshotModule,
 } from "../src/model-pricing/internal/ModelsDevPricingSnapshot"
@@ -13,11 +16,12 @@ const OUTPUT_PATH = fileURLToPath(OUTPUT_URL)
 
 const run = async () => {
   const response = await fetch(MODELS_DEV_SOURCE_URL)
+
   if (!response.ok) {
     throw new Error(`Failed to fetch ${MODELS_DEV_SOURCE_URL}: HTTP ${String(response.status)}`)
   }
 
-  const payload = await response.json()
+  const payload = Schema.decodeUnknownSync(ModelsDevApiResponse)(await response.json())
   const snapshot = normalizeModelsDevPricingSnapshot(payload, new Date().toISOString())
   const moduleSource = renderModelsDevPricingSnapshotModule(snapshot)
 

@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 
-import { AzureDevOpsClient } from "@open-azdo/azdo/client"
+import {
+  AzureDevOpsClient,
+  AzureDevOpsHttpError,
+  type CreateThreadInput,
+  type UpdateCommentInput,
+  type UpdateThreadStatusInput,
+} from "@open-azdo/azdo/client"
 import { publishFailureSummary, publishReview } from "../src/review/ReviewPublisher"
-import { buildSummaryComment } from "../src/review/ThreadReconciliation"
+import { buildSummaryComment, decodeManagedThreads } from "../src/review/ThreadReconciliation"
 
 import {
+  BOT_ID,
   makeAzureContext,
   makeAzureDevOpsClient,
   makeManagedReviewState,
@@ -24,11 +31,13 @@ const summaryContent = buildSummaryComment(makeSummarySnapshot())
 
 describe("review publisher", () => {
   test("creates summary and inline threads for new managed findings", async () => {
-    const finding = makeReviewFinding()
+    const finding = makeReviewFinding({ filePath: "back\\slash.ts" })
     const createThreadCalls: string[] = []
+    const inlinePaths: string[] = []
 
     const result = await Effect.runPromise(
       publishReview({
+        authenticatedIdentity: BOT_ID,
         context,
         token,
         dryRun: false,
@@ -37,7 +46,7 @@ describe("review publisher", () => {
         inlineFindings: [finding],
         resolvedManagedFindingIds: [],
         reviewMode: "full",
-        scopedChangedLinesByFile,
+        scopedChangedLinesByFile: new Map([[finding.filePath, new Set([finding.line])]]),
         scopedDeletedLinesByFile,
       }).pipe(
         Effect.provideService(
@@ -46,6 +55,8 @@ describe("review publisher", () => {
             createThread: (input) =>
               Effect.sync(() => {
                 createThreadCalls.push(input.content)
+
+                if (input.threadContext?.filePath) inlinePaths.push(input.threadContext.filePath)
               }),
           }),
         ),
@@ -54,21 +65,25 @@ describe("review publisher", () => {
 
     expect(result.actions).toHaveLength(2)
     expect(createThreadCalls).toHaveLength(2)
+    expect(inlinePaths).toEqual(["/back\\slash.ts"])
   })
 
   test("updates existing summary, reuses linked findings, and closes only explicitly resolved threads", async () => {
     const finding = makeReviewFinding({
       managedFindingId: 2,
     })
+
     const staleFinding = makeReviewFinding({
       title: "Stale finding",
       line: 3,
     })
+
     const updateCommentCalls: number[] = []
     const updateStatusCalls: number[] = []
 
     const result = await Effect.runPromise(
       publishReview({
+        authenticatedIdentity: BOT_ID,
         context,
         token,
         dryRun: false,
@@ -102,16 +117,17 @@ describe("review publisher", () => {
       ),
     )
 
-    expect(result.actions.map((action) => action.type)).toEqual(["upsert-summary", "upsert-finding", "close-thread"])
-    expect(updateCommentCalls).toEqual([10, 20])
-    expect(updateStatusCalls).toEqual([1, 2, 3])
+    expect(result.actions.map((action) => action.type)).toEqual(["upsert-finding", "close-thread", "upsert-summary"])
+    expect(updateCommentCalls).toEqual([20, 10])
+    expect(updateStatusCalls).toEqual([2, 3, 1])
   })
 
-  test("resolves the existing summary thread when the review passes", async () => {
+  test.each([1, 2])("resolves the summary and any active failure notice (failure status %i)", async (failureStatus) => {
     const updateStatusCalls: Array<{ threadId: number; status: number }> = []
 
     await Effect.runPromise(
       publishReview({
+        authenticatedIdentity: BOT_ID,
         context,
         token,
         dryRun: false,
@@ -126,7 +142,21 @@ describe("review publisher", () => {
         Effect.provideService(
           AzureDevOpsClient,
           makeAzureDevOpsClient({
-            listThreads: () => Effect.succeed([makeManagedSummaryThread()]),
+            listThreads: () =>
+              Effect.succeed([
+                makeManagedSummaryThread(),
+                {
+                  id: 8,
+                  status: failureStatus,
+                  comments: [
+                    {
+                      id: 80,
+                      author: { id: BOT_ID },
+                      content: 'Failed\n<!-- open-azdo-failure:{"kind":"failure"} -->',
+                    },
+                  ],
+                },
+              ]),
             updateThreadStatus: (input) =>
               Effect.sync(() => {
                 updateStatusCalls.push({ threadId: input.threadId, status: input.status })
@@ -136,7 +166,14 @@ describe("review publisher", () => {
       ),
     )
 
-    expect(updateStatusCalls).toEqual([{ threadId: 1, status: 2 }])
+    expect(updateStatusCalls).toEqual(
+      failureStatus === 1
+        ? [
+            { threadId: 8, status: 2 },
+            { threadId: 1, status: 2 },
+          ]
+        : [{ threadId: 1, status: 2 }],
+    )
   })
 
   test("surfaces comment post failures", async () => {
@@ -144,6 +181,7 @@ describe("review publisher", () => {
 
     const exit = await Effect.runPromiseExit(
       publishReview({
+        authenticatedIdentity: BOT_ID,
         context,
         token,
         dryRun: false,
@@ -158,7 +196,15 @@ describe("review publisher", () => {
         Effect.provideService(
           AzureDevOpsClient,
           makeAzureDevOpsClient({
-            createThread: () => Effect.fail(new Error("boom") as never),
+            createThread: () =>
+              Effect.fail(
+                new AzureDevOpsHttpError({
+                  message: "boom",
+                  url: "https://dev.azure.com/acme/project/_apis/git/repositories/repo-1/pullRequests/42/threads",
+                  status: 500,
+                  body: "",
+                }),
+              ),
           }),
         ),
       ),
@@ -167,8 +213,10 @@ describe("review publisher", () => {
     expect(exit._tag).toBe("Failure")
   })
 
-  test("publishes a managed failure summary", async () => {
-    const updateCommentCalls: number[] = []
+  test("publishes failure separately without overwriting or copying the committed checkpoint", async () => {
+    const createThreadCalls: CreateThreadInput[] = []
+    const updateCommentCalls: UpdateCommentInput[] = []
+    const updateStatusCalls: UpdateThreadStatusInput[] = []
 
     await Effect.runPromise(
       publishFailureSummary({
@@ -176,25 +224,49 @@ describe("review publisher", () => {
         token,
         dryRun: false,
         buildLink: undefined,
-        existingThreads: [makeManagedSummaryThread()],
+        managedThreads: decodeManagedThreads(
+          [
+            makeManagedSummaryThread(
+              makeManagedReviewState({
+                reviewedCommit: "preserved-sha",
+              }),
+            ),
+          ],
+          BOT_ID,
+        ),
         failureReason: "Failed badly",
-        preservedSummaryState: makeManagedReviewState({
-          reviewedCommit: "preserved-sha",
-        }),
       }).pipe(
         Effect.provideService(
           AzureDevOpsClient,
           makeAzureDevOpsClient({
+            createThread: (input) =>
+              Effect.sync(() => {
+                createThreadCalls.push(input)
+              }),
             updateComment: (input) =>
               Effect.sync(() => {
-                updateCommentCalls.push(input.commentId)
+                updateCommentCalls.push(input)
+              }),
+            updateThreadStatus: (input) =>
+              Effect.sync(() => {
+                updateStatusCalls.push(input)
               }),
           }),
         ),
       ),
     )
 
-    expect(updateCommentCalls).toEqual([10])
+    expect(updateCommentCalls).toEqual([])
+    expect(updateStatusCalls).toEqual([])
+    expect(createThreadCalls).toHaveLength(1)
+    expect(createThreadCalls[0]?.status).toBe(1)
+
+    const content = createThreadCalls[0]?.content ?? ""
+
+    expect(content).toContain("Verdict: **fail**")
+    expect(content).toContain("Review execution failed.\n\nFailed badly")
+    expect(content).toContain('<!-- open-azdo-failure:{"kind":"failure"} -->')
+    expect(content).not.toContain("reviewedCommit")
   })
 
   test("ignores existing thread comments without string content", async () => {
@@ -203,6 +275,7 @@ describe("review publisher", () => {
 
     const result = await Effect.runPromise(
       publishReview({
+        authenticatedIdentity: BOT_ID,
         context,
         token,
         dryRun: false,
@@ -241,39 +314,5 @@ describe("review publisher", () => {
 
     expect(result.actions.some((action) => action.type === "upsert-summary")).toBe(true)
     expect(createThreadCalls).toHaveLength(1)
-  })
-
-  test("skipped mode only updates the managed summary thread", async () => {
-    const updateCommentCalls: number[] = []
-    const result = await Effect.runPromise(
-      publishReview({
-        context,
-        token,
-        dryRun: false,
-        summaryContent,
-        summaryVerdict: "concerns",
-        inlineFindings: [],
-        resolvedManagedFindingIds: [],
-        reviewMode: "skipped",
-        scopedChangedLinesByFile,
-        scopedDeletedLinesByFile,
-      }).pipe(
-        Effect.provideService(
-          AzureDevOpsClient,
-          makeAzureDevOpsClient({
-            listThreads: () =>
-              Effect.succeed([makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)]),
-            updateComment: (input) =>
-              Effect.sync(() => {
-                updateCommentCalls.push(input.commentId)
-              }),
-          }),
-        ),
-      ),
-    )
-
-    expect(result.actions).toHaveLength(1)
-    expect(result.actions[0]?.type).toBe("upsert-summary")
-    expect(updateCommentCalls).toEqual([10])
   })
 })

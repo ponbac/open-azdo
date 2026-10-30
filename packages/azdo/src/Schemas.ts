@@ -1,15 +1,24 @@
-import { Schema } from "effect"
+import { Effect, Match, Option, Schema } from "effect"
+
+/** Token-authoritative connection data; missing or blank authenticated identities cannot establish ownership. */
+export const ConnectionDataResponseSchema = Schema.Struct({
+  authenticatedUser: Schema.Struct({
+    id: Schema.Trim.check(Schema.isNonEmpty()),
+  }),
+})
 
 export const PullRequestWorkItemRefSchema = Schema.Struct({
   id: Schema.String,
   url: Schema.optionalKey(Schema.NullOr(Schema.String)),
 })
+
 export type PullRequestWorkItemRef = {
   readonly id: string
   readonly url?: string | undefined
 }
 
 const IdentityRefSchema = Schema.Struct({
+  id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   displayName: Schema.optionalKey(Schema.NullOr(Schema.String)),
 })
 
@@ -78,6 +87,7 @@ const NullableIntSchema = Schema.NullOr(Schema.Int)
 
 export const ExistingThreadSchema = Schema.Struct({
   id: Schema.Int,
+  isDeleted: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   status: Schema.optionalKey(Schema.NullOr(ExistingThreadStatusSchema)),
   comments: Schema.Array(
     Schema.Struct({
@@ -109,11 +119,13 @@ export const ExistingThreadSchema = Schema.Struct({
     ),
   ),
 })
+
 export type ExistingThread = Schema.Schema.Type<typeof ExistingThreadSchema>
 
 export const ExistingThreadsResponseSchema = Schema.Struct({
   value: Schema.optionalKey(Schema.Array(ExistingThreadSchema)),
 })
+
 export type ExistingThreadsResponse = Schema.Schema.Type<typeof ExistingThreadsResponseSchema>
 
 const WorkItemAssignedToSchema = Schema.Union([
@@ -124,22 +136,59 @@ const WorkItemAssignedToSchema = Schema.Union([
   Schema.Null,
 ])
 
+// Work item custom fields are sparse and heterogeneous. Ignore malformed optional
+// enrichment fields at the response boundary while keeping required IDs strict.
+const OptionalTextField = Schema.optionalKey(Schema.String).pipe(
+  Schema.catchDecoding(() => Effect.succeed(Option.none())),
+)
+
+/** Accept complete decimal integers, never blank strings, hexadecimal values, or numeric prefixes. */
+export const WorkItemIntegerSchema = Schema.Union([
+  Schema.Int,
+  Schema.String.check(Schema.isPattern(/^\s*[+-]?\d+\s*$/)).pipe(
+    Schema.decodeTo(Schema.NumberFromString),
+    Schema.decodeTo(Schema.Int),
+  ),
+])
+
+const OptionalIntegerField = Schema.optionalKey(WorkItemIntegerSchema).pipe(
+  Schema.catchDecoding(() => Effect.succeed(Option.none())),
+)
+
+const WorkItemFieldsSchema = Schema.Struct({
+  "System.Title": OptionalTextField,
+  "System.WorkItemType": OptionalTextField,
+  "System.State": OptionalTextField,
+  "Microsoft.VSTS.Common.Priority": OptionalIntegerField,
+  "System.AssignedTo": Schema.optionalKey(WorkItemAssignedToSchema).pipe(
+    Schema.catchDecoding(() => Effect.succeed(Option.none())),
+  ),
+  "System.Description": OptionalTextField,
+  "Microsoft.VSTS.Common.AcceptanceCriteria": OptionalTextField,
+  "Microsoft.VSTS.TCM.ReproSteps": OptionalTextField,
+  "System.IterationPath": OptionalTextField,
+  "System.AreaPath": OptionalTextField,
+  "System.Tags": OptionalTextField,
+})
+
 const WorkItemRelationSchema = Schema.Struct({
   rel: Schema.optionalKey(Schema.NullOr(Schema.String)),
   url: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  attributes: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown))),
+  attributes: Schema.optionalKey(Schema.NullOr(Schema.Struct({ id: OptionalIntegerField }))),
 })
 
 export const WorkItemBatchItemSchema = Schema.Struct({
   id: Schema.Int,
-  fields: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  fields: Schema.optionalKey(WorkItemFieldsSchema),
   relations: Schema.optionalKey(Schema.NullOr(Schema.Array(WorkItemRelationSchema))),
 })
+
 export type WorkItemBatchItem = Schema.Schema.Type<typeof WorkItemBatchItemSchema>
 
 export const WorkItemsBatchResponseSchema = Schema.Struct({
   value: Schema.optionalKey(Schema.Array(WorkItemBatchItemSchema)),
 })
+
 export type WorkItemsBatchResponse = Schema.Schema.Type<typeof WorkItemsBatchResponseSchema>
 
 const WorkItemIdentitySchema = Schema.Struct({
@@ -153,11 +202,13 @@ export const WorkItemCommentSchema = Schema.Struct({
   isDeleted: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   createdBy: Schema.optionalKey(Schema.NullOr(WorkItemIdentitySchema)),
 })
+
 export type WorkItemComment = Schema.Schema.Type<typeof WorkItemCommentSchema>
 
 export const WorkItemCommentsResponseSchema = Schema.Struct({
   comments: Schema.optionalKey(Schema.Array(WorkItemCommentSchema)),
 })
+
 export type WorkItemCommentsResponse = Schema.Schema.Type<typeof WorkItemCommentsResponseSchema>
 
 export const PullRequestWorkItemCommentSchema = Schema.Struct({
@@ -222,18 +273,14 @@ export type PullRequestWorkItem = {
   }>
 }
 
-export const readAssignedToDisplayName = (value: unknown): string | undefined => {
-  if (typeof value === "string") {
-    const trimmed = value.trim()
-    return trimmed.length > 0 ? trimmed : undefined
-  }
-
-  if (value && typeof value === "object" && "displayName" in value && typeof value.displayName === "string") {
-    const trimmed = value.displayName.trim()
-    return trimmed.length > 0 ? trimmed : undefined
-  }
-
-  return undefined
-}
+/** Extracts a display name from an already decoded Azure DevOps assignee field. */
+export const readAssignedToDisplayName = (
+  value: Schema.Schema.Type<typeof WorkItemAssignedToSchema> | undefined,
+): string | undefined =>
+  Match.value(value).pipe(
+    Match.when(Match.string, (name) => name.trim() || undefined),
+    Match.when({ displayName: Match.string }, ({ displayName }) => displayName.trim() || undefined),
+    Match.orElse(() => undefined),
+  )
 
 export const WorkItemAssignedToFieldSchema = WorkItemAssignedToSchema

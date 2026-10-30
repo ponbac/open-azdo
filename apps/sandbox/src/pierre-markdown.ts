@@ -7,5 +7,6 @@ const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/
  */
 export function extractFenceLanguage(className: string | undefined): string {
   const raw = className?.match(CODE_FENCE_LANGUAGE_REGEX)?.[1] ?? "text"
+
   return raw === "gitignore" ? "ini" : raw
 }

@@ -1,5 +1,3 @@
-import { stringifyJson } from "@open-azdo/core/json"
-
 import type { ReviewSummarySubject } from "./ReviewSummary"
 
 export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySubject>) =>
@@ -7,13 +5,13 @@ export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySu
     "You are writing the human-facing summary for an Azure DevOps pull-request review.",
     "You are not reviewing the repository.",
     "Do not inspect the repo, diff, pull request, work items, or thread bodies.",
-    "Do not use repository, shell, or search tools, or ask to use them. The only tool you may use is the provided result submission tool.",
+    "You may reread this run's saved task file for recovery, but do not use repository, shell or search tools to investigate new issues.",
     "You may only summarize the structured review subjects provided below.",
     "Do not introduce any issue, risk, or concern that is not present in the subject list.",
     "Group related subject IDs together when that improves the summary.",
     "Do not invent verdicts, counts, or status text. The caller renders those separately.",
-    "Return strict JSON only with the shape:",
-    stringifyJson({
+    "Use the result submission tool as your final action. Only if it is unavailable, return strict JSON text. The result has this shape:",
+    JSON.stringify({
       highlights: [
         {
           subjectIds: ["subject-id"],
@@ -25,5 +23,5 @@ export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySu
     "Every highlight must reference only the provided subject IDs.",
     "Use emojis if appropriate.",
     "Structured review subjects:",
-    stringifyJson(subjects),
+    JSON.stringify(subjects),
   ].join("\n\n")

@@ -1,17 +1,30 @@
 import { describe, expect, test } from "bun:test"
+import { join, resolve } from "node:path"
 import * as ConfigProvider from "effect/ConfigProvider"
-import { Effect, Layer, Option } from "effect"
+import { Effect, Layer, Option, Result } from "effect"
 import * as Duration from "effect/Duration"
 
 import { inferOrganizationFromCollectionUrl } from "../src/AppConfig"
+import { ConfigError } from "../src/errors"
 import {
   SandboxCaptureConfig,
-  makeSandboxCaptureConfigLayer,
+  SandboxCaptureConfigLive,
+  SandboxCaptureCommandInput,
   type SandboxCaptureCliInput,
 } from "../src/SandboxCaptureConfig"
 import { makeBaseEnv, makeReviewCliInput, resolveAppConfig } from "./helpers"
 
 describe("config", () => {
+  const sandboxEnvironment = {
+    OPEN_AZDO_LIVE_MODEL: "openai/gpt-5.4",
+    OPEN_AZDO_LIVE_COLLECTION_URL: "https://dev.azure.com/acme",
+    OPEN_AZDO_LIVE_ORGANIZATION: "acme",
+    OPEN_AZDO_LIVE_PROJECT: "project",
+    OPEN_AZDO_LIVE_REPOSITORY_ID: "repo-1",
+    OPEN_AZDO_LIVE_PULL_REQUEST_ID: "42",
+    OPEN_AZDO_LIVE_ACCESS_TOKEN: "system-token",
+  }
+
   const makeSandboxCaptureCliInput = (overrides: Partial<SandboxCaptureCliInput> = {}): SandboxCaptureCliInput => ({
     model: Option.none(),
     opencodeVariant: Option.none(),
@@ -32,7 +45,8 @@ describe("config", () => {
       return yield* SandboxCaptureConfig
     }).pipe(
       Effect.provide(
-        makeSandboxCaptureConfigLayer(cliInput).pipe(
+        SandboxCaptureConfigLive.pipe(
+          Layer.provide(Layer.succeed(SandboxCaptureCommandInput, cliInput)),
           Layer.provide(
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
@@ -46,15 +60,29 @@ describe("config", () => {
       ),
     )
 
-  test("requires a model and system access token", async () => {
-    const exit = await Effect.runPromiseExit(
-      resolveAppConfig(makeReviewCliInput(), {
-        ...makeBaseEnv(),
-        SYSTEM_ACCESSTOKEN: undefined,
-      }),
-    )
+  test.each([
+    { name: "model", model: Option.none<string>(), token: "system-token", issue: "model" },
+    {
+      name: "system access token",
+      model: Option.some("openai/gpt-5.4"),
+      token: undefined,
+      issue: "systemAccessToken",
+    },
+  ])("requires a $name", async ({ model, token, issue }) => {
+    const result = await resolveAppConfig(makeReviewCliInput({ model }), {
+      ...makeBaseEnv(),
+      SYSTEM_ACCESSTOKEN: token,
+    }).pipe(Effect.result, Effect.runPromise)
 
-    expect(exit._tag).toBe("Failure")
+    expect(Result.isFailure(result)).toBe(true)
+
+    if (Result.isFailure(result)) {
+      expect(result.failure).toBeInstanceOf(ConfigError)
+
+      if (result.failure instanceof ConfigError) {
+        expect(result.failure.issues.join(" ")).toContain(issue)
+      }
+    }
   })
 
   test("parses Azure DevOps Services collection URLs", () => {
@@ -207,17 +235,34 @@ describe("config", () => {
 
   test("writes sandbox captures under the repo-root .captures directory by default", async () => {
     const config = await Effect.runPromise(
-      resolveSandboxCaptureConfig(makeSandboxCaptureCliInput(), {
-        OPEN_AZDO_LIVE_MODEL: "openai/gpt-5.4",
-        OPEN_AZDO_LIVE_COLLECTION_URL: "https://dev.azure.com/acme",
-        OPEN_AZDO_LIVE_ORGANIZATION: "acme",
-        OPEN_AZDO_LIVE_PROJECT: "project",
-        OPEN_AZDO_LIVE_REPOSITORY_ID: "repo-1",
-        OPEN_AZDO_LIVE_PULL_REQUEST_ID: "42",
-        OPEN_AZDO_LIVE_ACCESS_TOKEN: "system-token",
-      }),
+      resolveSandboxCaptureConfig(makeSandboxCaptureCliInput(), sandboxEnvironment),
     )
 
-    expect(config.output.replaceAll("\\", "/")).toEndWith("/.captures/acme-project-pr-42.json")
+    const repositoryRoot = resolve(import.meta.dir, "../../..")
+
+    expect(config.output).toBe(join(repositoryRoot, ".captures", "acme-project-pr-42.json"))
+  })
+
+  test.each([
+    { name: "missing model", key: "OPEN_AZDO_LIVE_MODEL", value: undefined, issue: "OPEN_AZDO_LIVE_MODEL" },
+    {
+      name: "invalid PR id",
+      key: "OPEN_AZDO_LIVE_PULL_REQUEST_ID",
+      value: "0",
+      issue: "OPEN_AZDO_LIVE_PULL_REQUEST_ID",
+    },
+    { name: "unsafe PR id", key: "OPEN_AZDO_LIVE_PULL_REQUEST_ID", value: "9007199254740992", issue: "pullRequestId" },
+  ])("returns a typed configuration failure for $name", async ({ key, value, issue }) => {
+    const result = await resolveSandboxCaptureConfig(makeSandboxCaptureCliInput(), {
+      ...sandboxEnvironment,
+      [key]: value,
+    }).pipe(Effect.result, Effect.runPromise)
+
+    expect(Result.isFailure(result)).toBe(true)
+
+    if (Result.isFailure(result)) {
+      expect(result.failure).toBeInstanceOf(ConfigError)
+      expect(result.failure.issues.join(" ")).toContain(issue)
+    }
   })
 })

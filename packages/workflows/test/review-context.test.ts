@@ -3,6 +3,16 @@ import { describe, expect, test } from "bun:test"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import { type PullRequestDiff } from "@open-azdo/core/git"
 import { buildReviewContext } from "../src/review/ReviewContext"
+import { normalizeReviewResult } from "../src/review/ReviewOutput"
+
+import { decodeManagedThreads } from "../src/review/ThreadReconciliation"
+import { BOT_ID, makeManagedFindingThread, makeManagedSummaryThread, makeReviewFinding } from "./helpers"
+
+const buildContext = (input: Omit<Parameters<typeof buildReviewContext>[0], "managedThreads">) =>
+  buildReviewContext({
+    ...input,
+    managedThreads: decodeManagedThreads(input.existingThreads ?? [], BOT_ID),
+  })
 
 const makeThreadComment = (
   overrides: Partial<ExistingThread["comments"][number]> = {},
@@ -45,15 +55,17 @@ describe("review context", () => {
       baseRef: "abc123",
       headRef: "HEAD",
       diffText,
-      changedFiles: ["src/example.ts", "src/other.ts"],
+      changedFiles: ["src/example.ts", "src/other.ts", "image.bin", "src/new-name.ts", "empty.txt"],
       changedLinesByFile: new Map([
         ["src/example.ts", new Set([2, 3, 8, 9])],
         ["src/other.ts", new Set([10])],
       ]),
+      deletedFiles: ["src/removed.ts", "empty-old.txt"],
+      renamedFromByFile: new Map([["src/new-name.ts", "src/old-name.ts"]]),
       deletedLinesByFile: new Map(),
     }
 
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -81,11 +93,88 @@ describe("review context", () => {
         changedLineRanges: [{ start: 10, end: 10 }],
         hunkHeaders: ["@@ -10,1 +10,2 @@ export function run() {"],
       },
+      { path: "image.bin", changedLineRanges: [], hunkHeaders: [] },
+      { path: "src/new-name.ts", renamedFrom: "src/old-name.ts", changedLineRanges: [], hunkHeaders: [] },
+      { path: "empty.txt", changedLineRanges: [], hunkHeaders: [] },
     ])
+    expect(context.deletedFiles).toEqual(["src/removed.ts", "empty-old.txt"])
+  })
+
+  test("clips per-file manifest detail without changing the authoritative line map", () => {
+    const lines = Array.from({ length: 500 }, (_, index) => index * 10 + 1)
+    const changedLines = new Set(lines)
+    const changedLinesByFile = new Map([["src/scattered.ts", changedLines]])
+
+    const context = buildContext({
+      metadata: { title: "Scattered changes", description: "One file with many hunks" },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        changedFiles: ["src/scattered.ts"],
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
+        changedLinesByFile,
+        deletedLinesByFile: new Map(),
+        diffText: [
+          "diff --git a/src/scattered.ts b/src/scattered.ts",
+          "--- a/src/scattered.ts",
+          "+++ b/src/scattered.ts",
+          ...lines.map((line) => `@@ -${line} +${line} @@\n-old\n+new`),
+        ].join("\n"),
+      },
+    })
+
+    expect(context.changedFiles[0]?.changedLineRanges).toHaveLength(100)
+    expect(context.changedFiles[0]?.hunkHeaders).toHaveLength(100)
+    expect(context.diffMetadataTruncated).toBe(true)
+
+    const finding = makeReviewFinding({ filePath: "src/scattered.ts", line: 4_991 })
+
+    const normalized = normalizeReviewResult(
+      { verdict: "concerns", findings: [finding], resolvedManagedFindingIds: [], unmappedNotes: [] },
+      changedLinesByFile,
+    )
+
+    expect(normalized.inlineFindings).toEqual([finding])
+    expect(normalized.summaryOnlyFindings).toEqual([])
+  })
+
+  test.each([0, 80])("keeps every path when a wide manifest drops optional detail (path padding %i)", (padding) => {
+    const paths = Array.from({ length: 5_000 }, (_, index) => `src/${"x".repeat(padding)}file-${index}.ts`)
+
+    const context = buildContext({
+      metadata: { title: "Wide changes", description: "Many one-hunk files" },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        changedFiles: paths,
+        deletedFiles: [],
+        renamedFromByFile: new Map([[paths[0] ?? "", "src/old-name.ts"]]),
+        changedLinesByFile: new Map(paths.map((path) => [path, new Set([1])])),
+        deletedLinesByFile: new Map(),
+        diffText: paths
+          .map((path) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+new`)
+          .join("\n"),
+      },
+    })
+
+    expect(context.changedFiles.map((file) => file.path)).toEqual(paths)
+    expect(context.changedFiles[0]?.renamedFrom).toBe("src/old-name.ts")
+    expect(
+      context.changedFiles.every((file) => file.changedLineRanges === undefined && file.hunkHeaders === undefined),
+    ).toBe(true)
+    expect(context.diffMetadataTruncated).toBe(true)
+
+    if (padding === 0) expect(JSON.stringify(context.changedFiles).length).toBeLessThan(250_000)
+    else expect(JSON.stringify(context.changedFiles).length).toBeGreaterThan(250_000)
   })
 
   test("includes follow-up review metadata when present", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -105,6 +194,8 @@ describe("review context", () => {
         ].join("\n"),
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([1])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
     })
@@ -118,6 +209,7 @@ describe("review context", () => {
 
   test("does not embed full patches or file contents in the manifest", () => {
     const largeLine = `+${"x".repeat(200)}`
+
     const diffText = [
       "diff --git a/src/huge.ts b/src/huge.ts",
       "--- a/src/huge.ts",
@@ -126,7 +218,7 @@ describe("review context", () => {
       ...Array.from({ length: 200 }, () => largeLine),
     ].join("\n")
 
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Large PR",
         description: "Touches one big file",
@@ -139,6 +231,8 @@ describe("review context", () => {
         diffText,
         changedFiles: ["src/huge.ts"],
         changedLinesByFile: new Map([["src/huge.ts", new Set(Array.from({ length: 200 }, (_, index) => index + 1))]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
     })
@@ -151,7 +245,7 @@ describe("review context", () => {
   })
 
   test("keeps connected work item text intact when it fits within the generous budget", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -165,6 +259,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       connectedWorkItems: [
@@ -222,7 +318,7 @@ describe("review context", () => {
   })
 
   test("truncates a single oversize connected work item to fit the aggregate budget", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -236,6 +332,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       connectedWorkItems: [
@@ -264,10 +362,11 @@ describe("review context", () => {
     expect(context.connectedWorkItems?.items).toHaveLength(1)
     expect(context.connectedWorkItems?.items[0]?.descriptionMarkdown).toContain("[truncated]")
     expect(context.connectedWorkItems?.items[0]?.descriptionMarkdown?.length ?? 0).toBeGreaterThan(800)
+    expect(JSON.stringify(context.connectedWorkItems).length).toBeLessThanOrEqual(24_000)
   })
 
   test("includes eligible pull-request threads in the prompt context", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -280,6 +379,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -336,7 +437,7 @@ describe("review context", () => {
   })
 
   test("filters out system and non-user discussion threads", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -349,6 +450,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -386,7 +489,7 @@ describe("review context", () => {
   })
 
   test("excludes pure managed threads from the prompt context", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -399,18 +502,11 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
-      existingThreads: [
-        makeThread({
-          comments: [
-            makeThreadComment({
-              content: 'Summary\n<!-- open-azdo-review:{"reviewedCommit":"abc"} -->',
-              author: { displayName: "Open AZDO" },
-            }),
-          ],
-        }),
-      ],
+      existingThreads: [makeManagedSummaryThread()],
     })
 
     expect(context.pullRequestThreads).toBeUndefined()
@@ -419,7 +515,7 @@ describe("review context", () => {
   })
 
   test("keeps managed threads with human replies and strips embedded state payloads", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -432,6 +528,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([2])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -446,7 +544,7 @@ describe("review context", () => {
               id: 70,
               content:
                 'Finding title\n<!-- open-azdo:{"kind":"finding","fingerprint":"abc","finding":{"severity":"high","confidence":"high","title":"t","body":"Body","filePath":"src/example.ts","line":2}} -->',
-              author: { displayName: "Open AZDO" },
+              author: { id: BOT_ID, displayName: "Open AZDO" },
               publishedDate: "2026-03-23T09:00:00.000Z",
             }),
             makeThreadComment({
@@ -504,7 +602,6 @@ describe("review context", () => {
       ],
     })
     expect(context.managedFindingCandidates).toEqual({
-      omittedCount: 0,
       items: [
         {
           id: 7,
@@ -521,7 +618,7 @@ describe("review context", () => {
   })
 
   test("includes fixed pure managed finding threads in managedFindings while keeping them out of pullRequestThreads", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -534,6 +631,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/legacy.ts"],
         changedLinesByFile: new Map([["src/legacy.ts", new Set([9])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -549,7 +648,7 @@ describe("review context", () => {
               id: 80,
               content:
                 'Legacy finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"legacy","finding":{"severity":"medium","confidence":"high","title":"Legacy issue","body":"Body","filePath":"src/legacy.ts","line":9}} -->',
-              author: { displayName: "Open AZDO" },
+              author: { id: BOT_ID, displayName: "Open AZDO" },
               publishedDate: "2026-03-22T10:00:00.000Z",
             }),
           ],
@@ -578,7 +677,10 @@ describe("review context", () => {
   })
 
   test("limits managed finding candidates to active findings that intersect the scoped diff", () => {
-    const context = buildReviewContext({
+    const completeBody = "Evidence for an eligible finding. ".repeat(1_000)
+    const completeSuggestion = "return correctValue\n".repeat(1_000)
+
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -591,9 +693,15 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([5])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
+        makeManagedFindingThread(
+          makeReviewFinding({ title: "Large candidate", body: completeBody, suggestion: completeSuggestion, line: 5 }),
+          24,
+        ),
         makeThread({
           id: 21,
           threadContext: {
@@ -605,7 +713,7 @@ describe("review context", () => {
               id: 210,
               content:
                 'Current finding\n<!-- open-azdo:{"kind":"finding","fingerprint":"current","finding":{"severity":"high","confidence":"high","title":"Current","body":"Body","filePath":"src/example.ts","line":5}} -->',
-              author: { displayName: "Open AZDO" },
+              author: { id: BOT_ID, displayName: "Open AZDO" },
             }),
           ],
         }),
@@ -620,7 +728,7 @@ describe("review context", () => {
               id: 220,
               content:
                 'Outside scope\n<!-- open-azdo:{"kind":"finding","fingerprint":"outside","finding":{"severity":"medium","confidence":"high","title":"Outside","body":"Body","filePath":"src/other.ts","line":20}} -->',
-              author: { displayName: "Open AZDO" },
+              author: { id: BOT_ID, displayName: "Open AZDO" },
             }),
           ],
         }),
@@ -636,7 +744,7 @@ describe("review context", () => {
               id: 230,
               content:
                 'Resolved\n<!-- open-azdo:{"kind":"finding","fingerprint":"resolved","finding":{"severity":"medium","confidence":"high","title":"Resolved","body":"Body","filePath":"src/example.ts","line":5}} -->',
-              author: { displayName: "Open AZDO" },
+              author: { id: BOT_ID, displayName: "Open AZDO" },
             }),
           ],
         }),
@@ -644,7 +752,6 @@ describe("review context", () => {
     })
 
     expect(context.managedFindingCandidates).toEqual({
-      omittedCount: 0,
       items: [
         {
           id: 21,
@@ -656,12 +763,23 @@ describe("review context", () => {
           severity: "high",
           confidence: "high",
         },
+        {
+          id: 24,
+          filePath: "src/example.ts",
+          line: 5,
+          endLine: 5,
+          title: "Large candidate",
+          body: completeBody,
+          suggestion: completeSuggestion,
+          severity: "high",
+          confidence: "high",
+        },
       ],
     })
   })
 
   test("drops the oldest eligible threads when the thread context budget is exceeded", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -674,6 +792,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -712,7 +832,7 @@ describe("review context", () => {
   })
 
   test("truncates a single oversize thread only enough to fit the thread budget", () => {
-    const context = buildReviewContext({
+    const context = buildContext({
       metadata: {
         title: "Feature PR",
         description: "Adds a new export",
@@ -725,6 +845,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -744,5 +866,6 @@ describe("review context", () => {
     expect(context.pullRequestThreads?.items).toHaveLength(1)
     expect(context.pullRequestThreads?.items[0]?.comments[0]?.content).toContain("[truncated]")
     expect(context.pullRequestThreads?.items[0]?.comments[0]?.content.length ?? 0).toBeGreaterThan(2_000)
+    expect(JSON.stringify(context.pullRequestThreads).length).toBeLessThanOrEqual(24_000)
   })
 })

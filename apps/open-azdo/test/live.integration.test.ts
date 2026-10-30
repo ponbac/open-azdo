@@ -19,7 +19,8 @@ const requiredEnv = [
 
 const hasLiveConfig = requiredEnv.every((name) => {
   const value = process.env[name]
-  return typeof value === "string" && value.length > 0
+
+  return (value?.length ?? 0) > 0
 })
 
 const DEFAULT_LIVE_TIMEOUT = Duration.minutes(10)
@@ -27,11 +28,13 @@ const LIVE_TEST_BUFFER = Duration.minutes(2)
 
 const resolveLiveTimeout = () => {
   const value = process.env.OPEN_AZDO_LIVE_OPENCODE_TIMEOUT?.trim()
+
   if (!value) {
     return DEFAULT_LIVE_TIMEOUT
   }
 
-  const duration = Option.getOrUndefined(Duration.fromInput(value as Duration.Input))
+  const duration = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.DurationFromString)(value))
+
   return duration && Duration.isFinite(duration) && Duration.isPositive(duration) ? duration : DEFAULT_LIVE_TIMEOUT
 }
 
@@ -45,6 +48,7 @@ describe.if(hasLiveConfig)("sandbox live integration", () => {
       const repositoryId = process.env.OPEN_AZDO_LIVE_REPOSITORY_ID ?? ""
       const pullRequestId = Number(process.env.OPEN_AZDO_LIVE_PULL_REQUEST_ID ?? "0")
       const output = join(tmpdir(), `open-azdo-live-${Date.now()}.json`)
+
       const processResult = Bun.spawnSync(
         ["bun", "run", "./bin/open-azdo.ts", "sandbox", "capture", "--output", output],
         {

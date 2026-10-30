@@ -164,6 +164,7 @@ const SandboxPreviewActionSchema = Schema.Union([
 export type SandboxPreviewAction = Schema.Schema.Type<typeof SandboxPreviewActionSchema>
 
 export const SandboxThreadSchema = ExistingThreadSchema
+
 export type SandboxThread = Schema.Schema.Type<typeof SandboxThreadSchema>
 
 export const SandboxCaptureSchema = Schema.Struct({
@@ -212,33 +213,46 @@ export const SandboxCaptureSchema = Schema.Struct({
     previewThreads: Schema.Array(ExistingThreadSchema),
   }),
 })
+
 export type SandboxCapture = Schema.Schema.Type<typeof SandboxCaptureSchema>
+
 export const decodeSandboxCapture = Schema.decodeUnknownSync(SandboxCaptureSchema)
 
+/** Project live thread actions into the serializable capture action contract. */
 export const toSandboxPreviewAction = (action: ThreadAction): SandboxPreviewAction => {
+  let preview: SandboxPreviewAction
+
   switch (action.type) {
     case "upsert-summary":
-      return {
+      preview = {
         type: action.type,
         content: action.content,
         resolved: action.resolved,
-        ...(action.existingThread ? { existingThreadId: action.existingThread.id } : {}),
-        ...(action.commentId !== undefined ? { commentId: action.commentId } : {}),
       }
+      break
     case "upsert-finding":
-      return {
+      preview = {
         type: action.type,
         content: action.content,
         finding: action.finding,
-        ...(action.existingThread ? { existingThreadId: action.existingThread.id } : {}),
-        ...(action.commentId !== undefined ? { commentId: action.commentId } : {}),
       }
+      break
     case "close-thread":
       return {
         type: action.type,
         existingThreadId: action.existingThread.id,
       }
   }
+
+  if (action.existingThread) {
+    preview = { ...preview, existingThreadId: action.existingThread.id }
+  }
+
+  if (action.commentId !== undefined) {
+    preview = { ...preview, commentId: action.commentId }
+  }
+
+  return preview
 }
 
 const nextPreviewThreadId = (threads: ReadonlyArray<SandboxThread>) =>
@@ -262,6 +276,7 @@ const appendPreviewComment = (
   },
 ]
 
+/** Update an existing preview thread in place, or allocate a new thread with a synthetic negative ID. */
 const upsertPreviewThread = ({
   threads,
   existingThreadId,
@@ -280,22 +295,29 @@ const upsertPreviewThread = ({
   if (existingThreadId !== undefined) {
     const index = threads.findIndex((thread) => thread.id === existingThreadId)
     const existing = index >= 0 ? threads[index] : undefined
+
     if (index >= 0 && existing) {
       threads[index] = {
         ...existing,
         status,
         comments: appendPreviewComment(existing.comments, commentId ?? -1, content),
       }
+
       return
     }
   }
 
-  threads.push({
+  const newThread = {
     id: nextPreviewThreadId(threads),
     status,
     comments: appendPreviewComment([], -1, content),
-    ...(threadContext ? { threadContext } : {}),
-  })
+  }
+
+  if (threadContext) {
+    threads.push({ ...newThread, threadContext })
+  } else {
+    threads.push(newThread)
+  }
 }
 
 export const projectPreviewThreads = (
@@ -316,6 +338,7 @@ export const projectPreviewThreads = (
         })
         break
       }
+
       case "upsert-finding": {
         upsertPreviewThread({
           threads,
@@ -336,15 +359,18 @@ export const projectPreviewThreads = (
         })
         break
       }
+
       case "close-thread": {
         const index = threads.findIndex((thread) => thread.id === action.existingThreadId)
         const existing = index >= 0 ? threads[index] : undefined
+
         if (index >= 0 && existing) {
           threads[index] = {
             ...existing,
             status: 2,
           }
         }
+
         break
       }
     }

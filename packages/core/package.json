@@ -6,7 +6,6 @@
   "exports": {
     "./base-runtime": "./src/BaseRuntimeLayer.ts",
     "./errors": "./src/errors.ts",
-    "./json": "./src/Json.ts",
     "./logging": "./src/Logging.ts",
     "./model-pricing": "./src/model-pricing.ts",
     "./paths": "./src/paths.ts",

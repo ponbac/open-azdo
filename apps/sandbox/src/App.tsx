@@ -4,6 +4,7 @@ import { Observatory } from "./Observatory"
 
 export const App = () => {
   const state = useCaptureState()
+
   return (
     <SandboxDiffProvider>
       <Observatory state={state} />

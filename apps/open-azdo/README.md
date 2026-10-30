@@ -4,16 +4,27 @@
 
 ## Why This Exists
 
-This package is the published-package path for secure PR review automation. Unlike the Marketplace extension reference, v1 intentionally does not:
+This package is the published-package path for Azure DevOps PR review automation. Unlike the Marketplace extension reference, v1 intentionally does not:
 
 - edit the repository
 - commit or push changes
-- expose command-triggered execution modes
+- accept pull-request comments as commands to run automation
 - rely on a persistent or shared OpenCode server
 - rely on tokenized clone URLs
 
 The CLI consumes the Azure Pipeline checkout workspace directly and uses the built-in `System.AccessToken` for the minimal Azure DevOps REST surface.
-Each review run starts a short-lived localhost OpenCode server, prompts it through `@opencode/client`, collects the JSON-schema result through a run-scoped submission tool, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
+The generated reviewer can use OpenCode's native read/search tools, repository skills, and shell commands, including Bash, Python, and targeted test runs, to verify findings. It can inspect dependencies outside the workspace, use scratch directories, and reread full saved tool output. Azure job tokens are omitted from the model server environment while provider credentials remain available. Shell access can execute arbitrary repository code; use trusted private repositories and an appropriate CI workspace. See [SECURITY.md](./SECURITY.md).
+Each review run starts a short-lived localhost OpenCode server, prompts it through `@opencode/client`, collects the JSON-schema result through a run-scoped submission tool, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair. If no valid review result can be decoded, the run fails without advancing the reviewed commit, so a rerun reviews those changes again. The optional summary pass can fall back to deterministic rendering of an already completed review.
+
+The reviewer receives a manifest with exact Git refs, every changed/deleted path, rename origins, and optional changed-line detail, then inspects patches through `git diff`. It may trace callers, tests, configuration, and downstream consumers anywhere needed, while reporting problems caused or exposed by the supplied range. Large manifests omit optional detail rather than paths and explicitly set `diffMetadataTruncated`; full line maps remain available to the CLI. All eligible prior findings remain available for reconciliation without a separate character cutoff.
+
+OpenCode manages context compaction normally. The original task remains in a run-scoped file referenced by additive instructions. Its file copy is line-wrapped for native reads and can be read in pages after compaction; the actual model prompt stays compact. Verification runs in the foreground so this short-lived session receives results before completing. The prompt includes the configured overall deadline, and the runtime normalizes background shell requests to foreground execution.
+
+Only comments authored by the current token's authenticated identity supply managed review state. Findings and status updates finish before publishing the reviewed-commit checkpoint. Operational failures use a separate notice and preserve the completed summary; same-commit skips leave that summary untouched and close an active failure notice. Findings placed in the summary retain their full evidence and suggestions even if the optional summary pass falls back.
+
+Git patch and file-status collection allow 64 MiB per output stream and two minutes; short Git/process commands retain their smaller defaults. Prompt navigation detail is limited to 100 ranges/hunk headers per file and a 250,000-character detail target. Path identities are never dropped, even when they alone exceed that target. Model/context limits and the configured review timeout still apply.
+
+Azure DevOps documents a [150,000-character limit per PR comment](https://github.com/microsoft/azure-devops-python-api/blob/dev/azure-devops/azure/devops/v7_1/git/git_client_base.py#L2425-L2428). If publication is rejected, the run fails without advancing its checkpoint; findings are not silently shortened to fit.
 
 ## Install And Run
 

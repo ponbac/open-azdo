@@ -6,13 +6,13 @@
  * for the selected content. High data density, compact typography.
  * Uses IBM Plex for a technical-but-warm feel.
  */
+import { Match } from "effect"
 import { useState } from "react"
 
 import { SandboxPatchDiff } from "./pierre"
+import { resolveCaptureContext, type CaptureWorkItem, type PromptThread, type ResolvedContext } from "./capture-context"
 import {
   type SandboxViewProps,
-  type CaptureWorkItem,
-  type PromptThread,
   CollapsibleText,
   HiddenFileInput,
   Markdown,
@@ -25,7 +25,6 @@ import {
   threadPath,
   totalHistoryCost,
   totalHistoryTokens,
-  useResolvedContext,
   verdictTone,
 } from "./shared"
 
@@ -38,14 +37,14 @@ const Pill = ({
   readonly children: string
   readonly tone?: "neutral" | "success" | "warn" | "danger"
 }) => {
-  const colors =
-    tone === "success"
-      ? "bg-teal-800/40 text-teal-300 border-teal-700/50"
-      : tone === "danger"
-        ? "bg-rose-800/40 text-rose-300 border-rose-700/50"
-        : tone === "warn"
-          ? "bg-amber-800/40 text-amber-300 border-amber-700/50"
-          : "bg-[#2a2520]/60 text-[#a09080] border-[#3a3530]"
+  const colors = Match.value(tone).pipe(
+    Match.when("success", () => "bg-teal-800/40 text-teal-300 border-teal-700/50"),
+    Match.when("danger", () => "bg-rose-800/40 text-rose-300 border-rose-700/50"),
+    Match.when("warn", () => "bg-amber-800/40 text-amber-300 border-amber-700/50"),
+    Match.when("neutral", () => "bg-[#2a2520]/60 text-[#a09080] border-[#3a3530]"),
+    Match.exhaustive,
+  )
+
   return (
     <span
       className={`inline-flex items-center border px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wider ${colors}`}
@@ -64,7 +63,7 @@ const SidebarNav = ({
 }: {
   readonly active: SidebarItem
   readonly onSelect: (item: SidebarItem) => void
-  readonly counts: Record<string, number>
+  readonly counts: Readonly<Partial<Record<SidebarItem, number>>>
 }) => {
   const items: Array<{ readonly id: SidebarItem; readonly label: string }> = [
     { id: "overview", label: "Overview" },
@@ -128,6 +127,7 @@ const TokenRow = ({
   readonly color: string
 }) => {
   const pct = total > 0 ? (value / total) * 100 : 0
+
   return (
     <div className="py-1">
       <div className="flex items-center justify-between text-[0.65rem] mb-0.5">
@@ -284,14 +284,14 @@ const FindingsSection = ({ state }: SandboxViewProps) => {
     <div className="space-y-3">
       {findings.map((f, i) => {
         const diffFile = capture.diff.files.find((file) => file.path === f.filePath)
-        const severityColor =
-          f.severity === "critical"
-            ? "border-l-rose-500"
-            : f.severity === "high"
-              ? "border-l-orange-500"
-              : f.severity === "medium"
-                ? "border-l-amber-500"
-                : "border-l-teal-500"
+
+        const severityColor = Match.value(f.severity).pipe(
+          Match.when("critical", () => "border-l-rose-500"),
+          Match.when("high", () => "border-l-orange-500"),
+          Match.when("medium", () => "border-l-amber-500"),
+          Match.when("low", () => "border-l-teal-500"),
+          Match.exhaustive,
+        )
 
         return (
           <div
@@ -356,18 +356,23 @@ const FindingsSection = ({ state }: SandboxViewProps) => {
               a.type === "close-thread"
                 ? `close-${a.existingThreadId}`
                 : `${a.type}-${"existingThreadId" in a ? a.existingThreadId : `new-${i}`}`
+
             return (
               <span
-                className={`px-2 py-0.5 text-[0.6rem] font-mono border ${
-                  a.type === "close-thread"
-                    ? "border-[#2a2520] text-[#6a6050]"
-                    : a.type === "upsert-summary"
-                      ? "border-amber-700/40 text-amber-400"
-                      : "border-teal-700/40 text-teal-400"
-                }`}
+                className={`px-2 py-0.5 text-[0.6rem] font-mono border ${Match.value(a.type).pipe(
+                  Match.when("close-thread", () => "border-[#2a2520] text-[#6a6050]"),
+                  Match.when("upsert-summary", () => "border-amber-700/40 text-amber-400"),
+                  Match.when("upsert-finding", () => "border-teal-700/40 text-teal-400"),
+                  Match.exhaustive,
+                )}`}
                 key={key}
               >
-                {a.type === "close-thread" ? "close" : a.type === "upsert-summary" ? "summary" : "finding"}
+                {Match.value(a.type).pipe(
+                  Match.when("close-thread", () => "close"),
+                  Match.when("upsert-summary", () => "summary"),
+                  Match.when("upsert-finding", () => "finding"),
+                  Match.exhaustive,
+                )}
                 {"existingThreadId" in a ? ` #${a.existingThreadId}` : ""}
               </span>
             )
@@ -409,6 +414,7 @@ const ThreadsSection = ({ state }: SandboxViewProps) => {
       {threads.map((t) => {
         const path = threadPath(t)
         const isClosed = t.status === 2 || t.status === "fixed" || t.status === "closed"
+
         return (
           <div className={`border border-[#2a2520] bg-[#18140f] p-3 ${isClosed ? "opacity-40" : ""}`} key={t.id}>
             <div className="flex items-center gap-2 mb-2">
@@ -498,6 +504,7 @@ const PromptSection = ({ state }: SandboxViewProps) => {
   const [showRaw, setShowRaw] = useState(false)
   const [selectedPass, setSelectedPass] = useState<"review" | "summary">("review")
   const selectedPrompt = selectedPass === "review" ? capture.review.prompt : capture.review.summaryPass.prompt
+
   const selectedRawOutput =
     selectedPass === "review"
       ? capture.review.openCodeResult?.response
@@ -759,12 +766,10 @@ const ObservatoryPromptThread = ({ thread }: { readonly thread: PromptThread }) 
   )
 }
 
-const ContextSection = ({ state }: SandboxViewProps) => {
-  const { capture } = state
-  const ctx = useResolvedContext(capture)
-  const promptThreads = ctx.promptThreads ?? []
+const ContextSection = ({ context }: { readonly context: ResolvedContext }) => {
+  const promptThreads = context.promptThreads ?? []
 
-  const hasWorkItems = ctx.workItems.length > 0
+  const hasWorkItems = context.workItems.length > 0
   const hasThreads = promptThreads.length > 0
 
   if (!hasWorkItems && !hasThreads) {
@@ -778,19 +783,21 @@ const ContextSection = ({ state }: SandboxViewProps) => {
         <div>
           <div className="flex items-center justify-between mb-3">
             <span className="text-[0.6rem] font-semibold uppercase tracking-[0.2em] text-[#8a7e70]">
-              Connected work items ({ctx.workItems.length})
+              Connected work items ({context.workItems.length})
             </span>
             <div className="flex items-center gap-2">
-              {ctx.workItemsOmittedCount > 0 ? (
-                <span className="text-[0.55rem] text-amber-500">{ctx.workItemsOmittedCount} omitted from prompt</span>
+              {context.workItemsOmittedCount > 0 ? (
+                <span className="text-[0.55rem] text-amber-500">
+                  {context.workItemsOmittedCount} omitted from prompt
+                </span>
               ) : null}
-              {!ctx.workItemsFromPrompt ? (
+              {!context.workItemsFromPrompt ? (
                 <span className="text-[0.55rem] text-[#6a6050] italic">from capture</span>
               ) : null}
             </div>
           </div>
           <div className="space-y-3">
-            {ctx.workItems.map((wi) => (
+            {context.workItems.map((wi) => (
               <ObservatoryWorkItem key={wi.id} workItem={wi} />
             ))}
           </div>
@@ -804,8 +811,8 @@ const ContextSection = ({ state }: SandboxViewProps) => {
             <span className="text-[0.6rem] font-semibold uppercase tracking-[0.2em] text-[#8a7e70]">
               Threads in prompt ({promptThreads.length})
             </span>
-            {ctx.threadsOmittedCount > 0 ? (
-              <span className="text-[0.55rem] text-amber-500">{ctx.threadsOmittedCount} omitted (budget)</span>
+            {context.threadsOmittedCount > 0 ? (
+              <span className="text-[0.55rem] text-amber-500">{context.threadsOmittedCount} omitted (budget)</span>
             ) : null}
           </div>
           <div className="space-y-3">
@@ -829,11 +836,11 @@ export const Observatory = ({ state }: SandboxViewProps) => {
   const rawThreads = capture.review.previewThreads ?? []
   const threads = filterReviewThreads(rawThreads)
   const history = capture.review.summaryState.reviewHistory ?? []
-  const ctx = useResolvedContext(capture)
+  const ctx = resolveCaptureContext(capture)
 
   const contextCount = ctx.workItems.length + (ctx.promptThreads?.length ?? 0)
 
-  const counts: Record<string, number> = {
+  const counts = {
     findings: findings.length,
     threads: threads.length,
     context: contextCount,
@@ -908,7 +915,7 @@ export const Observatory = ({ state }: SandboxViewProps) => {
           {activeItem === "overview" ? <OverviewSection state={state} /> : null}
           {activeItem === "findings" ? <FindingsSection state={state} /> : null}
           {activeItem === "threads" ? <ThreadsSection state={state} /> : null}
-          {activeItem === "context" ? <ContextSection state={state} /> : null}
+          {activeItem === "context" ? <ContextSection context={ctx} /> : null}
           {activeItem === "history" ? <HistorySection state={state} /> : null}
           {activeItem === "prompt" ? <PromptSection state={state} /> : null}
           {activeItem === "files" ? <FilesSection state={state} /> : null}
