@@ -1,6 +1,6 @@
 import { Context } from "effect"
 import type * as Duration from "effect/Duration"
-import type { Effect } from "effect"
+import type { Effect, Schema } from "effect"
 
 import type { OpenCodeInvocationError, OpenCodeOutputError } from "../../../errors"
 import type { OpenCodeModelError, OpenCodeOutputFormat, OpenCodeRunUsage } from "../../Services/OpenCodeRunner"
@@ -27,7 +27,10 @@ export type OpenCodeConfig = {
       }
     >
   >
-  readonly plugins?: ReadonlyArray<{ readonly package: string; readonly options: Record<string, unknown> }>
+  readonly plugins?: ReadonlyArray<{
+    readonly package: string
+    readonly options: { readonly schema: Schema.JsonObject }
+  }>
 }
 
 /**
@@ -54,18 +57,19 @@ export type OpenCodeSdkPromptRequest = {
 
 export type OpenCodeSdkPromptResult = {
   readonly response: string
-  readonly structured?: unknown
+  readonly structured?: Schema.Json
   readonly sessionId?: string | undefined
   readonly usage?: OpenCodeRunUsage | undefined
   readonly modelError?: OpenCodeModelError | undefined
 }
 
-export interface OpenCodeSdkRuntimeShape {
+/** Owns the private server, session, and cancellation scope for one OpenCode prompt. */
+export interface OpenCodeSdkRuntimeService {
   readonly prompt: (
     request: OpenCodeSdkPromptRequest,
   ) => Effect.Effect<OpenCodeSdkPromptResult, OpenCodeInvocationError | OpenCodeOutputError>
 }
 
-export class OpenCodeSdkRuntime extends Context.Service<OpenCodeSdkRuntime, OpenCodeSdkRuntimeShape>()(
+export class OpenCodeSdkRuntime extends Context.Service<OpenCodeSdkRuntime, OpenCodeSdkRuntimeService>()(
   "open-azdo/opencode/internal/OpenCodeSdkRuntime",
 ) {}

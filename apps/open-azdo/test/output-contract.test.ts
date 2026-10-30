@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
+import { resolve } from "node:path"
 
 const runOutputContract = (jsonLogs: boolean) => {
   const script = `
     import { Effect } from "effect"
-    import { makeBaseRuntimeLayer } from "./packages/core/src/BaseRuntimeLayer.ts"
-    import { logInfo } from "./packages/core/src/Logging.ts"
+    import { BaseRuntimeLayer, JsonBaseRuntimeLayer } from "@open-azdo/core/base-runtime"
+    import { logInfo } from "@open-azdo/core/logging"
 
     const json = process.env.OPEN_AZDO_TEST_JSON === "true"
 
@@ -18,16 +19,14 @@ const runOutputContract = (jsonLogs: boolean) => {
         process.stdout.write(json ? '{"result":"ok"}\\n' : "result ok\\n")
       }).pipe(
         Effect.provide(
-          makeBaseRuntimeLayer({
-            jsonLogs: json,
-          }),
+          json ? JsonBaseRuntimeLayer : BaseRuntimeLayer,
         ),
       ),
     )
   `
 
   return spawnSync("bun", ["-e", script], {
-    cwd: "/home/ponbac/dev/open-azdo",
+    cwd: resolve(import.meta.dir, ".."),
     env: {
       ...process.env,
       OPEN_AZDO_TEST_JSON: jsonLogs ? "true" : "false",

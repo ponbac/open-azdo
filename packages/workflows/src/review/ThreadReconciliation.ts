@@ -1,6 +1,6 @@
 import { Option, Schema } from "effect"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
-import { normalizePath } from "@open-azdo/core/paths"
+import { resolveRepositoryPath } from "@open-azdo/core/paths"
 
 import {
   countBySeverity,
@@ -16,7 +16,12 @@ const ManagedFindingStateSchema = Schema.Struct({
   fingerprint: Schema.String,
   finding: ReviewFindingSchema,
 })
+
 type ManagedFindingState = Schema.Schema.Type<typeof ManagedFindingStateSchema>
+
+const ManagedFailureStateSchema = Schema.Struct({ kind: Schema.Literal("failure") })
+
+type ManagedFailureState = Schema.Schema.Type<typeof ManagedFailureStateSchema>
 
 const SeverityCountsSchema = Schema.Struct({
   low: Schema.Int,
@@ -24,6 +29,7 @@ const SeverityCountsSchema = Schema.Struct({
   high: Schema.Int,
   critical: Schema.Int,
 })
+
 export type SeverityCounts = Schema.Schema.Type<typeof SeverityCountsSchema>
 
 const ReviewHistoryTokensSchema = Schema.Struct({
@@ -33,6 +39,7 @@ const ReviewHistoryTokensSchema = Schema.Struct({
   cacheRead: Schema.Int,
   cacheWrite: Schema.Int,
 })
+
 export type ReviewHistoryTokens = Schema.Schema.Type<typeof ReviewHistoryTokensSchema>
 
 const ReviewHistoryEntrySchema = Schema.Struct({
@@ -47,6 +54,7 @@ const ReviewHistoryEntrySchema = Schema.Struct({
   costUsd: Schema.optionalKey(Schema.Number),
   tokens: Schema.optionalKey(ReviewHistoryTokensSchema),
 })
+
 export type ReviewHistoryEntry = Schema.Schema.Type<typeof ReviewHistoryEntrySchema>
 
 export const ManagedReviewStateSchema = Schema.Struct({
@@ -60,6 +68,7 @@ export const ManagedReviewStateSchema = Schema.Struct({
   unmappedNotesCount: Schema.Int,
   reviewHistory: Schema.optionalKey(Schema.Array(ReviewHistoryEntrySchema)),
 })
+
 export type ManagedReviewState = Schema.Schema.Type<typeof ManagedReviewStateSchema>
 
 export const SKIPPED_REVIEW_SUMMARY = "⏭️ No new commits since the last managed review. Previous verdict still applies."
@@ -107,7 +116,7 @@ export type ThreadAction =
     }
 
 type ReconcileThreadsInput = {
-  readonly existingThreads: ReadonlyArray<ExistingThread>
+  readonly managedThreads: ManagedThreads
   readonly summaryContent: string
   readonly summaryVerdict: NormalizedReviewResult["verdict"]
   readonly inlineFindings: ReadonlyArray<ReviewFinding>
@@ -123,36 +132,56 @@ const isActiveThreadStatus = (status: ExistingThread["status"]) =>
 const STATE_SCHEMA_VERSION = 2
 const FINDING_MARKER_PREFIX = "<!-- open-azdo:"
 const SUMMARY_STATE_PREFIX = "<!-- open-azdo-review:"
+const FAILURE_STATE_PREFIX = "<!-- open-azdo-failure:"
 const COMMENT_SUFFIX = " -->"
 
 const decodeManagedFindingStateFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(ManagedFindingStateSchema))
 const decodeManagedReviewStateFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(ManagedReviewStateSchema))
+const decodeManagedFailureStateFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(ManagedFailureStateSchema))
 
-const encodeManagedFindingState = (findingState: ManagedFindingState) =>
-  `${FINDING_MARKER_PREFIX}${JSON.stringify(findingState)}${COMMENT_SUFFIX}`
+/** Escapes HTML delimiters so finding text cannot close or inject the appended metadata marker. */
+const encodeManagedPayload = (prefix: string, state: ManagedFindingState | ManagedReviewState | ManagedFailureState) =>
+  `${prefix}${JSON.stringify(state).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e")}${COMMENT_SUFFIX}`
 
-const encodeManagedReviewState = (reviewState: ManagedReviewState) =>
-  `${SUMMARY_STATE_PREFIX}${JSON.stringify(reviewState)}${COMMENT_SUFFIX}`
+const finalManagedMarkerStart = (content: string) =>
+  Math.max(
+    content.lastIndexOf(FINDING_MARKER_PREFIX),
+    content.lastIndexOf(SUMMARY_STATE_PREFIX),
+    content.lastIndexOf(FAILURE_STATE_PREFIX),
+  )
+
+/** Removes only the appended metadata marker, preserving quoted model text as untrusted prose. */
+export const stripManagedStatePayload = (content: string) => {
+  const start = finalManagedMarkerStart(content)
+  const end = content.indexOf(COMMENT_SUFFIX, start)
+
+  return start < 0 || end < 0 ? content : content.slice(0, start) + content.slice(end + COMMENT_SUFFIX.length)
+}
 
 const extractEmbeddedPayload = (content: string, prefix: string) => {
-  const start = content.indexOf(prefix)
+  const start = content.lastIndexOf(prefix)
   const end = content.indexOf(COMMENT_SUFFIX, start)
-  if (start === -1 || end === -1) {
+
+  // Only the final managed marker can be authoritative; the prose may quote another kind.
+  if (start === -1 || start !== finalManagedMarkerStart(content) || end === -1) {
     return undefined
   }
+
   return content.slice(start + prefix.length, end)
 }
 
+/** Decodes a managed payload from already decoded thread text; invalid markers remain unmanaged. */
 const decodeEmbeddedJsonComment = <A>(
-  content: unknown,
+  content: ExistingThread["comments"][number]["content"],
   prefix: string,
   decode: (payload: string) => A,
 ): A | undefined => {
-  if (typeof content !== "string") {
+  if (content === undefined || content === null) {
     return undefined
   }
 
   const payload = extractEmbeddedPayload(content, prefix)
+
   if (payload === undefined) {
     return undefined
   }
@@ -160,29 +189,36 @@ const decodeEmbeddedJsonComment = <A>(
   return Option.getOrUndefined(Option.liftThrowable(decode)(payload))
 }
 
-const decodeManagedFindingState = (content: unknown) =>
+const decodeManagedFindingState = (content: ExistingThread["comments"][number]["content"]) =>
   decodeEmbeddedJsonComment(content, FINDING_MARKER_PREFIX, decodeManagedFindingStateFromJson)
 
-const decodeManagedReviewState = (content: unknown) =>
+const decodeManagedReviewState = (content: ExistingThread["comments"][number]["content"]) =>
   decodeEmbeddedJsonComment(content, SUMMARY_STATE_PREFIX, decodeManagedReviewStateFromJson)
+
+const decodeManagedFailureState = (content: ExistingThread["comments"][number]["content"]) =>
+  decodeEmbeddedJsonComment(content, FAILURE_STATE_PREFIX, decodeManagedFailureStateFromJson)
+
+/** Canonical complete finding content, independent of an optional existing-thread link. */
+const findingContentKey = (finding: ReviewFinding) =>
+  JSON.stringify({
+    severity: finding.severity,
+    confidence: finding.confidence,
+    title: finding.title,
+    body: finding.body,
+    suggestion: finding.suggestion ?? "",
+    filePath: finding.filePath,
+    line: finding.line,
+    endLine: getFindingEndLine(finding),
+  })
 
 export const fingerprintFinding = (finding: ReviewFinding) => {
   const hasher = new Bun.CryptoHasher("sha256")
-  hasher.update(
-    JSON.stringify({
-      severity: finding.severity,
-      confidence: finding.confidence,
-      title: finding.title,
-      body: finding.body,
-      suggestion: finding.suggestion ?? "",
-      filePath: normalizePath(finding.filePath),
-      line: finding.line,
-      endLine: getFindingEndLine(finding),
-    }),
-  )
+  hasher.update(findingContentKey(finding))
+
   return hasher.digest("hex")
 }
 
+/** Captures the outstanding review counts and optional run history for the managed summary marker. */
 export const buildManagedReviewState = ({
   reviewedCommit,
   pullRequestBaseRef,
@@ -195,17 +231,24 @@ export const buildManagedReviewState = ({
     readonly inlineFindings?: ReadonlyArray<ReviewFinding>
   }
   readonly reviewHistory?: ReadonlyArray<ReviewHistoryEntry> | undefined
-}): ManagedReviewState => ({
-  schemaVersion: STATE_SCHEMA_VERSION,
-  reviewedCommit,
-  pullRequestBaseRef,
-  verdict: reviewResult.verdict,
-  severityCounts: countBySeverity(reviewResult.findings),
-  findingsCount: reviewResult.findings.length,
-  inlineFindingsCount: reviewResult.inlineFindings?.length ?? 0,
-  unmappedNotesCount: reviewResult.unmappedNotes.length,
-  ...(reviewHistory && reviewHistory.length > 0 ? { reviewHistory: [...reviewHistory] } : {}),
-})
+}): ManagedReviewState => {
+  let reviewState: ManagedReviewState = {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    reviewedCommit,
+    pullRequestBaseRef,
+    verdict: reviewResult.verdict,
+    severityCounts: countBySeverity(reviewResult.findings),
+    findingsCount: reviewResult.findings.length,
+    inlineFindingsCount: reviewResult.inlineFindings?.length ?? 0,
+    unmappedNotesCount: reviewResult.unmappedNotes.length,
+  }
+
+  if (reviewHistory && reviewHistory.length > 0) {
+    reviewState = { ...reviewState, reviewHistory: [...reviewHistory] }
+  }
+
+  return reviewState
+}
 
 const shortCommit = (value: string) => value.slice(0, 12)
 
@@ -227,6 +270,7 @@ const formatReviewLabel = (entry: ReviewHistoryEntry) => {
     : entry.buildId
       ? `Build ${entry.buildId}`
       : undefined
+
   const commitLabel = shortCommit(entry.reviewedCommit)
 
   if (buildLabel && entry.buildLink) {
@@ -246,6 +290,7 @@ const formatReviewTimestamp = (entry: ReviewHistoryEntry) => {
   }
 
   const date = new Date(entry.reviewedAt)
+
   if (Number.isNaN(date.valueOf())) {
     return entry.reviewedAt
   }
@@ -312,6 +357,7 @@ export const buildSummaryComment = (snapshot: SummarySnapshot) => {
 
   if (snapshot.unmappedNotes.length > 0) {
     lines.push("", "Summary-only notes:")
+
     for (const note of snapshot.unmappedNotes) {
       lines.push(`- ${note}`)
     }
@@ -324,10 +370,20 @@ export const buildSummaryComment = (snapshot: SummarySnapshot) => {
   appendReviewHistorySection(lines, snapshot.persistedState?.reviewHistory ?? [])
 
   if (snapshot.persistedState) {
-    lines.push("", encodeManagedReviewState(snapshot.persistedState))
+    lines.push("", encodeManagedPayload(SUMMARY_STATE_PREFIX, snapshot.persistedState))
   }
 
   return lines.join("\n")
+}
+
+/** Identifies a failed first review without inventing a reviewed-commit checkpoint. */
+export const buildFailureSummaryComment = (snapshot: Omit<SummarySnapshot, "verdict">) => {
+  const content = buildSummaryComment({ ...snapshot, verdict: "fail" })
+
+  // Existing checkpoints keep their deployed marker; only unreviewed failures need separate identity.
+  return snapshot.persistedState
+    ? content
+    : `${content}\n\n${encodeManagedPayload(FAILURE_STATE_PREFIX, { kind: "failure" })}`
 }
 
 export const buildInlineComment = (finding: ReviewFinding) =>
@@ -340,7 +396,7 @@ export const buildInlineComment = (finding: ReviewFinding) =>
     finding.body,
     finding.suggestion ? `\nSuggestion:\n\n\`\`\`\n${finding.suggestion}\n\`\`\`` : "",
     "",
-    encodeManagedFindingState({ kind: "finding", fingerprint: fingerprintFinding(finding), finding }),
+    encodeManagedPayload(FINDING_MARKER_PREFIX, { kind: "finding", fingerprint: fingerprintFinding(finding), finding }),
   ]
     .filter(Boolean)
     .join("\n")
@@ -349,6 +405,11 @@ type ExistingSummaryThread = {
   readonly thread: ExistingThread
   readonly commentId: number
   readonly reviewState: ManagedReviewState
+}
+
+type ExistingFailureThread = {
+  readonly thread: ExistingThread
+  readonly commentId: number
 }
 
 type ExistingFindingThread = {
@@ -365,28 +426,10 @@ type ManagedFindingThreadPartition = {
   readonly retainedOutOfScopeFindings: ReadonlyArray<ExistingFindingThread>
 }
 
-export const findManagedSummaryThread = (
-  existingThreads: ReadonlyArray<ExistingThread>,
-): ExistingSummaryThread | undefined => {
-  for (const thread of existingThreads) {
-    for (const comment of thread.comments) {
-      const reviewState = decodeManagedReviewState(comment.content)
-      if (reviewState) {
-        return {
-          thread,
-          commentId: comment.id,
-          reviewState,
-        }
-      }
-    }
-  }
-
-  return undefined
-}
-
 const getThreadUpdatedAt = (thread: ExistingThread) =>
   thread.comments.reduce<string | undefined>((latest, comment) => {
     const publishedAt = comment.publishedDate ?? undefined
+
     if (!publishedAt) {
       return latest
     }
@@ -398,57 +441,111 @@ const getThreadUpdatedAt = (thread: ExistingThread) =>
     return publishedAt > latest ? publishedAt : latest
   }, undefined)
 
+/** Bot-owned decoded state from one complete Azure thread listing. */
+export interface ManagedThreads {
+  readonly summary: ExistingSummaryThread | undefined
+  /** Authenticated operational failure without a completed review or skip authority. */
+  readonly failure: ExistingFailureThread | undefined
+  readonly findings: ReadonlyArray<ExistingFindingThread>
+  /** References into the same raw listing, used to label prompt comments without re-decoding markers. */
+  readonly comments: ReadonlySet<ExistingThread["comments"][number]>
+}
+
 /**
- * Lists every managed finding thread by decoding the embedded finding payload once and attaching
- * the thread metadata that later prompt shaping and reconciliation logic need.
+ * Establishes marker authority once at the Azure boundary. Display names and marker text never
+ * establish ownership: only nondeleted comments from the token's authenticated identity qualify.
  */
-export const listManagedFindingThreads = (
+export const decodeManagedThreads = (
   existingThreads: ReadonlyArray<ExistingThread>,
-): ReadonlyArray<ExistingFindingThread> => {
-  const managed: ExistingFindingThread[] = []
+  authenticatedIdentity: string,
+): ManagedThreads => {
+  let summary: ExistingSummaryThread | undefined
+  let failure: ExistingFailureThread | undefined
+  const findings: ExistingFindingThread[] = []
+  const comments = new Set<ExistingThread["comments"][number]>()
 
   for (const thread of existingThreads) {
+    if (thread.isDeleted === true) {
+      continue
+    }
+
+    let finding: ExistingFindingThread | undefined
+
     for (const comment of thread.comments) {
-      const findingState = decodeManagedFindingState(comment.content)
-      if (!findingState) {
+      if (comment.isDeleted === true || comment.author?.id !== authenticatedIdentity) {
         continue
       }
 
-      const updatedAt = getThreadUpdatedAt(thread)
+      const reviewState = decodeManagedReviewState(comment.content)
+      const findingState = decodeManagedFindingState(comment.content)
+      const failureState = decodeManagedFailureState(comment.content)
 
-      managed.push({
-        thread,
-        updatedAt,
-        filePath: thread.threadContext?.filePath ?? undefined,
-        line: thread.threadContext?.rightFileStart?.line ?? undefined,
-        commentId: comment.id,
-        finding: findingState.finding,
-      })
-      break
+      if (reviewState) {
+        summary ??= { thread, commentId: comment.id, reviewState }
+        comments.add(comment)
+      }
+
+      if (findingState) {
+        comments.add(comment)
+        finding ??= {
+          thread,
+          commentId: comment.id,
+          updatedAt: getThreadUpdatedAt(thread),
+          filePath: thread.threadContext?.filePath ?? undefined,
+          line: thread.threadContext?.rightFileStart?.line ?? undefined,
+          finding: findingState.finding,
+        }
+      }
+
+      if (failureState) {
+        failure ??= { thread, commentId: comment.id }
+        comments.add(comment)
+      }
     }
+
+    if (finding) findings.push(finding)
   }
 
-  return managed
+  return { summary, failure, findings, comments }
 }
 
-const listActiveManagedFindingThreads = (existingThreads: ReadonlyArray<ExistingThread>) =>
-  listManagedFindingThreads(existingThreads).filter((existingThread) =>
-    isActiveThreadStatus(existingThread.thread.status),
-  )
+const listActiveManagedFindingThreads = (managedThreads: ManagedThreads) =>
+  managedThreads.findings.filter((existingThread) => isActiveThreadStatus(existingThread.thread.status))
 
-const findingTouchesScopedDiff = (
-  finding: ReviewFinding,
+/** Uses Azure's current thread coordinates, falling back to the embedded location when unavailable. */
+export const resolveManagedFindingLocation = (managedFinding: ExistingFindingThread) => ({
+  filePath: (managedFinding.filePath ?? managedFinding.finding.filePath).replace(/^\/+/, ""),
+  line: managedFinding.line ?? managedFinding.finding.line,
+  // A moved start cannot share an absolute end line from the original revision.
+  endLine:
+    managedFinding.thread.threadContext?.rightFileEnd?.line ??
+    (managedFinding.line === undefined ? managedFinding.finding.endLine : undefined),
+})
+
+/** Keeps prompt candidates and publication decisions on the same current-location scope rule. */
+export const managedFindingTouchesScopedDiff = (
+  managedFinding: ExistingFindingThread,
   scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
   scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
 ) => {
-  const filePath = normalizePath(finding.filePath)
+  const location = resolveManagedFindingLocation(managedFinding)
+
+  const filePath = resolveRepositoryPath(location.filePath, {
+    has: (path) => scopedChangedLinesByFile.has(path) || scopedDeletedLinesByFile.has(path),
+  })
+
   const changedLines = scopedChangedLinesByFile.get(filePath)
   const deletedLines = scopedDeletedLinesByFile.get(filePath)
 
-  for (let line = finding.line; line <= getFindingEndLine(finding); line += 1) {
-    if (changedLines?.has(line) || deletedLines?.has(line)) {
-      return true
-    }
+  // Iterate the finite diff sets, not a model-controlled line range that could span billions.
+  const endLine = location.endLine ?? location.line
+
+  for (const line of changedLines ?? []) {
+    if (line >= location.line && line <= endLine) return true
+  }
+
+  for (const line of deletedLines ?? []) {
+    if (line >= location.line && line <= endLine) return true
   }
 
   return false
@@ -471,7 +568,7 @@ const partitionActiveManagedFindingThreads = ({
   const retainedOutOfScopeFindings: ExistingFindingThread[] = []
 
   for (const managedFinding of activeManagedFindingThreads) {
-    if (findingTouchesScopedDiff(managedFinding.finding, scopedChangedLinesByFile, scopedDeletedLinesByFile)) {
+    if (managedFindingTouchesScopedDiff(managedFinding, scopedChangedLinesByFile, scopedDeletedLinesByFile)) {
       inScopeCandidates.push(managedFinding)
       continue
     }
@@ -497,34 +594,53 @@ const toRetainedManagedFinding = (
   },
 })
 
+/** Reuses an explicit trusted identity, or exact content from a prior partial publication. */
+const matchManagedFinding = (
+  finding: ReviewFinding,
+  existingFindings: ReadonlyArray<ExistingFindingThread>,
+  claimedIds: ReadonlySet<number>,
+) =>
+  existingFindings.find(
+    (existing) =>
+      !claimedIds.has(existing.thread.id) &&
+      (finding.managedFindingId === existing.thread.id ||
+        (finding.managedFindingId === undefined && findingContentKey(existing.finding) === findingContentKey(finding))),
+  )
+
 /**
  * Merges the normalized review result with active managed findings that the current rerun did not
  * explicitly reconcile, preserving those older threads in the published outstanding state until
  * the model links or resolves them by thread id.
  */
 export const mergeManagedReviewResult = ({
-  existingThreads,
+  managedThreads,
   scopedChangedLinesByFile,
   scopedDeletedLinesByFile,
   reviewResult,
 }: {
-  readonly existingThreads: ReadonlyArray<ExistingThread>
+  readonly managedThreads: ManagedThreads
   readonly scopedChangedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly scopedDeletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>
   readonly reviewResult: NormalizedReviewResult
 }): ManagedReviewMergeResult => {
-  const activeManagedFindingThreads = listActiveManagedFindingThreads(existingThreads)
+  const activeManagedFindingThreads = listActiveManagedFindingThreads(managedThreads)
+
   const { inScopeCandidates, retainedOutOfScopeFindings } = partitionActiveManagedFindingThreads({
     activeManagedFindingThreads,
     scopedChangedLinesByFile,
     scopedDeletedLinesByFile,
   })
-  const linkedManagedFindingIds = new Set(
-    reviewResult.findings.flatMap((finding) =>
-      finding.managedFindingId !== undefined ? [finding.managedFindingId] : [],
-    ),
-  )
+
+  const linkedManagedFindingIds = new Set<number>()
+
+  for (const finding of reviewResult.findings) {
+    const existing = matchManagedFinding(finding, activeManagedFindingThreads, linkedManagedFindingIds)
+
+    if (existing) linkedManagedFindingIds.add(existing.thread.id)
+  }
+
   const resolvedManagedFindingIds = new Set(reviewResult.resolvedManagedFindingIds)
+
   const retainedFindings = [
     ...retainedOutOfScopeFindings.map((existingThread) => toRetainedManagedFinding(existingThread, "outside-scope")),
     ...inScopeCandidates
@@ -561,7 +677,7 @@ export const mergeManagedReviewResult = ({
 }
 
 export const reconcileThreads = ({
-  existingThreads,
+  managedThreads,
   summaryContent,
   summaryVerdict,
   inlineFindings,
@@ -571,41 +687,49 @@ export const reconcileThreads = ({
   scopedDeletedLinesByFile,
 }: ReconcileThreadsInput): ThreadAction[] => {
   const actions: ThreadAction[] = []
-  const existingSummary = findManagedSummaryThread(existingThreads)
+  const existingSummary = managedThreads.summary ?? managedThreads.failure
 
-  actions.push({
+  const summaryAction: ThreadAction = {
     type: "upsert-summary",
     content: summaryContent,
     resolved: summaryVerdict === "pass",
     existingThread: existingSummary?.thread,
     commentId: existingSummary?.commentId,
-  })
-
-  if (reviewMode === "skipped") {
-    return actions
   }
 
-  const activeManagedFindingThreads = listActiveManagedFindingThreads(existingThreads)
-  const managedFindingThreadsById = new Map(
-    activeManagedFindingThreads.map((existingThread) => [existingThread.thread.id, existingThread] as const),
-  )
+  // If both records exist, retain the committed summary and resolve the separate failure notice.
+  if (
+    managedThreads.summary &&
+    managedThreads.failure &&
+    managedThreads.summary.thread.id !== managedThreads.failure.thread.id &&
+    isActiveThreadStatus(managedThreads.failure.thread.status)
+  ) {
+    actions.push({ type: "close-thread", existingThread: managedThreads.failure.thread })
+  }
+
+  if (reviewMode === "skipped") {
+    return [...actions, summaryAction]
+  }
+
+  const activeManagedFindingThreads = listActiveManagedFindingThreads(managedThreads)
+
   const { inScopeCandidates } = partitionActiveManagedFindingThreads({
     activeManagedFindingThreads,
     scopedChangedLinesByFile,
     scopedDeletedLinesByFile,
   })
+
   const managedFindingCandidatesById = new Map(
     inScopeCandidates.map((existingThread) => [existingThread.thread.id, existingThread] as const),
   )
+
   const linkedManagedFindingIds = new Set<number>()
   const processedResolvedManagedFindingIds = new Set<number>()
 
   for (const finding of inlineFindings) {
-    const existingThread =
-      finding.managedFindingId !== undefined ? managedFindingThreadsById.get(finding.managedFindingId) : undefined
-    if (finding.managedFindingId !== undefined && existingThread) {
-      linkedManagedFindingIds.add(finding.managedFindingId)
-    }
+    const existingThread = matchManagedFinding(finding, activeManagedFindingThreads, linkedManagedFindingIds)
+
+    if (existingThread) linkedManagedFindingIds.add(existingThread.thread.id)
 
     actions.push({
       type: "upsert-finding",
@@ -623,6 +747,7 @@ export const reconcileThreads = ({
 
     // Only in-scope active candidates can be resolved by this rerun.
     const existingThread = managedFindingCandidatesById.get(managedFindingId)
+
     if (!existingThread) {
       continue
     }
@@ -634,6 +759,9 @@ export const reconcileThreads = ({
       existingThread: existingThread.thread,
     })
   }
+
+  // Persist reviewedCommit only after every finding and status mutation succeeds.
+  actions.push(summaryAction)
 
   return actions
 }

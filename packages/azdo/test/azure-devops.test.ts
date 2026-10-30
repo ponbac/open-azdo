@@ -1,30 +1,34 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Effect, Exit, Layer, Result } from "effect"
+import { Cause, Effect, Exit, Layer, Predicate, Result, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
 
-import { AzureDevOpsClient, AzureDevOpsClientLive } from "@open-azdo/azdo/client"
+import {
+  AzureDevOpsClient,
+  AzureDevOpsClientLive,
+  AzureDevOpsHttpError,
+  AzureDevOpsDecodeError,
+} from "@open-azdo/azdo/client"
 import { type FetchLike, makeFetchMock, makeAzureContext, systemToken } from "./helpers"
 
 const context = makeAzureContext()
 const token = systemToken
 
-const parseJsonBody = (body: BodyInit | null | undefined) => {
-  if (typeof body === "string") {
-    return JSON.parse(body)
-  }
+const BatchRequestSchema = Schema.Struct({
+  ids: Schema.Array(Schema.Int),
+  fields: Schema.optionalKey(Schema.Array(Schema.String)),
+  $expand: Schema.optionalKey(Schema.String),
+  errorPolicy: Schema.String,
+})
 
-  if (body instanceof Uint8Array) {
-    return JSON.parse(new TextDecoder().decode(body))
-  }
-
-  return {}
-}
+const parseJsonBody = async (body: BodyInit | null | undefined) =>
+  Schema.decodeUnknownSync(Schema.fromJsonString(BatchRequestSchema))(await new Response(body).text())
 
 const isTitleOnlyBatchRequest = (body: { readonly fields?: ReadonlyArray<string> | undefined }) =>
   Array.isArray(body.fields) && body.fields.includes("System.Title") && body.fields.length === 1
 
 const isWorkItemCommentsUrl = (url: string) => {
   const parsed = new URL(url)
+
   return (
     parsed.pathname === "/acme/project/_apis/wit/workItems/123/comments" &&
     parsed.searchParams.get("$top") === "20" &&
@@ -38,11 +42,71 @@ const provideLiveClient =
   (fetchMock: FetchLike) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
-      Effect.provideService(FetchHttpClient.Fetch, fetchMock as typeof globalThis.fetch),
+      Effect.provideService(FetchHttpClient.Fetch, fetchMock),
       Effect.provide(Layer.fresh(AzureDevOpsClientLive)),
     )
 
 describe("azure devops", () => {
+  test("resolves the bearer token identity from collection connection data", async () => {
+    const { fetchMock } = makeFetchMock((url, init) => {
+      expect(url).toBe("https://dev.azure.com/acme/_apis/connectionData")
+      expect(init?.method).toBe("GET")
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer system-token")
+
+      return Response.json({
+        authenticatedUser: { id: "bot-identity-id" },
+        authorizedUser: { id: "different-identity-id" },
+      })
+    })
+
+    const identityId = await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* AzureDevOpsClient
+
+        return yield* client.getAuthenticatedIdentity({ context, token })
+      }).pipe(provideLiveClient(fetchMock)),
+    )
+
+    expect(identityId).toBe("bot-identity-id")
+  })
+
+  test("rejects missing or blank authenticated identities without trusting authorizedUser", async () => {
+    for (const response of [
+      { authorizedUser: { id: "different-identity-id" } },
+      { authenticatedUser: { id: "  " }, authorizedUser: { id: "different-identity-id" } },
+    ]) {
+      const { fetchMock } = makeFetchMock(() => Response.json(response))
+
+      const error = await Effect.runPromise(
+        Effect.gen(function* () {
+          const client = yield* AzureDevOpsClient
+
+          return yield* client.getAuthenticatedIdentity({ context, token })
+        }).pipe(provideLiveClient(fetchMock), Effect.flip),
+      )
+
+      expect(error).toBeInstanceOf(AzureDevOpsDecodeError)
+    }
+  })
+
+  test("surfaces identity lookup rejection as a typed HTTP failure", async () => {
+    const { fetchMock } = makeFetchMock(() => Response.json({ message: "Forbidden" }, { status: 403 }))
+
+    const error = await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* AzureDevOpsClient
+
+        return yield* client.getAuthenticatedIdentity({ context, token })
+      }).pipe(provideLiveClient(fetchMock), Effect.flip),
+    )
+
+    expect(error).toBeInstanceOf(AzureDevOpsHttpError)
+
+    if (Predicate.isTagged(error, "AzureDevOpsHttpError")) {
+      expect(error.status).toBe(403)
+    }
+  })
+
   test("decodes pull request metadata from the live client", async () => {
     const { fetchMock } = makeFetchMock(() =>
       Response.json({
@@ -75,6 +139,7 @@ describe("azure devops", () => {
     const metadata = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestMetadata({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
@@ -106,6 +171,7 @@ describe("azure devops", () => {
     const metadata = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestMetadata({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
@@ -142,6 +208,7 @@ describe("azure devops", () => {
     const metadata = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestMetadata({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
@@ -161,14 +228,19 @@ describe("azure devops", () => {
   test("fails when the live client receives malformed json", async () => {
     const { fetchMock } = makeFetchMock(() => new Response("{not-json", { status: 200 }))
 
-    const exit = await Effect.runPromiseExit(
+    const error = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.listThreads({ context, token })
-      }).pipe(provideLiveClient(fetchMock)),
+      }).pipe(provideLiveClient(fetchMock), Effect.flip),
     )
 
-    expect(exit._tag).toBe("Failure")
+    expect(error).toBeInstanceOf(AzureDevOpsHttpError)
+
+    if (Predicate.isTagged(error, "AzureDevOpsHttpError")) {
+      expect(error.status).toBe(200)
+    }
   })
 
   test("fails when the live client receives an unexpected response shape", async () => {
@@ -182,14 +254,15 @@ describe("azure devops", () => {
       }),
     )
 
-    const exit = await Effect.runPromiseExit(
+    const error = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.listThreads({ context, token })
-      }).pipe(provideLiveClient(fetchMock)),
+      }).pipe(provideLiveClient(fetchMock), Effect.flip),
     )
 
-    expect(exit._tag).toBe("Failure")
+    expect(error).toBeInstanceOf(AzureDevOpsDecodeError)
   })
 
   test("maps non-2xx responses to AzureDevOpsHttpError", async () => {
@@ -198,17 +271,21 @@ describe("azure devops", () => {
     const exit = await Effect.runPromiseExit(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.listThreads({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
 
     expect(Exit.isFailure(exit)).toBe(true)
+
     if (Exit.isFailure(exit)) {
       const found = Cause.findError(exit.cause)
       expect(Result.isFailure(found)).toBe(false)
+
       if (!Result.isFailure(found)) {
         expect(found.success._tag).toBe("AzureDevOpsHttpError")
-        if (found.success._tag === "AzureDevOpsHttpError") {
+
+        if (Predicate.isTagged(found.success, "AzureDevOpsHttpError")) {
           expect(found.success.status).toBe(503)
         }
       }
@@ -230,6 +307,7 @@ describe("azure devops", () => {
                 isDeleted: false,
                 commentType: 1,
                 author: {
+                  id: "bot-identity-id",
                   displayName: "Annie Case",
                 },
               },
@@ -253,6 +331,7 @@ describe("azure devops", () => {
     const threads = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.listThreads({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
@@ -260,6 +339,7 @@ describe("azure devops", () => {
     expect(threads).toHaveLength(1)
     expect(threads[0]?.status).toBe("active")
     expect(threads[0]?.comments[0]?.content).toBeNull()
+    expect(threads[0]?.comments[0]?.author?.id).toBe("bot-identity-id")
     expect(threads[0]?.comments[0]?.author?.displayName).toBe("Annie Case")
     expect(threads[0]?.comments[0]?.publishedDate).toBe("2026-03-22T09:00:00.000Z")
   })
@@ -285,6 +365,7 @@ describe("azure devops", () => {
     const threads = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.listThreads({ context, token })
       }).pipe(provideLiveClient(fetchMock)),
     )
@@ -295,9 +376,9 @@ describe("azure devops", () => {
   })
 
   test("fetches connected work items with related titles and markdown comments", async () => {
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           return Response.json({
@@ -382,6 +463,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -425,26 +507,98 @@ describe("azure devops", () => {
     ])
   })
 
+  test.each([
+    ["123invalid", "2"],
+    ["0x7c", "2"],
+    ["123invalid", ""],
+    ["123invalid", "0x10"],
+  ] as const)(
+    "ignores malformed ref %s and priority %s without losing valid work item context",
+    async (invalidRef, priority) => {
+      const requestedIds: ReadonlyArray<number>[] = []
+
+      const { fetchMock } = makeFetchMock(async (url, init) => {
+        if (url.includes("/wit/workitemsbatch?")) {
+          const body = await parseJsonBody(init?.body)
+          requestedIds.push(body.ids)
+
+          return Response.json({
+            value: [
+              {
+                id: 123,
+                fields: {
+                  "System.Title": 7,
+                  "Microsoft.VSTS.Common.Priority": priority,
+                  "System.AssignedTo": { displayName: 3 },
+                  "System.Description": "<p>Valid description</p>",
+                },
+              },
+            ],
+          })
+        }
+
+        return Response.json({ comments: [] })
+      })
+
+      const workItems = await Effect.runPromise(
+        Effect.gen(function* () {
+          const client = yield* AzureDevOpsClient
+
+          return yield* client.getPullRequestWorkItems({
+            context,
+            token,
+            workItemRefs: [{ id: invalidRef }, { id: "123" }],
+          })
+        }).pipe(provideLiveClient(fetchMock)),
+      )
+
+      expect(requestedIds).toEqual([[123]])
+      expect(workItems).toHaveLength(1)
+      expect(workItems[0]).toMatchObject({
+        id: 123,
+        title: "Work item 123",
+        descriptionMarkdown: "Valid description",
+      })
+      expect(workItems[0]).not.toHaveProperty("assignedTo")
+
+      if (priority === "2") {
+        expect(workItems[0]?.priority).toBe(2)
+      } else {
+        expect(workItems[0]).not.toHaveProperty("priority")
+      }
+    },
+  )
+
   test("backfills later work items when earlier refs are omitted from the batch response", async () => {
     const commentIds: number[] = []
+    const selectedBatches: ReadonlyArray<number>[] = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
         }
 
+        selectedBatches.push(body.ids)
+
         return Response.json({
-          value: [101, 103, 104, 105].map((id) => ({
-            id,
-            fields: {
-              "System.Title": `Work item ${id}`,
-              "System.WorkItemType": "Task",
-              "System.State": "Active",
-            },
-          })),
+          // The provider can omit inaccessible items, but cannot return an item before it is requested.
+          value: body.ids.flatMap((id) =>
+            id === 102
+              ? []
+              : [
+                  {
+                    id,
+                    fields: {
+                      "System.Title": `Work item ${id}`,
+                      "System.WorkItemType": "Task",
+                      "System.State": "Active",
+                    },
+                  },
+                ],
+          ),
         })
       }
 
@@ -452,6 +606,7 @@ describe("azure devops", () => {
 
       if (commentMatch) {
         commentIds.push(Number.parseInt(commentMatch[1] ?? "", 10))
+
         return Response.json({ comments: [] })
       }
 
@@ -461,6 +616,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -469,6 +625,7 @@ describe("azure devops", () => {
       }).pipe(provideLiveClient(fetchMock)),
     )
 
+    expect(selectedBatches).toEqual([[101, 102, 103, 104], [105]])
     expect(workItems.map((workItem) => workItem.id)).toEqual([101, 103, 104, 105])
     expect(commentIds).toEqual([101, 103, 104, 105])
   })
@@ -477,10 +634,10 @@ describe("azure devops", () => {
     const batchUrls: string[] = []
     const commentUrls: string[] = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
         batchUrls.push(url)
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           return Response.json({
@@ -517,6 +674,7 @@ describe("azure devops", () => {
 
       if (url.includes("/_apis/wit/workItems/123/comments?")) {
         commentUrls.push(url)
+
         return Response.json({
           comments: [
             {
@@ -537,6 +695,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -559,12 +718,12 @@ describe("azure devops", () => {
   })
 
   test("only fetches enough linked work items to fill the prompt slots", async () => {
-    const selectedBatchRequests: number[][] = []
+    const selectedBatchRequests: ReadonlyArray<number>[] = []
     const commentIds: number[] = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
@@ -588,6 +747,7 @@ describe("azure devops", () => {
 
       if (commentMatch) {
         commentIds.push(Number.parseInt(commentMatch[1] ?? "", 10))
+
         return Response.json({ comments: [] })
       }
 
@@ -597,6 +757,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -611,9 +772,9 @@ describe("azure devops", () => {
   })
 
   test("preserves markdown-only work item comments when rendered html is unavailable", async () => {
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           return Response.json({ value: [] })
@@ -654,6 +815,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -672,11 +834,11 @@ describe("azure devops", () => {
   })
 
   test("only resolves titles that can reach the prompt and filters irrelevant relation types", async () => {
-    const titleBatchRequests: number[][] = []
+    const titleBatchRequests: ReadonlyArray<number>[] = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           titleBatchRequests.push(body.ids)
@@ -733,6 +895,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -757,11 +920,11 @@ describe("azure devops", () => {
   })
 
   test("accepts organization-scoped relation urls when extracting relation titles", async () => {
-    const titleBatchRequests: number[][] = []
+    const titleBatchRequests: ReadonlyArray<number>[] = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
 
         if (isTitleOnlyBatchRequest(body)) {
           titleBatchRequests.push(body.ids)
@@ -811,6 +974,7 @@ describe("azure devops", () => {
     const workItems = await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,
@@ -827,11 +991,11 @@ describe("azure devops", () => {
   })
 
   test("omits field filters when expanding connected work item relations", async () => {
-    const batchBodies: Array<Record<string, unknown>> = []
+    const batchBodies: Array<Schema.Schema.Type<typeof BatchRequestSchema>> = []
 
-    const { fetchMock } = makeFetchMock((url, init) => {
+    const { fetchMock } = makeFetchMock(async (url, init) => {
       if (url.endsWith("/_apis/wit/workitemsbatch?api-version=7.1") && init?.method === "POST") {
-        const body = parseJsonBody(init.body)
+        const body = await parseJsonBody(init.body)
         batchBodies.push(body)
 
         if (isTitleOnlyBatchRequest(body)) {
@@ -868,6 +1032,7 @@ describe("azure devops", () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const client = yield* AzureDevOpsClient
+
         return yield* client.getPullRequestWorkItems({
           context,
           token,

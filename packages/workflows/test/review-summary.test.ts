@@ -12,11 +12,13 @@ describe("review summary", () => {
     const inlineFinding = makeReviewFinding({
       title: "Inline finding",
     })
+
     const summaryOnlyFinding = makeReviewFinding({
       title: "Summary-only finding",
       filePath: "src/other.ts",
       line: 9,
     })
+
     const carriedForwardFinding = makeReviewFinding({
       title: "Carried forward finding",
       filePath: "src/legacy.ts",
@@ -143,6 +145,7 @@ describe("review summary", () => {
     const inlineFinding = makeReviewFinding({
       title: "Current issue",
     })
+
     const carriedForwardFinding = makeReviewFinding({
       title: "Older issue",
       filePath: "src/legacy.ts",

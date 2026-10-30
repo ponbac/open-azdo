@@ -1,4 +1,4 @@
-import { getSharedHighlighter, type DiffsHighlighter, type SupportedLanguages } from "@pierre/diffs"
+import { getSharedHighlighter, type DiffsHighlighter } from "@pierre/diffs"
 import { PatchDiff, type PatchDiffProps, WorkerPoolContextProvider } from "@pierre/diffs/react"
 // oxlint-disable-next-line import/default
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker"
@@ -25,28 +25,26 @@ const SANDBOX_PATCH_OPTIONS = {
   enableGutterUtility: false,
 } satisfies NonNullable<PatchDiffProps<undefined, undefined>["options"]>
 
+/** Extract textual descendants from the React nodes supplied by the markdown renderer. */
 function nodeToPlainText(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node)
-  }
-  if (Array.isArray(node)) {
-    return node.map((child) => nodeToPlainText(child)).join("")
-  }
-  if (isValidElement<{ children?: ReactNode }>(node)) {
-    return nodeToPlainText(node.props.children)
-  }
-  return ""
+  return Children.toArray(node)
+    .map((child) =>
+      isValidElement<{ children?: ReactNode }>(child) ? nodeToPlainText(child.props.children) : String(child),
+    )
+    .join("")
 }
 
 function extractCodeBlock(
   children: ReactNode,
 ): { readonly className: string | undefined; readonly code: string } | null {
   const childNodes = Children.toArray(children)
+
   if (childNodes.length !== 1) {
     return null
   }
 
   const onlyChild = childNodes[0]
+
   if (!isValidElement<{ className?: string; children?: ReactNode }>(onlyChild) || onlyChild.type !== "code") {
     return null
   }
@@ -59,6 +57,7 @@ function extractCodeBlock(
 
 function getSandboxWorkerPoolSize(): number {
   const cores = typeof navigator === "undefined" ? 4 : Math.max(1, navigator.hardwareConcurrency || 4)
+
   return Math.max(2, Math.min(6, Math.floor(cores / 2)))
 }
 
@@ -68,6 +67,7 @@ function createHighlightCacheKey(code: string, language: string): string {
 
 function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
   const cached = highlighterPromiseCache.get(language)
+
   if (cached) {
     return cached
   }
@@ -76,19 +76,22 @@ function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
     try {
       return await getSharedHighlighter({
         themes: [SANDBOX_THEME],
-        langs: [language as SupportedLanguages],
+        langs: [language],
         preferredHighlighter: "shiki-js",
       })
     } catch (error) {
       highlighterPromiseCache.delete(language)
+
       if (language === "text") {
         throw error
       }
+
       return getHighlighterPromise("text")
     }
   })()
 
   highlighterPromiseCache.set(language, promise)
+
   return promise
 }
 
@@ -100,18 +103,20 @@ function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
 async function renderHighlightedCode(code: string, language: string): Promise<string> {
   const cacheKey = createHighlightCacheKey(code, language)
   const cachedHtml = highlightedCodeCache.get(cacheKey)
+
   if (cachedHtml) {
     return cachedHtml
   }
 
   let pending = pendingHighlightedCodeCache.get(cacheKey)
+
   if (!pending) {
     pending = (async () => {
       const highlighter = await getHighlighterPromise(language)
 
       try {
         return highlighter.codeToHtml(code, {
-          lang: language as SupportedLanguages,
+          lang: language,
           theme: SANDBOX_THEME,
         })
       } catch {
@@ -130,6 +135,7 @@ async function renderHighlightedCode(code: string, language: string): Promise<st
   try {
     const html = await pending
     highlightedCodeCache.set(cacheKey, html)
+
     return html
   } finally {
     pendingHighlightedCodeCache.delete(cacheKey)
@@ -153,8 +159,10 @@ function MarkdownCodeBlock({
     let cancelled = false
 
     const cachedHtml = highlightedCodeCache.get(cacheKey)
+
     if (cachedHtml) {
       setHighlightedHtml(cachedHtml)
+
       return () => {
         cancelled = true
       }
@@ -165,6 +173,7 @@ function MarkdownCodeBlock({
     const loadHighlightedHtml = async () => {
       try {
         const html = await renderHighlightedCode(code, language)
+
         if (!cancelled) {
           setHighlightedHtml(html)
         }
@@ -235,6 +244,7 @@ export function useMarkdownComponents(): Components {
     () => ({
       pre({ children, ...props }) {
         const codeBlock = extractCodeBlock(children)
+
         if (!codeBlock) {
           return <pre {...props}>{children}</pre>
         }

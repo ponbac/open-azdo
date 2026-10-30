@@ -13,7 +13,12 @@ This package is the published-package path for secure PR review automation. Unli
 - rely on tokenized clone URLs
 
 The CLI consumes the Azure Pipeline checkout workspace directly and uses the built-in `System.AccessToken` for the minimal Azure DevOps REST surface.
-Each review run starts a short-lived localhost OpenCode server, prompts it through `@opencode/client`, collects the JSON-schema result through a run-scoped submission tool, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
+The generated reviewer can use OpenCode's native read, glob, and grep tools plus the result-submission tool. Shell commands, including git, are denied; the CLI supplies the diff context. Azure job tokens are omitted from the model server environment while provider credentials remain available. These tool permissions are guardrails, not OS-level isolation; see [SECURITY.md](./SECURITY.md).
+Each review run starts a short-lived localhost OpenCode server, prompts it through `@opencode/client`, collects the JSON-schema result through a run-scoped submission tool, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair. If no valid review result can be decoded, the run fails without advancing the reviewed commit, so a rerun reviews those changes again. The optional summary pass can fall back to deterministic rendering of an already completed review.
+
+The reviewer receives the scoped patch directly and can inspect nearby workspace code with native read/search tools. Only comments authored by the current token's authenticated identity supply managed review state. The reviewed-commit checkpoint is published after all findings and status updates succeed, so a partial publishing failure remains retryable.
+
+Review input is limited to a 64 KiB scoped patch and a 128 KiB complete prompt, measured as UTF-8 bytes. Larger inputs fail before invoking the model; split the pull request or reduce its context before retrying. OpenCode compaction also fails the pass because it can discard the original patch and instructions. These failures preserve the previous reviewed-commit checkpoint.
 
 ## Install And Run
 

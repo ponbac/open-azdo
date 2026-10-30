@@ -20,8 +20,10 @@ export type ExecuteGitResult = {
   readonly stderr: string
 }
 
-export interface GitExecShape {
-  readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>
-}
-
-export class GitExec extends Context.Service<GitExec, GitExecShape>()("open-azdo/git/GitExec") {}
+/** Executes Git argv commands and translates command failures into Git-specific errors. */
+export class GitExec extends Context.Service<
+  GitExec,
+  {
+    readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>
+  }
+>()("open-azdo/git/GitExec") {}

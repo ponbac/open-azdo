@@ -11,6 +11,7 @@ const normalizeMarkdown = (value: string) => {
       .replace(/^\n+/, "")
       .replace(/\n+$/, ""),
   )
+
   return normalized.trim().length > 0 ? normalized : undefined
 }
 
@@ -25,12 +26,14 @@ const turndown = new TurndownService({
 })
 
 turndown.remove(["script", "style", "img"])
+
 turndown.addRule("azure-devops-anchor-text", {
   filter: "a",
   replacement(content) {
     return content
   },
 })
+
 turndown.addRule("azure-devops-media-elements", {
   filter(node) {
     return ["img", "svg", "picture", "source"].includes(node.nodeName.toLowerCase())
@@ -50,6 +53,7 @@ export const renderWorkItemMarkdown = Effect.fn("WorkItemMarkdown.render")(funct
   input: string | null | undefined,
 ) {
   const normalizedInput = normalizeInput(input)
+
   if (!normalizedInput) {
     return undefined
   }

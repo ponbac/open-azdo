@@ -30,11 +30,7 @@ const timeoutFields = (timeout: Duration.Duration) => ({
   timeoutMs: Duration.toMillis(timeout),
 })
 
-const commandLogFields = (
-  input: ExecuteCommandInput,
-  timeout: Duration.Duration,
-  maxOutputBytes: number,
-): Record<string, unknown> => ({
+const commandLogFields = (input: ExecuteCommandInput, timeout: Duration.Duration, maxOutputBytes: number) => ({
   operation: input.operation,
   command: input.command,
   args: summarizeArgs(input.args),
@@ -50,7 +46,7 @@ const commandResultLogFields = (
   timeout: Duration.Duration,
   maxOutputBytes: number,
   result: CommandExecutionResult,
-): Record<string, unknown> => ({
+) => ({
   ...commandLogFields(input, timeout, maxOutputBytes),
   exitCode: result.exitCode,
   stdoutBytes: result.stdout.length,
@@ -67,6 +63,7 @@ const toCommandExecutionError = (input: ExecuteCommandInput, detail: string, std
     exitCode,
   })
 
+/** Collects one process pipe up to its byte budget, reporting overflows through the typed failure channel. */
 const collectOutput = Effect.fn("ProcessRunner.collectOutput")(function* (
   input: ExecuteCommandInput,
   stream: Stream.Stream<Uint8Array, unknown>,
@@ -78,10 +75,11 @@ const collectOutput = Effect.fn("ProcessRunner.collectOutput")(function* (
   let text = ""
 
   yield* Stream.runForEach(stream, (chunk) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       bytes += chunk.byteLength
+
       if (bytes > maxOutputBytes) {
-        throw toCommandExecutionError(
+        return yield* toCommandExecutionError(
           input,
           `${commandLabel(input)} ${streamName} exceeded ${maxOutputBytes} bytes.`,
           streamName === "stderr" ? text : "",
@@ -99,6 +97,7 @@ const collectOutput = Effect.fn("ProcessRunner.collectOutput")(function* (
   )
 
   text += decoder.decode()
+
   return text
 })
 
@@ -108,18 +107,27 @@ const makeProcessRunner = Effect.gen(function* () {
   const execute = Effect.fn("ProcessRunner.execute")(function* (input: ExecuteCommandInput) {
     const timeout = input.timeout ?? DEFAULT_TIMEOUT
     const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+
     const encodedStdin =
       input.stdin === undefined ? "ignore" : Stream.fromIterable([new TextEncoder().encode(input.stdin)])
 
     yield* logDebug("Starting command.", commandLogFields(input, timeout, maxOutputBytes))
 
-    const command = ChildProcess.make(input.command, [...input.args], {
-      ...(input.cwd ? { cwd: input.cwd } : {}),
-      ...(input.env ? { env: input.env, extendEnv: false } : {}),
+    let commandOptions: ChildProcess.CommandOptions = {
       stdin: encodedStdin,
       stdout: "pipe",
       stderr: "pipe",
-    })
+    }
+
+    if (input.cwd) {
+      commandOptions = { ...commandOptions, cwd: input.cwd }
+    }
+
+    if (input.env) {
+      commandOptions = { ...commandOptions, env: input.env, extendEnv: false }
+    }
+
+    const command = ChildProcess.make(input.command, [...input.args], commandOptions)
 
     return yield* Effect.gen(function* () {
       const handle = yield* spawner
@@ -187,9 +195,9 @@ const makeProcessRunner = Effect.gen(function* () {
     )
   })
 
-  return {
+  return ProcessRunner.of({
     execute,
-  }
+  })
 })
 
 export const ProcessRunnerLive = Layer.effect(ProcessRunner, makeProcessRunner)

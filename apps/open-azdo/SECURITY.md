@@ -2,7 +2,7 @@
 
 ## Scope
 
-`open-azdo` is review-only in v1. It reads the checked-out workspace, calls OpenCode in read-only mode, and writes Azure DevOps PR threads. It does not edit files, commit, push, or invoke arbitrary helper scripts for mutations.
+`open-azdo` is intended for review-only use in v1. The CLI reads the checked-out workspace and writes Azure DevOps PR threads. Its generated OpenCode agent permits native read tools and result submission, and denies shell execution, edits, and writes. These permissions are application guardrails, not operating-system isolation.
 
 ## Threat Model
 
@@ -16,7 +16,7 @@ Inputs are treated as untrusted:
 
 Primary goals:
 
-- never leak secrets to stdout, stderr, or structured logs
+- minimize accidental secret exposure in stdout, stderr, and structured logs
 - avoid broad repository or network mutation paths
 - keep Azure DevOps permissions limited to repository read plus PR thread read/write
 
@@ -38,6 +38,8 @@ If required history is missing, `open-azdo` fails with a remediation message ins
 - secrets are wrapped with Effect `Redacted`
 - log rendering sanitizes token-like fields before output
 - authenticated git URLs are never constructed
+- `SYSTEM_ACCESSTOKEN` and `OPEN_AZDO_LIVE_ACCESS_TOKEN`, including case variants, are removed from the model server environment
+- provider credential variables remain available to OpenCode so the selected model can authenticate
 
 ## OpenCode Containment
 
@@ -47,21 +49,29 @@ Each review run starts a short-lived, password-protected OpenCode server bound t
 - edit and write denied
 - web fetch and web search denied
 - subagents, skills, and directories outside the workspace denied for OpenCode's native tools
-- shell denied by default, with an allowlist of read-style commands
+- all shell commands denied, including git commands; arguments such as `git diff --output` can write files
 
-OpenCode V2 matches shell rules against the command only. It does not limit allowlisted commands to the workspace or inspect their arguments, so these rules are a guardrail against accidental changes rather than a sandbox. Repository `opencode.json` and `.opencode` content, including plugins, is loaded as usual. Run `open-azdo` only on repositories whose contributors you trust.
+Native read, glob, and grep tools cover workspace inspection without a shell allowlist. Repository `opencode.json` and `.opencode` content, including plugins, is loaded as usual, so run `open-azdo` only on repositories whose contributors you trust.
 
-OpenCode is prompted through `@opencode/client`. V2 has no native structured output, so a run-scoped plugin registers a JSON-schema submission tool and the workflow reads the validated tool input. If no valid submission exists, the workflow attempts JSON repair on the text reply and then degrades to a summary-only `"concerns"` result instead of trusting arbitrary text as valid findings.
+The server runs under the same operating-system identity as the CLI. Environment filtering does not prevent same-user access to the parent process, `/proc` where permitted, credential files, or other accessible filesystem data. The tool permissions do not provide a general guarantee against secret exposure or host mutation. Strong containment requires separate operating-system isolation, such as a separate UID or a container; `open-azdo` does not provision it.
+
+OpenCode is prompted through `@opencode/client`. V2 has no native structured output, so a run-scoped plugin registers a JSON-schema submission tool and the workflow reads the validated tool input. If no valid submission exists, the workflow attempts JSON repair on the text reply. An undecodable review fails without advancing the reviewed commit, preserving eligibility for a rerun. Only the optional summary pass can fall back to deterministic rendering, using the findings from an already validated review.
+
+The scoped patch is limited to 64 KiB and the complete review prompt to 128 KiB of UTF-8 input. Neither is truncated to fit. Any OpenCode compaction record, or inability to verify compaction history, fails the pass rather than accepting a result after the original evidence may have been discarded. A failed main review retains the previous checkpoint; a failed optional summary can still use deterministic rendering of the completed review.
 
 ## Azure DevOps Mutations
 
 The only intended write surface is PR thread management:
 
 - one managed summary thread
-- one managed inline thread per active finding, with thread reuse selected explicitly by the reviewer model through the prior Azure DevOps thread id
+- one managed inline thread per active finding, with continuity selected by the reviewer model through the prior thread id and identical already-published content reused during retries
 - managed finding threads closed only when the reviewer model explicitly resolves an in-scope prior thread id
 
-Comment-post failures are surfaced as operational failures and do not get swallowed.
+Managed state is accepted only from nondeleted comments authored by the identity authenticated by the current Azure token. Display names and marker text alone do not establish ownership. Changing the token's identity can therefore cause a fresh review instead of adopting another account's checkpoint.
+
+A failed first review uses a separate bot-owned failure marker with no reviewed commit. Retries update that notice, and a successful review reuses it for the managed summary. Expected input-limit failures show the remediation message; other operational failures point to pipeline logs rather than publishing stack traces.
+
+Findings and thread-status changes are published before the summary's reviewed-commit checkpoint. A partial publication failure is surfaced as an operational failure, retains the previous checkpoint, and leaves the missing work eligible for a rerun. Identical findings already posted by that identity can be reused on retry.
 
 ## Reporting
 

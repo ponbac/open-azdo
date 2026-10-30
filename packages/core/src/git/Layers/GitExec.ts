@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect"
 
 import { GitCommandError } from "../../errors"
-import { ProcessRunner } from "../../process-runner"
+import { ProcessRunner, type ExecuteCommandInput } from "../../process-runner"
 import { GitExec, type ExecuteGitInput, type ExecuteGitResult } from "../Services/GitExec"
 
 const quoteGitCommand = (args: ReadonlyArray<string>) => `git ${args.join(" ")}`
@@ -18,17 +18,28 @@ const makeGitExec = Effect.gen(function* () {
   const runner = yield* ProcessRunner
 
   const execute: GitExec["Service"]["execute"] = Effect.fn("GitExec.execute")(function* (input) {
+    let commandInput: ExecuteCommandInput = {
+      operation: input.operation,
+      command: "git",
+      args: input.args,
+      cwd: input.cwd,
+      allowNonZeroExit: true,
+    }
+
+    if (input.env) {
+      commandInput = { ...commandInput, env: input.env }
+    }
+
+    if (input.timeout !== undefined) {
+      commandInput = { ...commandInput, timeout: input.timeout }
+    }
+
+    if (input.maxOutputBytes !== undefined) {
+      commandInput = { ...commandInput, maxOutputBytes: input.maxOutputBytes }
+    }
+
     const result = yield* runner
-      .execute({
-        operation: input.operation,
-        command: "git",
-        args: input.args,
-        cwd: input.cwd,
-        ...(input.env ? { env: input.env } : {}),
-        allowNonZeroExit: true,
-        ...(input.timeout !== undefined ? { timeout: input.timeout } : {}),
-        ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
-      })
+      .execute(commandInput)
       .pipe(
         Effect.mapError((error) =>
           createGitCommandError(input, error.stderr.trim().length > 0 ? error.stderr.trim() : error.detail),
@@ -51,9 +62,9 @@ const makeGitExec = Effect.gen(function* () {
     } satisfies ExecuteGitResult
   })
 
-  return {
+  return GitExec.of({
     execute,
-  }
+  })
 })
 
 export const GitExecLive = Layer.effect(GitExec, makeGitExec)

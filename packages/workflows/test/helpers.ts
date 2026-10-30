@@ -1,17 +1,17 @@
 import { Effect, Logger, Redacted } from "effect"
 
-import { createAzureContext, type AzureDevOpsClient, type AzureDevOpsClientShape } from "@open-azdo/azdo/client"
+import { createAzureContext, type AzureDevOpsClient, type AzureDevOpsClientService } from "@open-azdo/azdo/client"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import {
   buildInlineComment,
   buildManagedReviewState,
   buildSummaryComment,
-  findManagedSummaryThread,
-  fingerprintFinding,
   type ManagedReviewState,
   type ReviewHistoryEntry,
 } from "../src/review/ThreadReconciliation"
 import type { NormalizedReviewResult, ReviewFinding } from "../src/review/ReviewOutput"
+
+export const BOT_ID = "review-bot-id"
 
 export const makeAzureContext = () =>
   createAzureContext({
@@ -84,7 +84,7 @@ export const makeReviewHistoryEntry = (overrides: Partial<ReviewHistoryEntry> = 
 })
 
 export const makeSummarySnapshot = (
-  overrides: Record<string, unknown> = {},
+  overrides: Partial<Parameters<typeof buildSummaryComment>[0]> = {},
   persistedState: ManagedReviewState = makeManagedReviewState(),
 ) => ({
   verdict: persistedState.verdict,
@@ -104,6 +104,7 @@ export const makeManagedSummaryThread = (
   comments: [
     {
       id: threadId * 10,
+      author: { id: BOT_ID, displayName: "Open AZDO" },
       content: buildSummaryComment(makeSummarySnapshot({}, reviewState)),
     },
   ],
@@ -115,6 +116,7 @@ export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2, s
   comments: [
     {
       id: threadId * 10,
+      author: { id: BOT_ID, displayName: "Open AZDO" },
       content: buildInlineComment(finding),
     },
   ],
@@ -126,8 +128,9 @@ export const makeManagedFindingThread = (finding: ReviewFinding, threadId = 2, s
 })
 
 export const makeAzureDevOpsClient = (
-  overrides: Partial<AzureDevOpsClientShape> = {},
+  overrides: Partial<AzureDevOpsClientService> = {},
 ): AzureDevOpsClient["Service"] => ({
+  getAuthenticatedIdentity: () => Effect.succeed(BOT_ID),
   getPullRequestMetadata: () =>
     Effect.succeed({
       title: "Feature PR",
@@ -143,7 +146,3 @@ export const makeAzureDevOpsClient = (
 })
 
 export const systemToken = Redacted.make("system-token")
-
-export const extractManagedSummaryState = (thread: ExistingThread) => findManagedSummaryThread([thread])?.reviewState
-
-export const findingFingerprint = (finding: ReviewFinding) => fingerprintFinding(finding)

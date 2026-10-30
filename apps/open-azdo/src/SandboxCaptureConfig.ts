@@ -2,15 +2,13 @@ import { existsSync } from "node:fs"
 import { dirname, join, parse, resolve } from "node:path"
 
 import { Config, Effect, Layer, Option, Redacted, Schema, Context } from "effect"
-import * as Duration from "effect/Duration"
 
 import { ConfigError } from "./errors"
+import { resolveOpenCodeTimeout, validateCollectionUrl } from "./ConfigParsing"
 import { inferOrganizationFromCollectionUrl } from "./AppConfig"
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1))
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
-const DEFAULT_OPENCODE_TIMEOUT = Duration.minutes(10)
-const BARE_DURATION_REGEXP = /^-?\d+(?:\.\d+)?$/
 
 export type SandboxCaptureCliInput = {
   readonly model: Option.Option<string>
@@ -26,23 +24,31 @@ export type SandboxCaptureCliInput = {
   readonly json: boolean
 }
 
-export type SandboxCaptureConfigShape = {
-  readonly command: "sandbox-capture"
-  readonly model: string
-  readonly opencodeVariant?: string
-  readonly opencodeTimeout: Duration.Duration
-  readonly workspace?: string
-  readonly organization: string
-  readonly project: string
-  readonly repositoryId: string
-  readonly pullRequestId: number
-  readonly collectionUrl: string
-  readonly output: string
-  readonly json: boolean
-  readonly accessToken: Redacted.Redacted<string>
-}
+/** Parsed capture flags supplied by the command boundary. */
+export class SandboxCaptureCommandInput extends Context.Service<SandboxCaptureCommandInput, SandboxCaptureCliInput>()(
+  "open-azdo/cli/SandboxCaptureCommandInput",
+) {}
 
-export class SandboxCaptureConfig extends Context.Service<SandboxCaptureConfig, SandboxCaptureConfigShape>()(
+const SandboxCaptureConfigSchema = Schema.Struct({
+  command: Schema.Literal("sandbox-capture"),
+  model: NonEmptyString,
+  opencodeVariant: Schema.optionalKey(NonEmptyString),
+  opencodeTimeout: Schema.Duration,
+  workspace: Schema.optionalKey(NonEmptyString),
+  organization: NonEmptyString,
+  project: NonEmptyString,
+  repositoryId: NonEmptyString,
+  pullRequestId: PositiveInt,
+  collectionUrl: NonEmptyString,
+  output: NonEmptyString,
+  json: Schema.Boolean,
+  accessToken: Schema.Redacted(NonEmptyString),
+})
+
+/** Validated capture settings consumed by the capture workflow. */
+export interface SandboxCaptureSettings extends Schema.Schema.Type<typeof SandboxCaptureConfigSchema> {}
+
+export class SandboxCaptureConfig extends Context.Service<SandboxCaptureConfig, SandboxCaptureSettings>()(
   "open-azdo/config/SandboxCaptureConfig",
 ) {}
 
@@ -64,70 +70,8 @@ const EnvConfig = Config.all({
   systemAccessToken: optionalStringConfig("SYSTEM_ACCESSTOKEN"),
 })
 
-const optionOrUndefined = <A>(option: Option.Option<A>) => {
-  const value = Option.getOrUndefined(option)
-  return typeof value === "string" ? (value.trim().length > 0 ? value : undefined) : value
-}
-
-const invalidOpenCodeTimeout = (value: string, issue: string) =>
-  new ConfigError({
-    message: "Invalid OpenCode timeout.",
-    issues: [`${issue} Received ${JSON.stringify(value)}.`, 'Use values like "300 seconds" or "5 minutes".'],
-  })
-
-const decodeOpenCodeTimeout = (value: string): Duration.Duration => {
-  const trimmed = value.trim()
-
-  if (trimmed.length === 0) {
-    throw invalidOpenCodeTimeout(value, "Timeout cannot be empty.")
-  }
-
-  if (BARE_DURATION_REGEXP.test(trimmed)) {
-    throw invalidOpenCodeTimeout(value, "Timeout must include an explicit unit.")
-  }
-
-  const maybeDuration = Duration.fromInput(trimmed as Duration.Input)
-  const duration = optionOrUndefined(maybeDuration)
-  if (duration === undefined) {
-    throw invalidOpenCodeTimeout(value, "Timeout must use Effect duration syntax with an explicit unit.")
-  }
-
-  if (!Duration.isFinite(duration)) {
-    throw invalidOpenCodeTimeout(value, "Timeout must be finite.")
-  }
-
-  if (!Duration.isPositive(duration)) {
-    throw invalidOpenCodeTimeout(value, "Timeout must be greater than zero.")
-  }
-
-  return duration
-}
-
-const resolveOpenCodeTimeout = (value: string | undefined) =>
-  value === undefined
-    ? Effect.succeed(DEFAULT_OPENCODE_TIMEOUT)
-    : Effect.try({
-        try: () => decodeOpenCodeTimeout(value),
-        catch: (error) =>
-          error instanceof ConfigError
-            ? error
-            : invalidOpenCodeTimeout(value, "Timeout must use Effect duration syntax with an explicit unit."),
-      })
-
-const validateCollectionUrl = (collectionUrl: string) =>
-  Effect.try({
-    try: () => {
-      const url = new URL(collectionUrl)
-      if (!/^https?:$/.test(url.protocol)) {
-        throw new Error("Collection URL must use http or https.")
-      }
-    },
-    catch: (error) =>
-      new ConfigError({
-        message: "Invalid Azure DevOps collection URL.",
-        issues: [String(error)],
-      }),
-  })
+const optionalNonBlankString = (option: Option.Option<string>) =>
+  Option.getOrUndefined(Option.filter(option, (value) => value.trim().length > 0))
 
 /**
  * Resolve the capture output under the nearest enclosing git repository so the
@@ -142,6 +86,7 @@ const resolveRepositoryRoot = (startDirectory: string) => {
     }
 
     const parent = dirname(current)
+
     if (parent === current || current === parse(current).root) {
       return resolve(startDirectory)
     }
@@ -163,100 +108,104 @@ const defaultOutputPath = ({
 
 const requireString = (value: string | undefined, name: string) => {
   if (value && value.trim().length > 0) {
-    return value
+    return Effect.succeed(value)
   }
 
-  throw new ConfigError({
-    message: "Missing sandbox capture configuration.",
-    issues: [`${name} is required.`],
-  })
+  return Effect.fail(
+    new ConfigError({
+      message: "Missing sandbox capture configuration.",
+      issues: [`${name} is required.`],
+    }),
+  )
 }
 
-const requireInt = (value: string | number | undefined, name: string) => {
-  const parsed = typeof value === "number" ? value : Number.parseInt(value ?? "", 10)
+const requireInt = (parsed: number, name: string) => {
   if (Number.isInteger(parsed) && parsed > 0) {
-    return parsed
+    return Effect.succeed(parsed)
   }
 
-  throw new ConfigError({
-    message: "Missing sandbox capture configuration.",
-    issues: [`${name} must be a positive integer.`],
-  })
+  return Effect.fail(
+    new ConfigError({
+      message: "Missing sandbox capture configuration.",
+      issues: [`${name} must be a positive integer.`],
+    }),
+  )
 }
 
-const resolveSandboxCaptureConfig = (input: SandboxCaptureCliInput) =>
-  Effect.gen(function* () {
-    const env = yield* EnvConfig
-    const collectionUrl = optionOrUndefined(input.collectionUrl) ?? env.collectionUrl
-    const organization =
-      optionOrUndefined(input.organization) ??
-      env.organization ??
-      inferOrganizationFromCollectionUrl(collectionUrl ?? "")
-    const project = optionOrUndefined(input.project) ?? env.project
-    const repositoryId = optionOrUndefined(input.repositoryId) ?? env.repositoryId
-    const inputPullRequestId = optionOrUndefined(input.pullRequestId)
-    const pullRequestId =
-      typeof inputPullRequestId === "number" && Number.isInteger(inputPullRequestId) && inputPullRequestId > 0
-        ? inputPullRequestId
-        : env.pullRequestId
-    const resolvedPullRequestId = requireInt(pullRequestId, "OPEN_AZDO_LIVE_PULL_REQUEST_ID")
-    const resolvedOrganization = requireString(organization, "OPEN_AZDO_LIVE_ORGANIZATION")
-    const opencodeVariant = optionOrUndefined(input.opencodeVariant) ?? env.variant
-    const workspace = optionOrUndefined(input.workspace) ?? env.workspace
+/** Resolve CLI overrides and live environment defaults, reporting invalid inputs as typed configuration failures. */
+const resolveSandboxCaptureConfig = Effect.gen(function* () {
+  const input = yield* SandboxCaptureCommandInput
+  const env = yield* EnvConfig
+  const collectionUrl = optionalNonBlankString(input.collectionUrl) ?? env.collectionUrl
 
-    const config = {
-      command: "sandbox-capture" as const,
-      model: requireString(optionOrUndefined(input.model) ?? env.model, "OPEN_AZDO_LIVE_MODEL"),
-      ...(opencodeVariant ? { opencodeVariant } : {}),
-      opencodeTimeout: yield* resolveOpenCodeTimeout(optionOrUndefined(input.opencodeTimeout) ?? env.timeout),
-      ...(workspace ? { workspace } : {}),
-      organization: resolvedOrganization,
-      project: requireString(project, "OPEN_AZDO_LIVE_PROJECT"),
-      repositoryId: requireString(repositoryId, "OPEN_AZDO_LIVE_REPOSITORY_ID"),
-      pullRequestId: resolvedPullRequestId,
-      collectionUrl: requireString(collectionUrl, "OPEN_AZDO_LIVE_COLLECTION_URL"),
-      output:
-        optionOrUndefined(input.output) ??
-        env.output ??
-        defaultOutputPath({
-          organization: resolvedOrganization,
-          project: requireString(project, "OPEN_AZDO_LIVE_PROJECT"),
-          pullRequestId: resolvedPullRequestId,
-        }),
-      json: input.json,
-      accessToken: Redacted.make(
-        requireString(env.accessToken ?? env.systemAccessToken, "OPEN_AZDO_LIVE_ACCESS_TOKEN"),
-      ),
-    }
+  const organization =
+    optionalNonBlankString(input.organization) ??
+    env.organization ??
+    inferOrganizationFromCollectionUrl(collectionUrl ?? "")
 
-    yield* validateCollectionUrl(config.collectionUrl)
-    return Schema.decodeUnknownSync(
-      Schema.Struct({
-        command: Schema.Literal("sandbox-capture"),
-        model: NonEmptyString,
-        opencodeVariant: Schema.optionalKey(NonEmptyString),
-        opencodeTimeout: Schema.Duration,
-        workspace: Schema.optionalKey(NonEmptyString),
-        organization: NonEmptyString,
-        project: NonEmptyString,
-        repositoryId: NonEmptyString,
-        pullRequestId: PositiveInt,
-        collectionUrl: NonEmptyString,
-        output: NonEmptyString,
-        json: Schema.Boolean,
-        accessToken: Schema.Redacted(NonEmptyString),
-      }),
-    )(config)
-  }).pipe(
-    Effect.mapError((error) =>
-      error instanceof ConfigError
-        ? error
-        : new ConfigError({
-            message: "Invalid sandbox capture configuration.",
-            issues: [String(error)],
-          }),
-    ),
+  const project = optionalNonBlankString(input.project) ?? env.project
+  const repositoryId = optionalNonBlankString(input.repositoryId) ?? env.repositoryId
+
+  const pullRequestId = Option.getOrElse(
+    Option.filter(input.pullRequestId, (value) => Number.isInteger(value) && value > 0),
+    () => Number.parseInt(env.pullRequestId ?? "", 10),
   )
 
-export const makeSandboxCaptureConfigLayer = (input: SandboxCaptureCliInput) =>
-  Layer.effect(SandboxCaptureConfig, resolveSandboxCaptureConfig(input))
+  const resolvedPullRequestId = yield* requireInt(pullRequestId, "OPEN_AZDO_LIVE_PULL_REQUEST_ID")
+  const resolvedOrganization = yield* requireString(organization, "OPEN_AZDO_LIVE_ORGANIZATION")
+  const opencodeVariant = optionalNonBlankString(input.opencodeVariant) ?? env.variant
+  const workspace = optionalNonBlankString(input.workspace) ?? env.workspace
+
+  const model = yield* requireString(optionalNonBlankString(input.model) ?? env.model, "OPEN_AZDO_LIVE_MODEL")
+  const opencodeTimeout = yield* resolveOpenCodeTimeout(optionalNonBlankString(input.opencodeTimeout) ?? env.timeout)
+  const resolvedProject = yield* requireString(project, "OPEN_AZDO_LIVE_PROJECT")
+  const resolvedRepositoryId = yield* requireString(repositoryId, "OPEN_AZDO_LIVE_REPOSITORY_ID")
+  const resolvedCollectionUrl = yield* requireString(collectionUrl, "OPEN_AZDO_LIVE_COLLECTION_URL")
+
+  let config: SandboxCaptureSettings = {
+    command: "sandbox-capture" as const,
+    model,
+    opencodeTimeout,
+    organization: resolvedOrganization,
+    project: resolvedProject,
+    repositoryId: resolvedRepositoryId,
+    pullRequestId: resolvedPullRequestId,
+    collectionUrl: resolvedCollectionUrl,
+    output:
+      optionalNonBlankString(input.output) ??
+      env.output ??
+      defaultOutputPath({
+        organization: resolvedOrganization,
+        project: resolvedProject,
+        pullRequestId: resolvedPullRequestId,
+      }),
+    json: input.json,
+    accessToken: Redacted.make(
+      yield* requireString(env.accessToken ?? env.systemAccessToken, "OPEN_AZDO_LIVE_ACCESS_TOKEN"),
+    ),
+  }
+
+  if (opencodeVariant) {
+    config = { ...config, opencodeVariant }
+  }
+
+  if (workspace) {
+    config = { ...config, workspace }
+  }
+
+  yield* validateCollectionUrl(config.collectionUrl)
+
+  return yield* Schema.decodeUnknownEffect(SandboxCaptureConfigSchema)(config)
+}).pipe(
+  Effect.mapError((error) =>
+    error instanceof ConfigError
+      ? error
+      : new ConfigError({
+          message: "Invalid sandbox capture configuration.",
+          issues: [String(error)],
+        }),
+  ),
+)
+
+/** Decode capture settings from the contextual command input and active configuration provider. */
+export const SandboxCaptureConfigLive = Layer.effect(SandboxCaptureConfig, resolveSandboxCaptureConfig)

@@ -7,7 +7,7 @@ import { Effect, Layer, Logger } from "effect"
 import * as Duration from "effect/Duration"
 
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
-import { GitExec, GitExecLive, type GitExecShape, type PullRequestDiff } from "@open-azdo/core/git"
+import { GitExecLive } from "@open-azdo/core/git"
 import { ProcessRunnerLive } from "@open-azdo/core/process-runner"
 
 import { type OpenCodeRunRequest } from "../src/opencode/Services/OpenCodeRunner"
@@ -179,12 +179,6 @@ export function makeOpenCodeSdkRuntime(
   }
 }
 
-export const makeGitExec = (execute: GitExecShape["execute"]): GitExec["Service"] => ({
-  execute,
-})
-
-export const makeGitExecLayer = (service: GitExec["Service"]) => Layer.succeed(GitExec, service)
-
 export const makeRealGitExecLayer = () =>
   GitExecLive.pipe(Layer.provide(ProcessRunnerLive.pipe(Layer.provide(BaseRuntimeLayer))))
 
@@ -202,16 +196,6 @@ export const makeOpenCodeRunRequest = (overrides: Partial<OpenCodeRunRequest> = 
   timeout: Duration.minutes(10),
   prompt: "Review this pull request.",
   inheritedEnv: {},
-  ...overrides,
-})
-
-export const makePullRequestDiff = (overrides: Partial<PullRequestDiff> = {}): PullRequestDiff => ({
-  baseRef: "abc123",
-  headRef: "HEAD",
-  diffText: "",
-  changedFiles: [],
-  changedLinesByFile: new Map<string, Set<number>>(),
-  deletedLinesByFile: new Map<string, Set<number>>(),
   ...overrides,
 })
 

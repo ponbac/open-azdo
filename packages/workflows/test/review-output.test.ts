@@ -4,6 +4,32 @@ import { Effect } from "effect"
 import { decodeReviewResult } from "../src/review/ReviewOutput"
 
 describe("review output", () => {
+  test.each([
+    ["back\\slash.ts", 2, "back\\slash.ts"],
+    ["back/slash.ts", 3, "back/slash.ts"],
+    [".\\ordinary\\file.ts", 4, "ordinary/file.ts"],
+  ] as const)("maps %s to its exact Git path before trying separator aliases", async (filePath, line, expectedPath) => {
+    const result = await Effect.runPromise(
+      decodeReviewResult(
+        {
+          verdict: "concerns",
+          findings: [{ severity: "high", confidence: "high", title: "Finding", body: "Body", filePath, line }],
+          resolvedManagedFindingIds: [],
+          unmappedNotes: [],
+        },
+        new Map([
+          ["back\\slash.ts", new Set([2])],
+          ["back/slash.ts", new Set([3])],
+          ["ordinary/file.ts", new Set([4])],
+        ]),
+      ),
+    )
+
+    expect(result.inlineFindings.map((finding) => finding.filePath)).toEqual([expectedPath])
+    expect(result.findings.map((finding) => finding.filePath)).toEqual([expectedPath])
+    expect(result.summaryOnlyFindings).toEqual([])
+  })
+
   test("rejects invalid severities", async () => {
     const exit = await Effect.runPromiseExit(
       decodeReviewResult(
@@ -53,32 +79,6 @@ describe("review output", () => {
 
     expect(result.inlineFindings).toHaveLength(0)
     expect(result.summaryOnlyFindings).toHaveLength(1)
-  })
-
-  test("moves unmapped findings to summary-only notes", async () => {
-    const result = await Effect.runPromise(
-      decodeReviewResult(
-        {
-          verdict: "concerns",
-          findings: [
-            {
-              severity: "high",
-              confidence: "high",
-              title: "Unmapped",
-              body: "Body",
-              filePath: "src/example.ts",
-              line: 99,
-            },
-          ],
-          resolvedManagedFindingIds: [],
-          unmappedNotes: [],
-        },
-        new Map([["src/example.ts", new Set([2])]]),
-      ),
-    )
-
-    expect(result.inlineFindings).toHaveLength(0)
-    expect(result.unmappedNotes[0]).toContain("Unmapped")
   })
 
   test("keeps follow-up findings outside the scoped diff out of inline comments", async () => {

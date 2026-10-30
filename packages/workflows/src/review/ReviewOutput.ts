@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 
-import { normalizePath } from "@open-azdo/core/paths"
+import { resolveRepositoryPath } from "@open-azdo/core/paths"
 
 import { ReviewOutputValidationError } from "../errors"
 
@@ -79,9 +79,11 @@ export const ReviewResultJsonSchema = {
 } as const
 
 export const ReviewSeveritySchema = Schema.Literals(["low", "medium", "high", "critical"])
+
 export type ReviewSeverity = Schema.Schema.Type<typeof ReviewSeveritySchema>
 
 export const ReviewConfidenceSchema = Schema.Literals(["low", "medium", "high"])
+
 export type ReviewConfidence = Schema.Schema.Type<typeof ReviewConfidenceSchema>
 
 export const ReviewFindingSchema = Schema.Struct({
@@ -95,6 +97,7 @@ export const ReviewFindingSchema = Schema.Struct({
   suggestion: Schema.optionalKey(NonEmptyString),
   managedFindingId: Schema.optionalKey(PositiveInt),
 })
+
 export type ReviewFinding = Schema.Schema.Type<typeof ReviewFindingSchema>
 
 export const ReviewResultSchema = Schema.Struct({
@@ -103,6 +106,7 @@ export const ReviewResultSchema = Schema.Struct({
   resolvedManagedFindingIds: Schema.Array(PositiveInt),
   unmappedNotes: Schema.Array(Schema.String),
 })
+
 export type ReviewResult = Schema.Schema.Type<typeof ReviewResultSchema>
 
 export type NormalizedReviewResult = ReviewResult & {
@@ -110,8 +114,9 @@ export type NormalizedReviewResult = ReviewResult & {
   readonly summaryOnlyFindings: ReviewFinding[]
 }
 
+/** Validates model JSON against the review contract, then limits reconciliation to known candidates. */
 export const decodeReviewResult = (
-  payload: unknown,
+  payload: Schema.Json,
   changedLinesByFile: Map<string, Set<number>>,
   managedFindingCandidateIds: ReadonlySet<number> = new Set<number>(),
 ) =>
@@ -136,6 +141,7 @@ const normalizeManagedFindingReconciliation = (
   managedFindingCandidateIds: ReadonlySet<number>,
 ) => {
   const linkedManagedFindingIds = new Set<number>()
+
   const findings = reviewResult.findings.map((finding) => {
     const managedFindingId = finding.managedFindingId
 
@@ -146,10 +152,12 @@ const normalizeManagedFindingReconciliation = (
     ) {
       // Strip invalid or duplicate links instead of rejecting the whole model payload.
       const { managedFindingId: _managedFindingId, ...rest } = finding
+
       return rest
     }
 
     linkedManagedFindingIds.add(managedFindingId)
+
     return finding
   })
 
@@ -187,8 +195,14 @@ export const normalizeReviewResult = (
   const inlineFindings: ReviewFinding[] = []
   const summaryOnlyFindings: ReviewFinding[] = []
 
-  for (const finding of normalizedReviewResult.findings) {
-    const changedLines = changedLinesByFile.get(normalizePath(finding.filePath))
+  // Resolve once against Git's keys and carry that identity through markers and publication.
+  const findings = normalizedReviewResult.findings.map((finding) => ({
+    ...finding,
+    filePath: resolveRepositoryPath(finding.filePath, changedLinesByFile),
+  }))
+
+  for (const finding of findings) {
+    const changedLines = changedLinesByFile.get(finding.filePath)
     const isChangedLine = changedLines?.has(finding.line) ?? false
 
     if (!changedLines || !isChangedLine) {
@@ -207,6 +221,7 @@ export const normalizeReviewResult = (
 
   return {
     ...normalizedReviewResult,
+    findings,
     inlineFindings,
     summaryOnlyFindings,
     unmappedNotes: uniqueNotes(unmappedNotes),
@@ -229,7 +244,7 @@ export const countBySeverity = (findings: ReadonlyArray<ReviewFinding>) => {
 }
 
 export const renderUnmappedFinding = (finding: ReviewFinding) =>
-  `${finding.title} (${finding.severity}, ${finding.confidence}) at ${normalizePath(finding.filePath)}:${finding.line}`
+  `${finding.title} (${finding.severity}, ${finding.confidence}) at ${finding.filePath}:${finding.line}`
 
 export const getFindingEndLine = (finding: ReviewFinding) => finding.endLine ?? finding.line
 
@@ -237,5 +252,11 @@ export const getFindingEndLine = (finding: ReviewFinding) => finding.endLine ?? 
  * Trims, de-duplicates, and drops blank notes so summary-only text is always safe to publish.
  */
 export const uniqueNotes = (notes: ReadonlyArray<string>) => [
-  ...new Set(notes.map((note) => note.trim()).filter((note) => note.length > 0)),
+  ...new Set(
+    notes.flatMap((note) => {
+      const trimmed = note.trim()
+
+      return trimmed.length > 0 ? [trimmed] : []
+    }),
+  ),
 ]

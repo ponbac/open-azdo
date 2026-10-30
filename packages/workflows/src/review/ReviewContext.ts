@@ -5,18 +5,20 @@ import {
   type LineRange,
   type PullRequestDiff,
 } from "@open-azdo/core/git"
-import { normalizePath } from "@open-azdo/core/paths"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import type { PullRequestWorkItem, PullRequestWorkItemRef } from "@open-azdo/azdo/client"
-import { listManagedFindingThreads } from "./ThreadReconciliation"
+import {
+  type ManagedThreads,
+  stripManagedStatePayload,
+  managedFindingTouchesScopedDiff,
+  resolveManagedFindingLocation,
+} from "./ThreadReconciliation"
 
 const MAX_WORK_ITEM_CONTEXT_CHARS = 24_000
 const MAX_RELATED_ITEMS = 4
 const MAX_THREAD_CONTEXT_CHARS = 24_000
 const MAX_MANAGED_FINDING_CONTEXT_CHARS = 12_000
 const MAX_MANAGED_FINDING_CANDIDATE_CONTEXT_CHARS = 20_000
-const MANAGED_COMMENT_PREFIXES = ["<!-- open-azdo-review:", "<!-- open-azdo:"]
-const MANAGED_COMMENT_SUFFIX = " -->"
 const SYSTEM_THREAD_AUTHORS = new Set(["Azure Pipelines Test Service", "Microsoft.VisualStudio.Services.TFS"])
 const SYSTEM_THREAD_PREFIXES = ["Policy status has been updated", "The reference refs/"]
 const SYSTEM_THREAD_SNIPPETS = ["set auto-complete", "published the pull request"]
@@ -52,28 +54,6 @@ const normalizePromptText = (value: string | null | undefined) => {
   ).trim()
 
   return normalized.length > 0 ? normalized : undefined
-}
-
-const stripManagedStatePayloads = (value: string) => {
-  let next = value
-
-  for (const prefix of MANAGED_COMMENT_PREFIXES) {
-    while (true) {
-      const start = next.indexOf(prefix)
-      if (start < 0) {
-        break
-      }
-
-      const end = next.indexOf(MANAGED_COMMENT_SUFFIX, start)
-      if (end < 0) {
-        break
-      }
-
-      next = `${next.slice(0, start)}${next.slice(end + MANAGED_COMMENT_SUFFIX.length)}`
-    }
-  }
-
-  return next
 }
 
 export type PullRequestMetadata = {
@@ -159,18 +139,20 @@ export type ReviewContext = {
   }
 }
 
-export type BuildReviewContextInput = {
+type BuildReviewContextInput = {
   readonly metadata: PullRequestMetadata
   readonly reviewMode: ReviewMode
   readonly previousReviewedCommit?: string | undefined
   readonly pullRequestBaseRef: string
   readonly gitDiff: PullRequestDiff
   readonly existingThreads?: ReadonlyArray<ExistingThread>
-  readonly connectedWorkItems?: ReadonlyArray<PullRequestWorkItem>
+  readonly managedThreads: ManagedThreads
+  readonly connectedWorkItems?: ReadonlyArray<PullRequestWorkItem> | undefined
 }
 
 type ExistingThreadComment = ExistingThread["comments"][number]
-type ManagedFindingContextItem = ReturnType<typeof listManagedFindingThreads>[number]
+
+type ManagedFindingContextItem = ManagedThreads["findings"][number]
 
 type TruncationSlot<T> = {
   readonly text: string
@@ -267,6 +249,7 @@ const selectItemsWithinSerializedBudget = <T>({
     // dropping the section entirely. Later items are omitted once the budget is exhausted.
     if (selected.length === 0) {
       const truncated = truncateItemToFit(item, maxSerializedChars, totalCount)
+
       if (truncated) {
         selected.push(truncated)
       }
@@ -294,14 +277,19 @@ const updateWorkItemSectionText = (
   switch (key) {
     case "descriptionMarkdown": {
       const { descriptionMarkdown: _descriptionMarkdown, ...rest } = workItem
+
       return nextText.length > 0 ? { ...rest, descriptionMarkdown: nextText } : rest
     }
+
     case "acceptanceCriteriaMarkdown": {
       const { acceptanceCriteriaMarkdown: _acceptanceCriteriaMarkdown, ...rest } = workItem
+
       return nextText.length > 0 ? { ...rest, acceptanceCriteriaMarkdown: nextText } : rest
     }
+
     case "reproStepsMarkdown": {
       const { reproStepsMarkdown: _reproStepsMarkdown, ...rest } = workItem
+
       return nextText.length > 0 ? { ...rest, reproStepsMarkdown: nextText } : rest
     }
   }
@@ -372,6 +360,7 @@ const isExplicitlyNonTextCommentType = (commentType: ExistingThreadComment["comm
 
 const getDisplayName = (comment: ExistingThreadComment) => {
   const displayName = comment.author?.displayName?.trim()
+
   return displayName && displayName.length > 0 ? displayName : "Unknown"
 }
 
@@ -383,14 +372,11 @@ const isSystemNoiseContent = (content: string | undefined) =>
       SYSTEM_THREAD_SNIPPETS.some((snippet) => content.includes(snippet))
     : false
 
-const isManagedComment = (content: string | null | undefined) =>
-  typeof content === "string" && MANAGED_COMMENT_PREFIXES.some((prefix) => content.includes(prefix))
-
-const isHumanConversationComment = (comment: ExistingThreadComment) =>
+const isHumanConversationComment = (comment: ExistingThreadComment, managedComments: ManagedThreads["comments"]) =>
   !isDeletedComment(comment) &&
   !isExplicitlyNonTextCommentType(comment.commentType) &&
   !hasSystemAuthor(comment) &&
-  !isManagedComment(comment.content)
+  !managedComments.has(comment)
 
 const isPromptEligibleOpeningComment = (comment: ExistingThreadComment) =>
   !isExplicitlyNonTextCommentType(comment.commentType) &&
@@ -402,9 +388,12 @@ const isPromptEligibleOpeningComment = (comment: ExistingThreadComment) =>
  * Managed comments keep only their human-readable text while human comments
  * still respect the non-text and system-author filters.
  */
-const toPromptThreadComment = (comment: ExistingThreadComment): PromptThreadComment | undefined => {
-  const origin = isManagedComment(comment.content) ? "open-azdo" : "human"
-  const rawContent = origin === "open-azdo" ? stripManagedStatePayloads(comment.content ?? "") : comment.content
+const toPromptThreadComment = (
+  comment: ExistingThreadComment,
+  managedComments: ManagedThreads["comments"],
+): PromptThreadComment | undefined => {
+  const origin = managedComments.has(comment) ? "open-azdo" : "human"
+  const rawContent = origin === "open-azdo" ? stripManagedStatePayload(comment.content ?? "") : comment.content
   const content = normalizePromptText(rawContent ?? undefined)
 
   if (!content) {
@@ -419,17 +408,23 @@ const toPromptThreadComment = (comment: ExistingThreadComment): PromptThreadComm
     return undefined
   }
 
-  return {
+  let promptComment: PromptThreadComment = {
     author: getDisplayName(comment),
-    ...(comment.publishedDate ? { publishedAt: comment.publishedDate } : {}),
     origin,
     content,
-  } satisfies PromptThreadComment
+  }
+
+  if (comment.publishedDate) {
+    promptComment = { ...promptComment, publishedAt: comment.publishedDate }
+  }
+
+  return promptComment
 }
 
 const getThreadUpdatedAt = (thread: ExistingThread) =>
   thread.comments.reduce<string | undefined>((latest, comment) => {
     const publishedAt = comment.publishedDate ?? undefined
+
     if (!publishedAt) {
       return latest
     }
@@ -468,66 +463,59 @@ const resolveManagedFindingResolution = (status: ExistingThread["status"]): Prom
   return "unknown"
 }
 
+/** Projects an existing managed finding into its compact historical prompt record. */
 const toPromptManagedFinding = ({
   thread,
   updatedAt,
   filePath,
   line,
   finding,
-}: ManagedFindingContextItem): PromptManagedFinding => ({
-  id: thread.id,
-  status: thread.status,
-  resolution: resolveManagedFindingResolution(thread.status),
-  filePath: filePath ?? normalizePath(finding.filePath),
-  line: line ?? finding.line,
-  ...(updatedAt !== undefined ? { updatedAt } : {}),
-  title: finding.title,
-  severity: finding.severity,
-  confidence: finding.confidence,
-})
-
-const normalizeScopedFindingPath = (value: string) => normalizePath(value).replace(/^\/+/, "")
-
-const resolveManagedFindingPromptLocation = ({ filePath, line, finding }: ManagedFindingContextItem) => ({
-  filePath: normalizeScopedFindingPath(filePath ?? finding.filePath),
-  line: line ?? finding.line,
-  endLine: finding.endLine,
-})
-
-const managedFindingTouchesScopedDiff = (
-  managedFinding: ManagedFindingContextItem,
-  changedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
-  deletedLinesByFile: ReadonlyMap<string, ReadonlySet<number>>,
-) => {
-  const location = resolveManagedFindingPromptLocation(managedFinding)
-  const changedLines = changedLinesByFile.get(location.filePath)
-  const deletedLines = deletedLinesByFile.get(location.filePath)
-
-  for (let currentLine = location.line; currentLine <= (location.endLine ?? location.line); currentLine += 1) {
-    // Treat deleted lines as in-scope so the reviewer can explicitly resolve findings removed by the patch.
-    if (changedLines?.has(currentLine) || deletedLines?.has(currentLine)) {
-      return true
-    }
+}: ManagedFindingContextItem): PromptManagedFinding => {
+  let promptFinding: PromptManagedFinding = {
+    id: thread.id,
+    status: thread.status,
+    resolution: resolveManagedFindingResolution(thread.status),
+    filePath: filePath ?? finding.filePath,
+    line: line ?? finding.line,
+    title: finding.title,
+    severity: finding.severity,
+    confidence: finding.confidence,
   }
 
-  return false
+  if (updatedAt !== undefined) {
+    promptFinding = { ...promptFinding, updatedAt }
+  }
+
+  return promptFinding
 }
 
+/** Preserves current coordinates and evidence for findings the review can explicitly reconcile. */
 const toPromptManagedFindingCandidate = (managedFinding: ManagedFindingContextItem): PromptManagedFindingCandidate => {
-  const location = resolveManagedFindingPromptLocation(managedFinding)
+  const location = resolveManagedFindingLocation(managedFinding)
 
-  return {
+  let candidate: PromptManagedFindingCandidate = {
     id: managedFinding.thread.id,
     filePath: location.filePath,
     line: location.line,
-    ...(location.endLine !== undefined ? { endLine: location.endLine } : {}),
-    ...(managedFinding.updatedAt !== undefined ? { updatedAt: managedFinding.updatedAt } : {}),
     title: managedFinding.finding.title,
     body: managedFinding.finding.body,
-    ...(managedFinding.finding.suggestion !== undefined ? { suggestion: managedFinding.finding.suggestion } : {}),
     severity: managedFinding.finding.severity,
     confidence: managedFinding.finding.confidence,
-  } satisfies PromptManagedFindingCandidate
+  }
+
+  if (location.endLine !== undefined) {
+    candidate = { ...candidate, endLine: location.endLine }
+  }
+
+  if (managedFinding.updatedAt !== undefined) {
+    candidate = { ...candidate, updatedAt: managedFinding.updatedAt }
+  }
+
+  if (managedFinding.finding.suggestion !== undefined) {
+    candidate = { ...candidate, suggestion: managedFinding.finding.suggestion }
+  }
+
+  return candidate
 }
 
 const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChars: number, totalCount: number) =>
@@ -580,10 +568,8 @@ const truncatePromptManagedFindingCandidateToFitBudget = (
  * Keeps the managed-finding summary context small by retaining the newest items first and then
  * dropping older entries once the serialized section reaches its budget.
  */
-const selectManagedFindingsForPrompt = (threads: ReadonlyArray<ExistingThread>) => {
-  const managedFindings = listManagedFindingThreads(threads)
-    .map(toPromptManagedFinding)
-    .sort(compareUpdatedAtThenIdDesc)
+const selectManagedFindingsForPrompt = (managedThreads: ManagedThreads) => {
+  const managedFindings = managedThreads.findings.map(toPromptManagedFinding).sort(compareUpdatedAtThenIdDesc)
 
   if (managedFindings.length === 0) {
     return undefined
@@ -593,6 +579,7 @@ const selectManagedFindingsForPrompt = (threads: ReadonlyArray<ExistingThread>) 
 
   for (const managedFinding of managedFindings) {
     const nextSelection = [...selected, managedFinding]
+
     if (
       serializeBudgetedPromptSection(nextSelection, managedFindings.length).length > MAX_MANAGED_FINDING_CONTEXT_CHARS
     ) {
@@ -617,13 +604,18 @@ const selectManagedFindingsForPrompt = (threads: ReadonlyArray<ExistingThread>) 
  * review scope so it can explicitly link or resolve those threads without spending prompt budget
  * on unrelated historical findings.
  */
-const selectManagedFindingCandidatesForPrompt = (threads: ReadonlyArray<ExistingThread>, gitDiff: PullRequestDiff) => {
-  const managedFindingCandidates = listManagedFindingThreads(threads)
-    .filter((managedFinding) => resolveManagedFindingResolution(managedFinding.thread.status) === "unresolved")
-    .filter((managedFinding) =>
-      managedFindingTouchesScopedDiff(managedFinding, gitDiff.changedLinesByFile, gitDiff.deletedLinesByFile),
-    )
-    .map(toPromptManagedFindingCandidate)
+const selectManagedFindingCandidatesForPrompt = (managedThreads: ManagedThreads, gitDiff: PullRequestDiff) => {
+  const managedFindingCandidates = managedThreads.findings
+    .flatMap((managedFinding) => {
+      if (
+        resolveManagedFindingResolution(managedFinding.thread.status) !== "unresolved" ||
+        !managedFindingTouchesScopedDiff(managedFinding, gitDiff.changedLinesByFile, gitDiff.deletedLinesByFile)
+      ) {
+        return []
+      }
+
+      return [toPromptManagedFindingCandidate(managedFinding)]
+    })
     .sort(compareUpdatedAtThenIdDesc)
 
   return selectItemsWithinSerializedBudget({
@@ -639,10 +631,16 @@ const selectManagedFindingCandidatesForPrompt = (threads: ReadonlyArray<Existing
  * The filter keeps user discussion, allows mixed managed threads with human replies,
  * and drops older threads once the serialized thread section reaches its budget.
  */
-const selectPullRequestThreadsForPrompt = (threads: ReadonlyArray<ExistingThread>) => {
+const selectPullRequestThreadsForPrompt = (
+  threads: ReadonlyArray<ExistingThread>,
+  managedComments: ManagedThreads["comments"],
+) => {
   const eligibleThreads = threads
-    .map((thread) => toPromptThread(thread))
-    .filter((thread): thread is PromptThread => thread !== undefined)
+    .flatMap((thread) => {
+      const promptThread = toPromptThread(thread, managedComments)
+
+      return promptThread ? [promptThread] : []
+    })
     .sort(compareUpdatedAtThenIdDesc)
 
   return selectItemsWithinSerializedBudget({
@@ -657,23 +655,37 @@ const selectPullRequestThreadsForPrompt = (threads: ReadonlyArray<ExistingThread
  * Converts an Azure DevOps thread into the compact prompt shape.
  * Hidden managed-state payloads are stripped so the model only sees human-readable text.
  */
-const toPromptThread = (thread: ExistingThread): PromptThread | undefined => {
+const toPromptThread = (
+  thread: ExistingThread,
+  managedComments: ManagedThreads["comments"],
+): PromptThread | undefined => {
+  if (thread.isDeleted === true) {
+    return undefined
+  }
+
   const openingComment = getOpeningComment(thread)
+
   if (!openingComment || !isPromptEligibleOpeningComment(openingComment)) {
     return undefined
   }
 
-  const comments = thread.comments
-    .filter((comment) => !isDeletedComment(comment))
-    .map(toPromptThreadComment)
-    .filter((comment): comment is PromptThreadComment => comment !== undefined)
+  const comments = thread.comments.flatMap((comment) => {
+    if (isDeletedComment(comment)) {
+      return []
+    }
+
+    const promptComment = toPromptThreadComment(comment, managedComments)
+
+    return promptComment ? [promptComment] : []
+  })
 
   if (comments.length === 0) {
     return undefined
   }
 
   const managedThread = comments.some((comment) => comment.origin === "open-azdo")
-  if (managedThread && !thread.comments.some(isHumanConversationComment)) {
+
+  if (managedThread && !thread.comments.some((comment) => isHumanConversationComment(comment, managedComments))) {
     return undefined
   }
 
@@ -681,17 +693,32 @@ const toPromptThread = (thread: ExistingThread): PromptThread | undefined => {
   const filePath = thread.threadContext?.filePath
   const line = thread.threadContext?.rightFileStart?.line ?? undefined
 
-  return {
+  let promptThread: PromptThread = {
     id: thread.id,
     status: thread.status,
-    ...(filePath !== undefined ? { filePath } : {}),
-    ...(line !== undefined ? { line } : {}),
-    ...(updatedAt !== undefined ? { updatedAt } : {}),
     managedThread,
     comments,
-  } satisfies PromptThread
+  }
+
+  if (filePath !== undefined) {
+    promptThread = { ...promptThread, filePath }
+  }
+
+  if (line !== undefined) {
+    promptThread = { ...promptThread, line }
+  }
+
+  if (updatedAt !== undefined) {
+    promptThread = { ...promptThread, updatedAt }
+  }
+
+  return promptThread
 }
 
+/**
+ * Shapes decoded Azure and git inputs into budgeted reviewer context. Optional sections are
+ * omitted when absent, and persisted bot payloads are stripped from human discussion text.
+ */
 export const buildReviewContext = ({
   metadata,
   reviewMode,
@@ -699,26 +726,30 @@ export const buildReviewContext = ({
   pullRequestBaseRef,
   gitDiff,
   existingThreads,
+  managedThreads,
   connectedWorkItems,
 }: BuildReviewContextInput): ReviewContext => {
-  const pullRequestThreads = existingThreads ? selectPullRequestThreadsForPrompt(existingThreads) : undefined
-  const managedFindings = existingThreads ? selectManagedFindingsForPrompt(existingThreads) : undefined
-  const managedFindingCandidates = existingThreads
-    ? selectManagedFindingCandidatesForPrompt(existingThreads, gitDiff)
+  const pullRequestThreads = existingThreads
+    ? selectPullRequestThreadsForPrompt(existingThreads, managedThreads.comments)
     : undefined
+
+  const managedFindings = selectManagedFindingsForPrompt(managedThreads)
+
+  const managedFindingCandidates = selectManagedFindingCandidatesForPrompt(managedThreads, gitDiff)
+
   const totalConnectedWorkItemCount = metadata.workItemRefs?.length ?? connectedWorkItems?.length ?? 0
+
   const promptWorkItems =
     connectedWorkItems && connectedWorkItems.length > 0
       ? selectConnectedWorkItemsForPrompt(connectedWorkItems, totalConnectedWorkItemCount)
       : undefined
 
-  return {
+  let context: ReviewContext = {
     pullRequest: {
       title: metadata.title,
       description: metadata.description,
     },
     reviewMode,
-    ...(previousReviewedCommit !== undefined ? { previousReviewedCommit } : {}),
     pullRequestBaseRef,
     baseRef: gitDiff.baseRef,
     headRef: gitDiff.headRef,
@@ -727,9 +758,27 @@ export const buildReviewContext = ({
       changedLineRanges: compressChangedLines(gitDiff.changedLinesByFile.get(file.path) ?? new Set<number>()),
       hunkHeaders: extractHunkHeaders(file.patch),
     })),
-    ...(pullRequestThreads !== undefined ? { pullRequestThreads } : {}),
-    ...(managedFindings !== undefined ? { managedFindings } : {}),
-    ...(managedFindingCandidates !== undefined ? { managedFindingCandidates } : {}),
-    ...(promptWorkItems !== undefined ? { connectedWorkItems: promptWorkItems } : {}),
   }
+
+  if (previousReviewedCommit !== undefined) {
+    context = { ...context, previousReviewedCommit }
+  }
+
+  if (pullRequestThreads !== undefined) {
+    context = { ...context, pullRequestThreads }
+  }
+
+  if (managedFindings !== undefined) {
+    context = { ...context, managedFindings }
+  }
+
+  if (managedFindingCandidates !== undefined) {
+    context = { ...context, managedFindingCandidates }
+  }
+
+  if (promptWorkItems !== undefined) {
+    context = { ...context, connectedWorkItems: promptWorkItems }
+  }
+
+  return context
 }

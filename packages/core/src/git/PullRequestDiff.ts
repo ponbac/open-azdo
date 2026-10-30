@@ -1,7 +1,6 @@
 import { Effect } from "effect"
 
 import { MissingGitHistoryError } from "../errors"
-import { normalizePath } from "../paths"
 import { GitExec } from "./Services/GitExec"
 
 export type PullRequestDiff = {
@@ -52,25 +51,8 @@ export type HasTargetMergeCommitInRangeInput = {
   readonly currentTargetRef: string
 }
 
-export const splitDiffByFile = (diffText: string): DiffFile[] => {
-  const files: DiffFile[] = []
-  const chunks = diffText.split(/^diff --git /m).filter(Boolean)
-
-  for (const chunk of chunks) {
-    const patch = `diff --git ${chunk}`
-    const pathMatch = patch.match(/^\+\+\+ b\/(.+)$/m)
-    if (!pathMatch?.[1]) {
-      continue
-    }
-
-    files.push({
-      path: normalizePath(pathMatch[1]),
-      patch,
-    })
-  }
-
-  return files
-}
+/** Splits reviewable right-side file patches using the same decoded paths as the line maps. */
+export const splitDiffByFile = (diffText: string): DiffFile[] => parseDiff(diffText).files
 
 export const compressChangedLines = (changedLines: ReadonlySet<number>): LineRange[] => {
   const sortedLines = [...changedLines].sort((left, right) => left - right)
@@ -96,6 +78,7 @@ export const compressChangedLines = (changedLines: ReadonlySet<number>): LineRan
   }
 
   ranges.push({ start, end: previous })
+
   return ranges
 }
 
@@ -105,86 +88,160 @@ export const extractHunkHeaders = (patch: string) =>
     .filter((line) => line.startsWith("@@"))
     .map((line) => line.trim())
 
-const parseDiffPath = (line: string, prefix: "--- a/" | "+++ b/") =>
-  line.startsWith(prefix) ? normalizePath(line.slice(prefix.length)) : undefined
+/** Decodes Git's C-quoted path bytes, retaining literal backslashes and filename whitespace. */
+const decodeDiffPath = (headerPath: string) => {
+  // Git appends a header separator tab to some unquoted names containing spaces.
+  const path = headerPath.endsWith("\t") ? headerPath.slice(0, -1) : headerPath
 
-const parseHunkStartLines = (line: string) => {
-  const match = line.match(/-(\d+)(?:,\d+)? \+(\d+)(?:,\d+)?/)
+  if (!path.startsWith('"') || !path.endsWith('"')) {
+    return path
+  }
+
+  return path.slice(1, -1).replace(/\\[abfnrtv"\\]|(?:\\[0-7]{1,3})+/g, (escaped) => {
+    switch (escaped) {
+      case "\\a":
+        return "\x07"
+      case "\\b":
+        return "\b"
+      case "\\f":
+        return "\f"
+      case "\\n":
+        return "\n"
+      case "\\r":
+        return "\r"
+      case "\\t":
+        return "\t"
+      case "\\v":
+        return "\v"
+      case '\\"':
+        return '"'
+      case "\\\\":
+        return "\\"
+      default: {
+        // Non-ASCII names use octal UTF-8 bytes, so decode the complete byte run together.
+        const bytes = Array.from(escaped.matchAll(/\\[0-7]{1,3}/g), (match) => Number.parseInt(match[0].slice(1), 8))
+
+        return new TextDecoder().decode(Uint8Array.from(bytes))
+      }
+    }
+  })
+}
+
+const parseDiffPath = (line: string, side: "a" | "b") => {
+  const path = decodeDiffPath(line.slice(4))
+  const prefix = `${side}/`
+
+  return path.startsWith(prefix) ? path.slice(prefix.length) : undefined
+}
+
+type DiffHunk = {
+  leftLine: number
+  rightLine: number
+  leftRemaining: number
+  rightRemaining: number
+}
+
+/** Reads both line origins and counts; omitted counts mean one line, while explicit zero stays zero. */
+const parseDiffHunk = (line: string): DiffHunk | undefined => {
+  const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
+
+  if (match?.[1] === undefined || match[3] === undefined) {
+    return undefined
+  }
+
   return {
-    leftLine: match?.[1] ? Number.parseInt(match[1], 10) : 0,
-    rightLine: match?.[2] ? Number.parseInt(match[2], 10) : 0,
+    leftLine: Number.parseInt(match[1], 10),
+    rightLine: Number.parseInt(match[3], 10),
+    leftRemaining: Number.parseInt(match[2] ?? "1", 10),
+    rightRemaining: Number.parseInt(match[4] ?? "1", 10),
   }
 }
 
 const getOrCreateLineSet = (map: Map<string, Set<number>>, filePath: string) => {
   const existingLines = map.get(filePath)
+
   if (existingLines) {
     return existingLines
   }
 
   const lines = new Set<number>()
   map.set(filePath, lines)
+
   return lines
 }
 
-const extractDiffLineMaps = (diffText: string) => {
+/** Parses file headers outside counted hunks so source text cannot replace a file's identity. */
+const parseDiff = (diffText: string) => {
+  const files: DiffFile[] = []
   const changedLinesByFile = new Map<string, Set<number>>()
   const deletedLinesByFile = new Map<string, Set<number>>()
-  let currentRightFile: string | undefined
-  let currentLeftFile: string | undefined
-  let leftLine = 0
-  let rightLine = 0
 
-  for (const line of diffText.split("\n")) {
-    if (line.startsWith("--- ")) {
-      currentLeftFile = parseDiffPath(line, "--- a/")
-      continue
-    }
+  // Git records are LF-delimited; multiline ^ also matches CR and Unicode characters inside source text.
+  for (const chunk of diffText.split(/(?<![^\n])diff --git /).filter(Boolean)) {
+    const patch = `diff --git ${chunk}`
+    let leftPath: string | undefined
+    let rightPath: string | undefined
+    let hunk: DiffHunk | undefined
 
-    if (line.startsWith("+++ ")) {
-      currentRightFile = parseDiffPath(line, "+++ b/")
-      continue
-    }
-
-    if (line.startsWith("@@")) {
-      const nextLines = parseHunkStartLines(line)
-      leftLine = nextLines.leftLine
-      rightLine = nextLines.rightLine
-      continue
-    }
-
-    if (leftLine === 0 && rightLine === 0) {
-      continue
-    }
-
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      if (currentRightFile) {
-        getOrCreateLineSet(changedLinesByFile, currentRightFile).add(rightLine)
+    for (const line of patch.split("\n")) {
+      // No-newline markers describe the preceding line and consume neither side's count.
+      if (line.startsWith("\\")) {
+        continue
       }
-      rightLine += 1
-      continue
-    }
 
-    if (line.startsWith("-") && !line.startsWith("---")) {
-      if (currentLeftFile) {
-        getOrCreateLineSet(deletedLinesByFile, currentLeftFile).add(leftLine)
+      if (hunk !== undefined) {
+        if (line.startsWith("+")) {
+          if (rightPath !== undefined) {
+            getOrCreateLineSet(changedLinesByFile, rightPath).add(hunk.rightLine)
+          }
+
+          hunk.rightLine += 1
+          hunk.rightRemaining -= 1
+        } else if (line.startsWith("-")) {
+          if (leftPath !== undefined) {
+            getOrCreateLineSet(deletedLinesByFile, leftPath).add(hunk.leftLine)
+          }
+
+          hunk.leftLine += 1
+          hunk.leftRemaining -= 1
+        } else if (line.startsWith(" ")) {
+          hunk.leftLine += 1
+          hunk.rightLine += 1
+          hunk.leftRemaining -= 1
+          hunk.rightRemaining -= 1
+        }
+
+        if (hunk.leftRemaining === 0 && hunk.rightRemaining === 0) {
+          hunk = undefined
+        }
+
+        continue
       }
-      leftLine += 1
-      continue
+
+      if (line.startsWith("--- ")) {
+        leftPath = parseDiffPath(line, "a")
+      } else if (line.startsWith("+++ ")) {
+        rightPath = parseDiffPath(line, "b")
+      } else {
+        hunk = parseDiffHunk(line)
+      }
     }
 
-    leftLine += 1
-    rightLine += 1
+    // Deleted files have no reviewable right-side patch, but retain their removed-line map.
+    if (rightPath !== undefined) {
+      files.push({ path: rightPath, patch })
+    }
   }
 
   return {
+    files,
     changedLinesByFile,
     deletedLinesByFile,
   }
 }
 
 export const extractChangedLinesByFile = (diffText: string): Map<string, Set<number>> =>
-  extractDiffLineMaps(diffText).changedLinesByFile
+  parseDiff(diffText).changedLinesByFile
 
 /**
  * Prefer the fetched remote-tracking ref over local branch names so PR workspaces do not
@@ -192,12 +249,14 @@ export const extractChangedLinesByFile = (diffText: string): Map<string, Set<num
  */
 export const buildTargetRefCandidates = (targetBranch: string) => {
   const normalized = targetBranch.replace(/^refs\/heads\//, "")
+
   return [`refs/remotes/origin/${normalized}`, targetBranch, `refs/heads/${normalized}`, normalized]
 }
 
 const runGit = (workspace: string, operation: string, args: ReadonlyArray<string>, allowNonZeroExit = false) =>
   Effect.gen(function* () {
     const git = yield* GitExec
+
     return yield* git.execute({
       operation,
       cwd: workspace,
@@ -215,6 +274,7 @@ const resolveHeadReviewedSourceCommitCandidate = (workspace: string) =>
   runGit(workspace, "Git.resolveReviewedSourceCommit.revList", ["rev-list", "--parents", "-n", "1", "HEAD"]).pipe(
     Effect.map((result) => {
       const hashes = result.stdout.trim().split(/\s+/)
+
       return hashes.length === 3 ? "HEAD^2" : "HEAD"
     }),
   )
@@ -232,6 +292,7 @@ export const resolveReviewedSourceCommit = ({ workspace, sourceCommitId }: Resol
         ["rev-parse", "--verify", `${sourceCommitId}^{commit}`],
         true,
       )
+
       candidate = explicitCandidate.exitCode === 0 ? sourceCommitId : fallbackCandidate
     }
 
@@ -300,6 +361,7 @@ export const hasTargetMergeCommitInRange = ({
       .map((entry) => entry.trim())
       .filter(Boolean)) {
       const [, , ...mergedParents] = line.split(/\s+/)
+
       if (mergedParents.length === 0) {
         continue
       }
@@ -325,7 +387,16 @@ export const hasTargetMergeCommitInRange = ({
 export const resolveDiffRange = ({ workspace, baseRef, headRef }: ResolveDiffRangeInput) =>
   Effect.gen(function* () {
     const diff = yield* runGit(workspace, "Git.resolveDiffRange.diff", [
+      "-c",
+      "core.quotePath=false",
+      "-c",
+      "diff.suppressBlankEmpty=false",
       "diff",
+      // The parser owns canonical a/b headers independently of the checkout's diff preferences.
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "--no-ext-diff",
+      "--no-textconv",
       "--unified=3",
       "--find-renames",
       "--no-color",
@@ -336,18 +407,15 @@ export const resolveDiffRange = ({ workspace, baseRef, headRef }: ResolveDiffRan
     const changedFilesOutput = yield* runGit(workspace, "Git.resolveDiffRange.changedFiles", [
       "diff",
       "--name-only",
+      "-z",
       "--diff-filter=ACMRT",
       baseRef,
       headRef,
     ])
 
-    const changedFiles = changedFilesOutput.stdout
-      .split("\n")
-      .map((entry) => entry.trim())
-      .filter(Boolean)
-      .map(normalizePath)
+    const changedFiles = changedFilesOutput.stdout.split("\0").filter(Boolean)
 
-    const { changedLinesByFile, deletedLinesByFile } = extractDiffLineMaps(diff.stdout)
+    const { changedLinesByFile, deletedLinesByFile } = parseDiff(diff.stdout)
 
     return {
       baseRef,
@@ -398,6 +466,7 @@ export const resolvePullRequestDiff = (input: ResolvePullRequestDiffInput) =>
   Effect.gen(function* () {
     const targetRef = yield* resolveTargetRef(input)
     const targetCommit = yield* resolveCommitRef(input.workspace, "Git.resolvePullRequestDiff.targetCommit", targetRef)
+
     const parents = yield* runGit(input.workspace, "Git.resolvePullRequestDiff.revList", [
       "rev-list",
       "--parents",
@@ -405,6 +474,7 @@ export const resolvePullRequestDiff = (input: ResolvePullRequestDiffInput) =>
       "1",
       "HEAD",
     ])
+
     const hashes = parents.stdout.trim().split(/\s+/)
 
     let baseRef = ""
@@ -421,6 +491,7 @@ export const resolvePullRequestDiff = (input: ResolvePullRequestDiffInput) =>
         targetRef,
         "HEAD",
       ])
+
       baseRef = mergeBase.stdout.trim()
     }
 

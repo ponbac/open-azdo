@@ -2,6 +2,7 @@ import { dirname, join, resolve } from "node:path"
 import process from "node:process"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
+import { Schema } from "effect"
 
 export type PublishMode = "publish" | "dry-run"
 
@@ -44,10 +45,14 @@ type PendingFileWrite = {
   readonly content: string
 }
 
-type PackageManifest = Record<string, unknown> & {
-  readonly name: string
-  readonly version: string
-}
+const PackageManifest = Schema.StructWithRest(Schema.Struct({ name: Schema.String, version: Schema.String }), [
+  Schema.Record(Schema.String, Schema.Json),
+])
+
+/** Parsed npm manifest with release identity and all JSON metadata retained for a lossless version bump. */
+interface PackageManifest extends Schema.Schema.Type<typeof PackageManifest> {}
+
+const decodePackageManifest = Schema.decodeUnknownSync(Schema.fromJsonString(PackageManifest))
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 
@@ -57,6 +62,7 @@ const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../
  */
 export const parseStableSemver = (input: string): StableSemver | undefined => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(input)
+
   if (!match) {
     return undefined
   }
@@ -94,11 +100,13 @@ export const validateReplacementVersion = (
   },
 ) => {
   const trimmed = candidate.trim()
+
   if (trimmed.length === 0) {
     return "A new version is required."
   }
 
   const parsedCandidate = parseStableSemver(trimmed)
+
   if (!parsedCandidate) {
     return "Version must use stable semver format major.minor.patch."
   }
@@ -108,6 +116,7 @@ export const validateReplacementVersion = (
   }
 
   const parsedLatest = parseStableSemver(versions.latestReleasedVersion)
+
   if (!parsedLatest) {
     return `Latest released version "${versions.latestReleasedVersion}" is not stable semver.`
   }
@@ -153,7 +162,7 @@ const makeDefaultDeps = (): PublishReleaseDeps => ({
   },
   runCommand: async (request) => {
     const subprocess = Bun.spawn([request.command, ...request.args], {
-      ...(request.cwd ? { cwd: request.cwd } : {}),
+      cwd: request.cwd || process.cwd(),
       env: process.env,
       stdin: "ignore",
       stdout: request.stdio === "inherit" ? "inherit" : "pipe",
@@ -161,6 +170,7 @@ const makeDefaultDeps = (): PublishReleaseDeps => ({
     })
 
     const exitCode = await subprocess.exited
+
     if (exitCode !== 0) {
       const stderr = request.stdio === "pipe" ? (await new Response(subprocess.stderr).text()).trim() : ""
       throw new Error(stderr.length > 0 ? stderr : `${request.command} exited with code ${exitCode}.`)
@@ -172,26 +182,16 @@ const makeDefaultDeps = (): PublishReleaseDeps => ({
   },
 })
 
+/** Decode the file once, preserving unrelated metadata while validating the stable release version. */
 const readPackageManifest = async (deps: PublishReleaseDeps, paths: ReleasePaths): Promise<PackageManifest> => {
-  const parsed = JSON.parse(await deps.readFile(paths.packageManifestPath)) as {
-    readonly name?: unknown
-    readonly version?: unknown
-  } & Record<string, unknown>
-
-  const { name, version } = parsed
-  if (typeof name !== "string" || typeof version !== "string") {
-    throw new Error(`Expected name and version in ${paths.packageManifestPath}.`)
-  }
+  const parsed = decodePackageManifest(await deps.readFile(paths.packageManifestPath))
+  const { version } = parsed
 
   if (!parseStableSemver(version)) {
     throw new Error(`Current package version "${version}" is not stable semver.`)
   }
 
-  return {
-    ...parsed,
-    name,
-    version,
-  }
+  return parsed
 }
 
 const fetchLatestReleasedVersion = async (deps: PublishReleaseDeps, packageName: string) => {
@@ -204,6 +204,7 @@ const fetchLatestReleasedVersion = async (deps: PublishReleaseDeps, packageName:
     })
 
     const version = stdout.trim()
+
     if (!parseStableSemver(version)) {
       throw new Error(`npm returned a non-stable version: "${version}".`)
     }
@@ -250,6 +251,7 @@ const rewriteReleaseFiles = async (
   // Keep every published example's package pin aligned with the release version.
   for (const examplePath of paths.versionedExamplePaths) {
     const examplePipeline = await deps.readFile(examplePath)
+
     const updatedExamplePipeline = examplePipeline.replace(
       /^(\s*OpenAzdoVersion:\s*)(\S+)(\s*)$/m,
       `$1${nextVersion}$3`,
@@ -292,6 +294,7 @@ const promptForReplacementVersion = async (
   },
 ) => {
   const parsedLatest = parseStableSemver(versions.latestReleasedVersion)
+
   if (!parsedLatest) {
     throw new Error(`Latest released version "${versions.latestReleasedVersion}" is not stable semver.`)
   }
@@ -306,6 +309,7 @@ const promptForReplacementVersion = async (
 
   while (true) {
     const answer = await deps.prompt(promptMessage)
+
     const validationError = validateReplacementVersion(answer, {
       currentVersion: versions.currentVersion,
       latestReleasedVersion: versions.latestReleasedVersion,
@@ -349,11 +353,13 @@ const resolvePublishVersion = async (deps: PublishReleaseDeps, paths: ReleasePat
   } as const
 }
 
+/** Resolve release identity and authentication, prepare any requested version bump, then publish or dry-run. */
 export const runPublishRelease = async (mode: PublishMode, overrides: Partial<PublishReleaseDeps> = {}) => {
   const deps = {
     ...makeDefaultDeps(),
     ...overrides,
   } satisfies PublishReleaseDeps
+
   const paths = makeReleasePaths(deps.repoRoot)
   const versionPlan = await resolvePublishVersion(deps, paths)
 
@@ -364,6 +370,7 @@ export const runPublishRelease = async (mode: PublishMode, overrides: Partial<Pu
     await runBunCommand(deps, ["install", "--lockfile-only"])
 
     const lockfileVersion = await deps.readFile(paths.lockfilePath)
+
     if (!lockfileVersion.includes(versionPlan.nextVersion)) {
       throw new Error(`Lockfile sync did not capture the new version ${versionPlan.nextVersion}.`)
     }

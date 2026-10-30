@@ -22,10 +22,10 @@ export type ExecuteCommandInput = {
   readonly allowNonZeroExit?: boolean
 }
 
-export interface ProcessRunnerShape {
-  readonly execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, CommandExecutionError>
-}
-
-export class ProcessRunner extends Context.Service<ProcessRunner, ProcessRunnerShape>()(
-  "open-azdo/platform/ProcessRunner",
-) {}
+/** Executes bounded child processes and reports expected launch, exit, and output failures. */
+export class ProcessRunner extends Context.Service<
+  ProcessRunner,
+  {
+    readonly execute: (input: ExecuteCommandInput) => Effect.Effect<CommandExecutionResult, CommandExecutionError>
+  }
+>()("open-azdo/platform/ProcessRunner") {}

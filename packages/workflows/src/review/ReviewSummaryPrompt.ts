@@ -1,5 +1,3 @@
-import { stringifyJson } from "@open-azdo/core/json"
-
 import type { ReviewSummarySubject } from "./ReviewSummary"
 
 export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySubject>) =>
@@ -13,7 +11,7 @@ export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySu
     "Group related subject IDs together when that improves the summary.",
     "Do not invent verdicts, counts, or status text. The caller renders those separately.",
     "Return strict JSON only with the shape:",
-    stringifyJson({
+    JSON.stringify({
       highlights: [
         {
           subjectIds: ["subject-id"],
@@ -25,5 +23,5 @@ export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySu
     "Every highlight must reference only the provided subject IDs.",
     "Use emojis if appropriate.",
     "Structured review subjects:",
-    stringifyJson(subjects),
+    JSON.stringify(subjects),
   ].join("\n\n")
