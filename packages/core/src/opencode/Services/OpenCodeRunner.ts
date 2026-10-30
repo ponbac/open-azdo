@@ -1,4 +1,3 @@
-import type { OutputFormat } from "@opencode-ai/sdk/v2"
 import { Context } from "effect"
 import type { Duration } from "effect/Duration"
 import type { Effect } from "effect"
@@ -18,14 +17,17 @@ export type OpenCodeRunUsage = {
   readonly tokens?: OpenCodeRunTokens | undefined
 }
 
-export type OpenCodeJsonSchemaOutputFormat = Extract<OutputFormat, { readonly type: "json_schema" }>
+export type OpenCodeJsonSchemaOutputFormat = {
+  readonly type: "json_schema"
+  readonly schema: Readonly<Record<string, unknown>>
+}
 
-export type OpenCodeOutputFormat = OutputFormat
+/** Requested run output. V2 has no native format option; see the SDK runtime for how JSON schemas are enforced. */
+export type OpenCodeOutputFormat = { readonly type: "text" } | OpenCodeJsonSchemaOutputFormat
 
 export type OpenCodeModelError = {
   readonly name: string
   readonly message: string
-  readonly retries?: number | undefined
 }
 
 export type OpenCodeRunResult = {

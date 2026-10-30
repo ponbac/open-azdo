@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@effect/platform-bun": "4.1.0",
-    "@opencode-ai/sdk": "^1.19.5",
+    "@opencode/client": "2.2.3",
     "effect": "4.1.0"
   }
 }

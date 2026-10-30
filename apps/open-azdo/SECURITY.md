@@ -41,16 +41,17 @@ If required history is missing, `open-azdo` fails with a remediation message ins
 
 ## OpenCode Containment
 
-Each review run starts a short-lived OpenCode server bound to `127.0.0.1` on a dynamically chosen port and shuts it down on exit. The generated `azdo-review` agent remains read-only:
+Each review run starts a short-lived, password-protected OpenCode server bound to `127.0.0.1` on a dynamically chosen port and shuts it down on exit. The generated `azdo-review` agent is deny-by-default:
 
-- read/search/listing tools and local LSP queries allowed
+- read, glob, and grep tools allowed
 - edit and write denied
 - web fetch and web search denied
-- bash denied by default, with a narrow allowlist for read-style commands
+- subagents, skills, and directories outside the workspace denied for OpenCode's native tools
+- shell denied by default, with an allowlist of read-style commands
 
-LSP access remains local code-intelligence only and does not broaden edit, network, or general shell execution permissions.
+OpenCode V2 matches shell rules against the command only. It does not limit allowlisted commands to the workspace or inspect their arguments, so these rules are a guardrail against accidental changes rather than a sandbox. Repository `opencode.json` and `.opencode` content, including plugins, is loaded as usual. Run `open-azdo` only on repositories whose contributors you trust.
 
-OpenCode is prompted through the SDK v2 client with JSON-schema structured output. If structured output is unavailable or malformed, the workflow attempts JSON repair and then degrades to a summary-only `"concerns"` result instead of trusting arbitrary text as valid findings.
+OpenCode is prompted through `@opencode/client`. V2 has no native structured output, so a run-scoped plugin registers a JSON-schema submission tool and the workflow reads the validated tool input. If no valid submission exists, the workflow attempts JSON repair on the text reply and then degrades to a summary-only `"concerns"` result instead of trusting arbitrary text as valid findings.
 
 ## Azure DevOps Mutations
 

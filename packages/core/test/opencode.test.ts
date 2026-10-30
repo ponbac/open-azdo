@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Logger } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Logger } from "effect"
 import * as Duration from "effect/Duration"
+import * as TestClock from "effect/testing/TestClock"
 import * as TestConsole from "effect/testing/TestConsole"
-import type { AssistantMessage, Event, Part, Todo, ToolPart } from "@opencode-ai/sdk/v2"
+import type { EventSubscribeOutput as Event, SessionMessageAssistant, SessionMessageIdle } from "@opencode/client"
 
+import { OpenCodeInvocationError, OpenCodeOutputError } from "@open-azdo/core/errors"
 import { makeRuntimeLogger } from "@open-azdo/core/logging"
 import { OpenCodeRunner, buildOpenCodeConfig } from "@open-azdo/core/opencode"
 
@@ -17,7 +19,10 @@ import {
   subscribeToOpenCodeEvents,
   withOpenCodeProgressSubscription,
 } from "../src/opencode/internal/Layers/OpenCodeSdkRuntime"
-import type { OpenCodeSdkPromptRequest } from "../src/opencode/internal/Services/OpenCodeSdkRuntime"
+import {
+  OPEN_CODE_STRUCTURED_OUTPUT_TOOL,
+  type OpenCodeSdkPromptRequest,
+} from "../src/opencode/internal/Services/OpenCodeSdkRuntime"
 
 const runOpenCode = (
   request = makeOpenCodeRunRequest(),
@@ -38,6 +43,8 @@ const makeEventClient = (subscribe: TestSubscribe): TestOpenCodeEventClient =>
     },
   }) as TestOpenCodeEventClient
 
+const connectedEvent = { id: "evt-connected", type: "server.connected", data: {} } as Event
+
 const makeEventStream = (
   events: ReadonlyArray<Event>,
   options?: { readonly failWith?: unknown },
@@ -53,56 +60,65 @@ const makeEventStream = (
   },
 })
 
-const sessionStatusEvent = (
-  sessionID: string,
-  status: Extract<Event, { readonly type: "session.status" }>["properties"]["status"],
-): Event => ({
-  id: `evt-status-${sessionID}`,
-  type: "session.status",
-  properties: {
+const sessionEvent = (type: Event["type"], data: Record<string, unknown>, created = 1_000): Event =>
+  ({
+    id: `evt-${type}`,
+    created,
+    type,
+    data,
+  }) as Event
+
+const executionStarted = (sessionID: string) => sessionEvent("session.execution.started", { sessionID })
+
+const toolStarted = (sessionID: string, id: string, name: string) =>
+  sessionEvent("session.tool.input.started", { sessionID, assistantMessageID: "msg", id, name })
+
+const toolCalled = (sessionID: string, id: string, input: Record<string, unknown>) =>
+  sessionEvent("session.tool.called", { sessionID, assistantMessageID: "msg", id, input, executed: true })
+
+const toolFailed = (sessionID: string, id: string, message: string) =>
+  sessionEvent("session.tool.failed", {
     sessionID,
-    status,
-  },
+    assistantMessageID: "msg",
+    id,
+    error: { type: "tool.execution", message },
+    executed: true,
+  })
+
+const retryScheduled = (sessionID: string, attempt: number) =>
+  sessionEvent("session.retry.scheduled", {
+    sessionID,
+    assistantMessageID: "msg",
+    attempt,
+    at: 1_500,
+    error: { type: "provider.rate-limit", message: "Rate limited" },
+  })
+
+const executionFailed = (sessionID: string, type: string, message: string) =>
+  sessionEvent("session.execution.failed", { sessionID, error: { type, message } })
+
+const assistantMessage = (overrides: Partial<SessionMessageAssistant>): SessionMessageAssistant => ({
+  id: "msg_123",
+  time: { created: 1, completed: 2 },
+  type: "assistant",
+  agent: "azdo-review",
+  model: { id: "gpt-5.4", providerID: "openai" },
+  content: [],
+  ...overrides,
 })
 
-const toolEvent = (sessionID: string, callID: string, tool: string, state: ToolPart["state"]): Event => ({
-  id: `evt-tool-${callID}`,
-  type: "message.part.updated",
-  properties: {
-    sessionID,
-    time: Date.now(),
-    part: {
-      id: `${callID}-part`,
-      sessionID,
-      messageID: `${callID}-message`,
-      type: "tool",
-      callID,
-      tool,
-      state,
-    } satisfies ToolPart,
-  },
+const idleMessage = (overrides: Partial<SessionMessageIdle> = {}): SessionMessageIdle => ({
+  id: "msg_idle",
+  time: { created: 3 },
+  type: "idle",
+  outcome: "succeeded",
+  ...overrides,
 })
 
-const todoEvent = (sessionID: string, todos: ReadonlyArray<Todo>): Event => ({
-  id: `evt-todo-${sessionID}`,
-  type: "todo.updated",
-  properties: {
-    sessionID,
-    todos: [...todos],
-  },
-})
-
-const sessionErrorEvent = (
-  sessionID: string,
-  error: Extract<Event, { readonly type: "session.error" }>["properties"]["error"],
-): Event => ({
-  id: `evt-error-${sessionID}`,
-  type: "session.error",
-  properties: {
-    sessionID,
-    ...(error !== undefined ? { error } : {}),
-  },
-})
+const usage = {
+  costUsd: 0.12,
+  tokens: { input: 100, output: 20, reasoning: 5, cacheRead: 10, cacheWrite: 2 },
+}
 
 const collectProgressLogs = async (events: AsyncIterable<Event>, sessionId = "ses_target") => {
   const errorLines = await Effect.runPromise(
@@ -162,7 +178,6 @@ describe("opencode", () => {
         schema: {
           type: "object",
         },
-        retryCount: 2,
       },
     })
 
@@ -209,19 +224,17 @@ describe("opencode", () => {
     expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
-  test("allows lsp queries in the generated opencode config", () => {
-    expect(buildOpenCodeConfig("azdo-review")).toEqual(
-      expect.objectContaining({
-        lsp: expect.objectContaining({
-          typescript: expect.objectContaining({
-            command: [process.execPath, "x", "typescript-language-server", "--stdio"],
-          }),
-        }),
-        permission: expect.objectContaining({
-          lsp: "allow",
-        }),
-      }),
+  test("denies by default and only allows read-only tools for the review agent", () => {
+    const config = buildOpenCodeConfig("azdo-review")
+    const permissions = config.agents["azdo-review"]?.permissions ?? []
+
+    // V2 asks on unmatched requests, which would hang a headless run, and the last match wins.
+    expect(permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" })
+    expect(permissions.slice(1).every((rule) => rule.effect === "allow")).toBe(true)
+    expect(new Set(permissions.slice(1).map((rule) => rule.action))).toEqual(
+      new Set(["read", "glob", "grep", "shell", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
     )
+    expect(permissions.filter((rule) => rule.action === "shell").map((rule) => rule.resource)).not.toContain("*")
   })
 
   test("returns structured output and model error metadata from the sdk runtime", async () => {
@@ -249,9 +262,8 @@ describe("opencode", () => {
               },
             },
             modelError: {
-              name: "StructuredOutputError",
+              name: "provider.invalid-request",
               message: "schema mismatch",
-              retries: 2,
             },
           }),
         ),
@@ -278,9 +290,8 @@ describe("opencode", () => {
         },
       },
       modelError: {
-        name: "StructuredOutputError",
+        name: "provider.invalid-request",
         message: "schema mismatch",
-        retries: 2,
       },
     })
   })
@@ -322,299 +333,134 @@ describe("opencode", () => {
   })
 
   test("salvages partial text for assistant output errors", async () => {
+    const response = '{"verdict":"concerns","findings":[],"unmappedNotes":[]}'
     const result = await Effect.runPromise(
       decodePromptResult({
-        info: {
-          id: "msg_123",
-          sessionID: "ses_123",
-          role: "assistant",
-          time: {
-            created: 1,
-            completed: 2,
-          },
-          parentID: "msg_parent",
-          modelID: "gpt-5.4",
-          providerID: "openai",
-          mode: "primary",
-          agent: "azdo-review",
-          path: {
-            cwd: "/tmp/workspace",
-            root: "/tmp/workspace",
-          },
-          cost: 0.12,
-          tokens: {
-            input: 100,
-            output: 20,
-            reasoning: 5,
-            cache: {
-              read: 10,
-              write: 2,
-            },
-          },
-          error: {
-            name: "MessageOutputLengthError",
-            data: {},
-          },
-        } satisfies AssistantMessage,
-        parts: [
-          {
-            id: "prt_123",
-            sessionID: "ses_123",
-            messageID: "msg_123",
-            type: "text",
-            text: '{"summary":"Partial summary","verdict":"concerns","findings":[],"unmappedNotes":[]}',
-          },
-        ] satisfies Part[],
+        sessionId: "ses_123",
+        latest: assistantMessage({
+          content: [{ type: "text", text: response }],
+          error: { type: "provider.output-length", message: "Output limit reached" },
+        }),
+        structured: undefined,
+        idle: idleMessage({ outcome: "failed" }),
+        usage,
       }),
     )
 
     expect(result).toEqual({
-      response: '{"summary":"Partial summary","verdict":"concerns","findings":[],"unmappedNotes":[]}',
+      response,
       sessionId: "ses_123",
-      usage: {
-        costUsd: 0.12,
-        tokens: {
-          input: 100,
-          output: 20,
-          reasoning: 5,
-          cacheRead: 10,
-          cacheWrite: 2,
-        },
-      },
+      usage,
       modelError: {
-        name: "MessageOutputLengthError",
-        message: "MessageOutputLengthError",
+        name: "provider.output-length",
+        message: "Output limit reached",
       },
     })
   })
 
-  test("salvages structured payloads for assistant errors without text", async () => {
+  test("keeps a submitted result when a later model call fails", async () => {
+    const structured = { verdict: "pass", findings: [], unmappedNotes: [] }
+    const error = { type: "provider.invalid-request", message: "Context too long" }
     const result = await Effect.runPromise(
       decodePromptResult({
-        info: {
-          id: "msg_456",
-          sessionID: "ses_456",
-          role: "assistant",
-          time: {
-            created: 1,
-            completed: 2,
-          },
-          parentID: "msg_parent",
-          modelID: "gpt-5.4",
-          providerID: "openai",
-          mode: "primary",
-          agent: "azdo-review",
-          path: {
-            cwd: "/tmp/workspace",
-            root: "/tmp/workspace",
-          },
-          cost: 0.34,
-          tokens: {
-            input: 150,
-            output: 0,
-            reasoning: 0,
-            cache: {
-              read: 0,
-              write: 0,
-            },
-          },
-          structured: {
-            summary: "Structured fallback",
-            verdict: "concerns",
-            findings: [],
-            unmappedNotes: [],
-          },
-          error: {
-            name: "ContextOverflowError",
-            data: {
-              message: "Context window exceeded.",
-            },
-          },
-        } satisfies AssistantMessage,
-        parts: [],
+        sessionId: "ses_456",
+        latest: assistantMessage({ error }),
+        structured,
+        idle: idleMessage({ outcome: "failed", error }),
+        usage,
       }),
     )
 
     expect(result).toEqual({
       response: "",
-      structured: {
-        summary: "Structured fallback",
-        verdict: "concerns",
-        findings: [],
-        unmappedNotes: [],
-      },
+      structured,
       sessionId: "ses_456",
-      usage: {
-        costUsd: 0.34,
-        tokens: {
-          input: 150,
-          output: 0,
-          reasoning: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-        },
-      },
-      modelError: {
-        name: "ContextOverflowError",
-        message: "Context window exceeded.",
-      },
+      usage,
+      modelError: { name: error.type, message: error.message },
     })
   })
 
-  test("handles prompt responses that omit parts when structured output is present", async () => {
-    const result = await Effect.runPromise(
+  test("fails turns that end without a usable payload", async () => {
+    const error = {
+      type: "provider.auth",
+      message: "Provider request failed.",
+      response: { body: "echoed-request-secret" },
+    }
+    const failure = await Effect.runPromise(
       decodePromptResult({
-        info: {
-          id: "msg_missing_parts",
-          sessionID: "ses_missing_parts",
-          role: "assistant",
-          time: {
-            created: 1,
-            completed: 2,
-          },
-          parentID: "msg_parent",
-          modelID: "gpt-5.4-nano",
-          providerID: "openai",
-          mode: "primary",
-          agent: "azdo-review",
-          path: {
-            cwd: "/tmp/workspace",
-            root: "/tmp/workspace",
-          },
-          cost: 0.01,
-          tokens: {
-            input: 10,
-            output: 5,
-            reasoning: 0,
-            cache: {
-              read: 0,
-              write: 0,
-            },
-          },
-          structured: {
-            summary: "Structured only",
-            verdict: "pass",
-            findings: [],
-            unmappedNotes: [],
-          },
-        } satisfies AssistantMessage,
-        parts: undefined,
-      }),
+        sessionId: "ses_789",
+        latest: undefined,
+        structured: undefined,
+        idle: idleMessage({ outcome: "failed", error }),
+        usage,
+      }).pipe(Effect.flip),
     )
 
-    expect(result).toEqual({
-      response: "",
-      structured: {
-        summary: "Structured only",
-        verdict: "pass",
-        findings: [],
-        unmappedNotes: [],
-      },
-      sessionId: "ses_missing_parts",
-      usage: {
-        costUsd: 0.01,
-        tokens: {
-          input: 10,
-          output: 5,
-          reasoning: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-        },
-      },
-    })
+    expect(failure).toBeInstanceOf(OpenCodeOutputError)
+    expect(JSON.stringify(failure)).toContain("Provider request failed.")
+    expect(JSON.stringify(failure)).not.toContain("echoed-request-secret")
   })
 
-  test("fails assistant errors that return no usable payload", async () => {
-    const exit = await Effect.runPromiseExit(
+  test("fails interrupted turns that end without a usable payload", async () => {
+    const failure = await Effect.runPromise(
       decodePromptResult({
-        info: {
-          id: "msg_789",
-          sessionID: "ses_789",
-          role: "assistant",
-          time: {
-            created: 1,
-            completed: 2,
-          },
-          parentID: "msg_parent",
-          modelID: "gpt-5.4",
-          providerID: "openai",
-          mode: "primary",
-          agent: "azdo-review",
-          path: {
-            cwd: "/tmp/workspace",
-            root: "/tmp/workspace",
-          },
-          cost: 0,
-          tokens: {
-            input: 100,
-            output: 0,
-            reasoning: 0,
-            cache: {
-              read: 0,
-              write: 0,
-            },
-          },
-          error: {
-            name: "APIError",
-            data: {
-              message: "Provider request failed.",
-              isRetryable: false,
-            },
-          },
-        } satisfies AssistantMessage,
-        parts: [],
-      }),
+        sessionId: "ses_789",
+        latest: undefined,
+        structured: undefined,
+        idle: idleMessage({ outcome: "interrupted" }),
+        usage,
+      }).pipe(Effect.flip),
     )
 
-    expect(exit._tag).toBe("Failure")
+    expect(failure).toBeInstanceOf(OpenCodeInvocationError)
   })
 
-  test("passes Effect cancellation into event.subscribe", async () => {
+  test("aborts the event subscription when acquisition is interrupted", async () => {
     let capturedSignal: AbortSignal | undefined
-
-    const subscription = await Effect.runPromise(
-      subscribeToOpenCodeEvents({
-        client: makeEventClient(((_, options) => {
-          capturedSignal = options?.signal ?? undefined
-          return Promise.resolve({
-            stream: makeEventStream([]),
-          })
-        }) as TestSubscribe),
-      }),
-    )
-
-    expect(subscription.stream).toBeDefined()
-    expect(capturedSignal).toBeDefined()
-    expect(capturedSignal?.aborted).toBe(false)
-  })
-
-  test("aborts the sdk subscription when acquisition is interrupted", async () => {
-    let capturedSignal: AbortSignal | undefined
-    let sawAbort = false
 
     const fiber = Effect.runFork(
       subscribeToOpenCodeEvents({
-        client: makeEventClient(
-          ((_, options) =>
-            new Promise(() => {
-              capturedSignal = options?.signal ?? undefined
-              options?.signal?.addEventListener(
-                "abort",
-                () => {
-                  sawAbort = true
-                },
-                { once: true },
-              )
-            })) as TestSubscribe,
-        ),
+        client: makeEventClient(((options) => {
+          capturedSignal = options?.signal
+          return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }) }
+        }) as TestSubscribe),
+        lifetime: new AbortController().signal,
       }),
     )
 
-    await Effect.runPromise(Fiber.interrupt(fiber))
+    await Effect.runPromise(Effect.yieldNow.pipe(Effect.andThen(Fiber.interrupt(fiber))))
 
-    expect(capturedSignal).toBeDefined()
     expect(capturedSignal?.aborted).toBe(true)
-    expect(sawAbort).toBe(true)
+  })
+
+  test("continues without progress when the event stream never connects", async () => {
+    let capturedSignal: AbortSignal | undefined
+
+    const program = Effect.gen(function* () {
+      const subscribed = yield* Deferred.make<void>()
+      const fiber = yield* withOpenCodeProgressSubscription(
+        {
+          client: makeEventClient(((options) => {
+            capturedSignal = options?.signal
+            Deferred.doneUnsafe(subscribed, Exit.void)
+            return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }) }
+          }) as TestSubscribe),
+          sessionId: "ses_target",
+        },
+        Effect.succeed("prompted"),
+      ).pipe(Effect.forkChild)
+
+      yield* Deferred.await(subscribed)
+      yield* Effect.yieldNow
+      yield* TestClock.adjust("5 seconds")
+
+      return yield* Fiber.join(fiber)
+    })
+
+    const output = await Effect.runPromise(program.pipe(Effect.provide(TestClock.layer()), withSilentLogs))
+
+    expect(output).toBe("prompted")
+    expect(capturedSignal?.aborted).toBe(true)
   })
 
   test("cleans up the progress subscription without logging abort warnings", async () => {
@@ -629,34 +475,32 @@ describe("opencode", () => {
       collectEffectConsole(
         withOpenCodeProgressSubscription(
           {
-            client: makeEventClient(((_, options) => {
-              capturedSignal = options?.signal ?? undefined
+            client: makeEventClient(((options) => {
+              capturedSignal = options?.signal
 
-              return Promise.resolve({
-                stream: {
-                  async *[Symbol.asyncIterator]() {
-                    yield* []
+              return {
+                async *[Symbol.asyncIterator]() {
+                  yield connectedEvent
 
-                    try {
-                      resolveStreamStarted()
+                  try {
+                    resolveStreamStarted()
 
-                      await new Promise((_, reject) => {
-                        options?.signal?.addEventListener(
-                          "abort",
-                          () => {
-                            const error = new Error("stream aborted")
-                            error.name = "AbortError"
-                            reject(error)
-                          },
-                          { once: true },
-                        )
-                      })
-                    } finally {
-                      streamClosed = true
-                    }
-                  },
+                    await new Promise((_, reject) => {
+                      options?.signal?.addEventListener(
+                        "abort",
+                        () => {
+                          const error = new Error("stream aborted")
+                          error.name = "AbortError"
+                          reject(error)
+                        },
+                        { once: true },
+                      )
+                    })
+                  } finally {
+                    streamClosed = true
+                  }
                 },
-              })
+              }
             }) as TestSubscribe),
             sessionId: "ses_target",
           },
@@ -669,7 +513,6 @@ describe("opencode", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(output.value).toBe("done")
-    expect(capturedSignal).toBeDefined()
     expect(capturedSignal?.aborted).toBe(true)
     expect(streamClosed).toBe(true)
     expect(
@@ -681,146 +524,58 @@ describe("opencode", () => {
 
   test("filters progress events to the active session", () => {
     const logs = reduceProgressLogs([
-      sessionStatusEvent("ses_other", { type: "busy" }),
-      sessionStatusEvent("ses_target", { type: "busy" }),
-      toolEvent("ses_other", "call_other", "bash", {
-        status: "running",
-        input: {
-          command: "echo ignored",
-        },
-        time: {
-          start: 1,
-        },
-      }),
+      executionStarted("ses_other"),
+      executionStarted("ses_target"),
+      toolStarted("ses_other", "call_other", "shell"),
+      toolCalled("ses_other", "call_other", { command: "echo ignored" }),
     ])
 
-    expect(logs).toHaveLength(1)
-    expect(logs[0]?.message).toBe("OpenCode assistant is working.")
+    expect(logs.map((log) => log.message)).toEqual(["OpenCode assistant is working."])
   })
 
-  test("dedupes repeated busy events and retry attempts", () => {
+  test("dedupes repeated retry attempts", () => {
     const logs = reduceProgressLogs([
-      sessionStatusEvent("ses_target", { type: "busy" }),
-      sessionStatusEvent("ses_target", { type: "busy" }),
-      sessionStatusEvent("ses_target", {
-        type: "retry",
-        attempt: 1,
-        message: "model asked for another attempt",
-        next: 500,
-      }),
-      sessionStatusEvent("ses_target", {
-        type: "retry",
-        attempt: 1,
-        message: "model asked for another attempt",
-        next: 500,
-      }),
+      retryScheduled("ses_target", 1),
+      retryScheduled("ses_target", 1),
+      retryScheduled("ses_target", 2),
     ])
 
-    expect(logs.map((entry) => entry.message)).toEqual([
-      "OpenCode assistant is working.",
-      "OpenCode is retrying the assistant response.",
+    expect(logs).toEqual([
+      {
+        level: "info",
+        message: "OpenCode is retrying the assistant response.",
+        fields: { attempt: 1, nextDelayMs: 500, retryMessage: "Rate limited" },
+      },
+      {
+        level: "info",
+        message: "OpenCode is retrying the assistant response.",
+        fields: { attempt: 2, nextDelayMs: 500, retryMessage: "Rate limited" },
+      },
     ])
-    expect(logs[1]?.fields?.attempt).toBe(1)
   })
 
-  test("summarizes tool and todo progress without raw tool output", () => {
+  test("summarizes tool progress without raw tool output", () => {
     const logs = reduceProgressLogs([
-      toolEvent("ses_target", "call_bash", "bash", {
-        status: "running",
-        input: {
-          command: "echo hello",
-        },
-        title: "Run command",
-        time: {
-          start: 1,
-        },
-      }),
-      toolEvent("ses_target", "call_bash", "bash", {
-        status: "completed",
-        input: {
-          command: "echo hello",
-        },
-        output: "full raw output that should never be logged",
-        title: "Run command",
-        metadata: {},
-        time: {
-          start: 1,
-          end: 6,
-        },
-      }),
-      toolEvent("ses_target", "call_edit", "edit", {
-        status: "error",
-        input: {
-          filePath: "src/example.ts",
-        },
-        error: "write failed",
-        time: {
-          start: 10,
-          end: 18,
-        },
-      }),
-      todoEvent("ses_target", [
-        {
-          content: "Inspect diff",
-          status: "completed",
-          priority: "high",
-        },
-        {
-          content: "Write summary",
-          status: "in_progress",
-          priority: "medium",
-        },
-      ]),
+      toolStarted("ses_target", "call_1", "shell"),
+      toolCalled("ses_target", "call_1", { command: "git diff HEAD~1 HEAD" }),
+      toolStarted("ses_target", "call_2", "glob"),
+      toolCalled("ses_target", "call_2", { pattern: "src/**/*.ts" }),
+      toolFailed("ses_target", "call_2", "x".repeat(300)),
     ])
 
-    expect(logs.map((entry) => entry.message)).toEqual([
-      "🔧 echo hello",
-      "⚠️ edit: src/example.ts",
-      "OpenCode updated its task plan.",
-    ])
-    expect(JSON.stringify(logs)).not.toContain("full raw output that should never be logged")
-    expect(logs[2]?.fields?.counts).toEqual({
-      completed: 1,
-      in_progress: 1,
-    })
-  })
-
-  test("renders glob progress from the tool pattern input", () => {
-    const logs = reduceProgressLogs([
-      toolEvent("ses_target", "call_glob", "glob", {
-        status: "running",
-        input: {
-          path: "/workspace",
-          pattern: "**/*.yaml",
-        },
-        time: {
-          start: 1,
-        },
-      }),
-    ])
-
-    expect(logs.map((entry) => entry.message)).toEqual(["✱ **/*.yaml"])
+    expect(logs.map((log) => log.message)).toEqual(["🔧 git diff HEAD~1 HEAD", "✱ src/**/*.ts", "⚠️ glob: src/**/*.ts"])
+    expect(logs[2]?.level).toBe("warning")
+    expect(String(logs[2]?.fields?.error).length).toBeLessThan(300)
   })
 
   test("summarizes session errors", () => {
-    const logs = reduceProgressLogs([
-      sessionErrorEvent("ses_target", {
-        name: "APIError",
-        data: {
-          message: "boom",
-          isRetryable: false,
-        },
-      }),
-    ])
+    const logs = reduceProgressLogs([executionFailed("ses_target", "provider.auth", "Invalid API key")])
 
     expect(logs).toEqual([
       {
         level: "warning",
         message: "OpenCode reported a session error.",
-        fields: {
-          name: "APIError",
-          errorMessage: "boom",
-        },
+        fields: { name: "provider.auth", errorMessage: "Invalid API key" },
       },
     ])
   })
