@@ -15,13 +15,13 @@
     "./opencode": "./src/opencode.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck": "tsc --noEmit --pretty false",
     "typecheck:tsc": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
-    "@opencode-ai/sdk": "^1.3.3",
-    "effect": "4.0.0"
+    "@effect/platform-bun": "4.1.0",
+    "@opencode-ai/sdk": "^1.19.5",
+    "effect": "4.1.0"
   }
 }

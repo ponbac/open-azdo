@@ -57,6 +57,7 @@ const sessionStatusEvent = (
   sessionID: string,
   status: Extract<Event, { readonly type: "session.status" }>["properties"]["status"],
 ): Event => ({
+  id: `evt-status-${sessionID}`,
   type: "session.status",
   properties: {
     sessionID,
@@ -65,6 +66,7 @@ const sessionStatusEvent = (
 })
 
 const toolEvent = (sessionID: string, callID: string, tool: string, state: ToolPart["state"]): Event => ({
+  id: `evt-tool-${callID}`,
   type: "message.part.updated",
   properties: {
     sessionID,
@@ -82,6 +84,7 @@ const toolEvent = (sessionID: string, callID: string, tool: string, state: ToolP
 })
 
 const todoEvent = (sessionID: string, todos: ReadonlyArray<Todo>): Event => ({
+  id: `evt-todo-${sessionID}`,
   type: "todo.updated",
   properties: {
     sessionID,
@@ -93,6 +96,7 @@ const sessionErrorEvent = (
   sessionID: string,
   error: Extract<Event, { readonly type: "session.error" }>["properties"]["error"],
 ): Event => ({
+  id: `evt-error-${sessionID}`,
   type: "session.error",
   properties: {
     sessionID,

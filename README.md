@@ -41,28 +41,29 @@ bun run sandbox:capture
 
 ## TypeScript Tooling
 
-This repo uses two TypeScript lanes:
+This repo uses stable TypeScript 7 with the native Effect language service:
 
-- Default command lane: TS7 via `@typescript/native-preview` and `tsgo`.
-- Editor and fallback lane: regular `typescript`, pinned to the v6 prerelease workspace SDK.
+- `typescript` supplies the stable native `tsc` compiler.
+- `@effect/tsgo` supplies Effect diagnostics, refactors, and editor support, replacing `@effect/language-service` and `@typescript/native-preview`.
 
 Current defaults:
 
 ```bash
-bun run typecheck      # TS7 via tsgo across workspaces
+bun run typecheck      # stable TS7 via tsc across workspaces
 bun run lint           # TS7-backed Oxlint type-aware linting
 bun run check          # fmt + TS7-backed lint + test
 ```
 
-Fallback commands:
+The previous fallback command names remain available as aliases:
 
 ```bash
 bun run typecheck:tsc
 bun run --cwd packages/core typecheck:tsc
-bun run lint:syntax
 ```
 
-The workspace editor TypeScript SDK remains `node_modules/typescript/lib`, so Effect language-service continues to run against the installed `typescript` package rather than TS7 `tsgo`.
+`bun install` runs `effect-tsgo patch --typescript` to add Effect support to the workspace compiler. VS Code uses the native SDK at `node_modules/typescript/bin`; Zed uses the Effect TSGo extension, pinned to the same Effect tooling release. The tsconfig plugin name remains `@effect/language-service` because the native integration reads that configuration key.
+
+Effect warnings remain advisory in CLI typechecks, matching the previous editor-only integration. TypeScript errors and Effect errors fail typechecks. Oxlint remains unpatched; `bun run lint:syntax` is available for syntax-only linting.
 
 Generated `**/*.js` and `**/*.d.ts` files are intentionally excluded from linting so Oxlint's type-aware mode only reports on source TypeScript.
 
@@ -115,8 +116,8 @@ Reference repositories and Effect API material live under `.reference/`. Refresh
 ```
 
 The ignored Effect source clone lives at `.reference/effect` and is pinned to
-`Effect-TS/effect` tag `effect@4.0.0`, commit
-`67ba4e46a11ccda0b6761578bfd22c04ae00167d`, matching the workspace dependencies.
+`Effect-TS/effect` tag `effect@4.1.0`, commit
+`9a91b1926a5fbfaffd302a7a41a94d4d53a1154e`, matching the workspace dependencies.
 To refresh only Effect without updating the other reference repositories, run:
 
 ```bash

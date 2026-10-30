@@ -9,13 +9,13 @@
     "./client": "./src/client.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck": "tsc --noEmit --pretty false",
     "typecheck:tsc": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
     "@open-azdo/core": "workspace:*",
-    "effect": "4.0.0",
-    "turndown": "7.2.2"
+    "effect": "4.1.0",
+    "turndown": "7.2.4"
   }
 }

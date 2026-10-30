@@ -150,11 +150,11 @@ steps:
 
   - bash: |
       set -euo pipefail
-      curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.3.10/bun-linux-x64.zip -o bun.zip
+      curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip -o bun.zip
       unzip -q bun.zip
       export PATH="$PWD/bun-linux-x64:$PATH"
 
-      curl -fsSL https://github.com/sst/opencode/releases/download/v1.3.3/opencode-linux-x64.tar.gz -o opencode.tar.gz
+      curl -fsSL https://github.com/sst/opencode/releases/download/v1.19.5/opencode-linux-x64.tar.gz -o opencode.tar.gz
       mkdir -p opencode-bin
       tar -xzf opencode.tar.gz -C opencode-bin
       export PATH="$PWD/opencode-bin:$PATH"
