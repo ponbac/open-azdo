@@ -7,14 +7,14 @@
     "./review": "./src/review.ts"
   },
   "scripts": {
-    "typecheck": "tsgo --noEmit --pretty false",
+    "typecheck": "tsc --noEmit --pretty false",
     "typecheck:tsc": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
     "@open-azdo/azdo": "workspace:*",
     "@open-azdo/core": "workspace:*",
-    "effect": "4.0.0",
-    "jsonrepair": "^3.13.3"
+    "effect": "4.1.0",
+    "jsonrepair": "^3.15.0"
   }
 }

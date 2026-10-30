@@ -9,7 +9,7 @@
 - `.reference/t3code`
   Role: git workflow/service layering reference and command/process execution reference. Check Effect examples against the pinned stable source below.
 - `.reference/effect`
-  Role: canonical Effect v4 stable source reference from `Effect-TS/effect`, pinned to `effect@4.0.0` (`67ba4e46a11ccda0b6761578bfd22c04ae00167d`). Use `Context.Service`, `Schema.TaggedError`, and stable paths such as `effect/http`, `effect/cli`, and `effect/process`.
+  Role: canonical Effect v4 stable source reference from `Effect-TS/effect`, pinned to `effect@4.1.0` (`9a91b1926a5fbfaffd302a7a41a94d4d53a1154e`). Use `Context.Service`, `Schema.TaggedError`, and stable paths such as `effect/http`, `effect/cli`, and `effect/process`.
   Refresh only this ignored clone with `./scripts/pull-ref-repos.sh --effect-only`.
 
 # Project Snapshot
@@ -43,15 +43,16 @@
 
 - Opt-in real-environment validation is available through `bun run sandbox:capture` and `bun test ./apps/open-azdo/test/live.integration.test.ts` with `.env.integration.local` loaded.
 - The sandbox app can be used to inspect a real captured review locally on `http://127.0.0.1:4317`.
-- For this repo, `openai/gpt-5.4-mini` is supported natively on OpenCode `1.3.3`.
+- Pipeline examples use OpenCode `1.19.5` with `openai/gpt-5.4-mini`.
 
 # TypeScript Tooling Policy
 
-- Default command lane is TS7 via `@typescript/native-preview` and `tsgo`.
-- Explicit fallback lane is regular `typescript`, exposed through `typecheck:tsc`.
+- Typechecking uses stable TypeScript 7 via `typescript` and `tsc`.
+- `typecheck:tsc` remains an alias for callers of the previous fallback lane.
 - Root `lint` is TS7-backed Oxlint type-aware linting.
 - Root `check` relies on TS7-backed linting rather than a separate `tsc` gate.
-- Workspace editor TypeScript remains `node_modules/typescript/lib`, so Effect language-service continues using the installed `typescript` package.
+- `@effect/tsgo` replaces the legacy Effect language-service plugin and native preview compiler. `bun install` patches the workspace TypeScript compiler for Effect support; VS Code uses `node_modules/typescript/bin`, and Zed uses the Effect TSGo extension.
+- Effect warnings remain advisory in CLI typechecks, as they were in the editor-only integration; TypeScript and Effect errors fail typechecks. Oxlint remains unpatched.
 - Generated `**/*.js` and `**/*.d.ts` files are intentionally excluded from linting.
 - `ts5to6` and related migration helpers were researched but are not needed for the current `tsconfig` shape.
 

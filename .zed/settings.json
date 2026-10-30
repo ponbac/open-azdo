@@ -1,13 +1,12 @@
 {
   "auto_install_extensions": {
+    "effect-language-service-tsgo": true,
     "oxc": true
   },
   "lsp": {
-    "vtsls": {
+    "effect-tsgo": {
       "settings": {
-        "vtsls": {
-          "autoUseWorkspaceTsdk": true
-        }
+        "package_version": "0.63.0"
       }
     },
     "oxlint": {
@@ -31,7 +30,7 @@
   },
   "languages": {
     "JavaScript": {
-      "language_servers": ["vtsls", "oxlint", "!eslint", "!biome", "..."],
+      "language_servers": ["effect-tsgo", "oxlint", "!vtsls", "!typescript-language-server", "!eslint", "!biome", "..."],
       "format_on_save": "on",
       "prettier": {
         "allowed": false
@@ -43,7 +42,7 @@
       }
     },
     "JSX": {
-      "language_servers": ["vtsls", "oxlint", "!eslint", "!biome", "..."],
+      "language_servers": ["effect-tsgo", "oxlint", "!vtsls", "!typescript-language-server", "!eslint", "!biome", "..."],
       "format_on_save": "on",
       "prettier": {
         "allowed": false
@@ -55,7 +54,7 @@
       }
     },
     "TypeScript": {
-      "language_servers": ["vtsls", "oxlint", "!eslint", "!biome", "..."],
+      "language_servers": ["effect-tsgo", "oxlint", "!vtsls", "!typescript-language-server", "!eslint", "!biome", "..."],
       "format_on_save": "on",
       "prettier": {
         "allowed": false
@@ -67,7 +66,7 @@
       }
     },
     "TSX": {
-      "language_servers": ["vtsls", "oxlint", "!eslint", "!biome", "..."],
+      "language_servers": ["effect-tsgo", "oxlint", "!vtsls", "!typescript-language-server", "!eslint", "!biome", "..."],
       "format_on_save": "on",
       "prettier": {
         "allowed": false

@@ -25,12 +25,12 @@ if [[ "${1:-}" != "--effect-only" ]]; then
 fi
 
 rm -rf "${REF_DIR}/effect-smol" "${REF_DIR}/effect"
-git clone --depth 1 --filter=blob:none --branch 'effect@4.0.0' \
+git clone --depth 1 --filter=blob:none --branch 'effect@4.1.0' \
   https://github.com/Effect-TS/effect.git "${REF_DIR}/effect"
 
 # Keep the source reference aligned with the exact stable runtime release.
-EFFECT_COMMIT="67ba4e46a11ccda0b6761578bfd22c04ae00167d"
+EFFECT_COMMIT="9a91b1926a5fbfaffd302a7a41a94d4d53a1154e"
 if [[ "$(git -C "${REF_DIR}/effect" rev-parse HEAD)" != "${EFFECT_COMMIT}" ]]; then
-  echo "Effect reference does not match the pinned 4.0.0 release commit." >&2
+  echo "Effect reference does not match the pinned 4.1.0 release commit." >&2
   exit 1
 fi

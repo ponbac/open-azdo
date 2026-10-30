@@ -23,7 +23,7 @@ const SANDBOX_PATCH_OPTIONS = {
   disableFileHeader: true,
   lineHoverHighlight: "disabled",
   enableGutterUtility: false,
-} satisfies NonNullable<PatchDiffProps<undefined>["options"]>
+} satisfies NonNullable<PatchDiffProps<undefined, undefined>["options"]>
 
 function nodeToPlainText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") {

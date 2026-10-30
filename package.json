@@ -7,6 +7,7 @@
   ],
   "type": "module",
   "scripts": {
+    "prepare": "effect-tsgo patch --typescript",
     "build": "turbo run build",
     "sandbox:capture": "bun --env-file=../../.env.integration.local run --cwd apps/open-azdo sandbox:capture",
     "sandbox:dev": "bun run --cwd apps/sandbox dev",
@@ -25,15 +26,14 @@
     "publish:npm": "bash ./scripts/publish-npm.sh"
   },
   "devDependencies": {
-    "@effect/language-service": "0.84.1",
-    "@types/bun": "1.3.11",
+    "@effect/tsgo": "0.63.0",
+    "@types/bun": "1.4.4",
     "@types/turndown": "5.0.6",
-    "@typescript/native-preview": "7.0.0-dev.20260327.2",
-    "oxfmt": "0.42.0",
-    "oxlint": "1.57.0",
-    "oxlint-tsgolint": "0.18.1",
-    "turbo": "^2.8.21",
-    "typescript": "6.0.2"
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "oxlint-tsgolint": "7.0.2005",
+    "turbo": "^2.11.10",
+    "typescript": "7.0.2"
   },
-  "packageManager": "bun@1.3.10"
+  "packageManager": "bun@1.4.4"
 }
