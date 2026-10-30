@@ -28,7 +28,8 @@ describe("review summary prompt", () => {
 
     expect(prompt).toContain("You are not reviewing the repository.")
     expect(prompt).toContain("Do not inspect the repo, diff, pull request, work items, or thread bodies.")
-    expect(prompt).toContain("The only tool you may use is the provided result submission tool.")
+    expect(prompt).toContain("You may reread this run's saved task file for recovery")
+    expect(prompt).toContain("Use the result submission tool as your final action")
     expect(prompt).toContain("Do not introduce any issue, risk, or concern that is not present in the subject list.")
     expect(prompt).toContain('"subjectIds":["subject-id"]')
     expect(prompt).toContain('"id":"inline-finding-1"')

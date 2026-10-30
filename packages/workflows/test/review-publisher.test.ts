@@ -4,6 +4,7 @@ import { Effect } from "effect"
 import {
   AzureDevOpsClient,
   AzureDevOpsHttpError,
+  type CreateThreadInput,
   type UpdateCommentInput,
   type UpdateThreadStatusInput,
 } from "@open-azdo/azdo/client"
@@ -212,7 +213,8 @@ describe("review publisher", () => {
     expect(exit._tag).toBe("Failure")
   })
 
-  test("publishes a managed failure summary", async () => {
+  test("publishes failure separately without overwriting or copying the committed checkpoint", async () => {
+    const createThreadCalls: CreateThreadInput[] = []
     const updateCommentCalls: UpdateCommentInput[] = []
     const updateStatusCalls: UpdateThreadStatusInput[] = []
 
@@ -237,6 +239,10 @@ describe("review publisher", () => {
         Effect.provideService(
           AzureDevOpsClient,
           makeAzureDevOpsClient({
+            createThread: (input) =>
+              Effect.sync(() => {
+                createThreadCalls.push(input)
+              }),
             updateComment: (input) =>
               Effect.sync(() => {
                 updateCommentCalls.push(input)
@@ -250,18 +256,17 @@ describe("review publisher", () => {
       ),
     )
 
-    expect(updateCommentCalls.map(({ threadId, commentId }) => ({ threadId, commentId }))).toEqual([
-      { threadId: 1, commentId: 10 },
-    ])
+    expect(updateCommentCalls).toEqual([])
+    expect(updateStatusCalls).toEqual([])
+    expect(createThreadCalls).toHaveLength(1)
+    expect(createThreadCalls[0]?.status).toBe(1)
 
-    const content = updateCommentCalls[0]?.content ?? ""
+    const content = createThreadCalls[0]?.content ?? ""
 
     expect(content).toContain("Verdict: **fail**")
     expect(content).toContain("Review execution failed.\n\nFailed badly")
-    expect(content).toContain('"reviewedCommit":"preserved-sha"')
-    expect(updateStatusCalls.map(({ threadId, status }) => ({ threadId, status }))).toEqual([
-      { threadId: 1, status: 1 },
-    ])
+    expect(content).toContain('<!-- open-azdo-failure:{"kind":"failure"} -->')
+    expect(content).not.toContain("reviewedCommit")
   })
 
   test("ignores existing thread comments without string content", async () => {

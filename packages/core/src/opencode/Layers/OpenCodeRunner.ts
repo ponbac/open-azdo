@@ -30,6 +30,8 @@ const openCodePermissions: ReadonlyArray<OpenCodePermissionRule> = [
   allow("glob"),
   allow("grep"),
   allow("shell"),
+  allow("external_directory"),
+  allow("skill"),
   allow(OPEN_CODE_STRUCTURED_OUTPUT_TOOL),
 ]
 

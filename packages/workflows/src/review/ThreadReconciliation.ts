@@ -76,6 +76,7 @@ export const SKIPPED_REVIEW_SUMMARY = "⏭️ No new commits since the last mana
 type SummarySnapshot = {
   readonly verdict: NormalizedReviewResult["verdict"]
   readonly summary: string
+  readonly summaryOnlyFindings: ReadonlyArray<ReviewFinding>
   readonly unmappedNotes: ReadonlyArray<string>
   readonly severityCounts: SeverityCounts
   readonly buildLink?: string | undefined
@@ -346,6 +347,18 @@ const appendReviewHistorySection = (lines: string[], reviewHistory: ReadonlyArra
   }
 }
 
+/** Renders complete finding evidence without placement metadata or managed-thread markers. */
+const renderFindingEvidence = (finding: ReviewFinding) => {
+  const lines = [`**Severity:** ${finding.severity}`, `**Confidence:** ${finding.confidence}`, "", finding.body]
+
+  if (finding.suggestion) {
+    lines.push("", "Suggestion:", "", "```", finding.suggestion, "```")
+  }
+
+  return lines.join("\n")
+}
+
+/** Composes the final published summary, retaining evidence independently of model highlight wording. */
 export const buildSummaryComment = (snapshot: SummarySnapshot) => {
   const lines = [
     `Verdict: **${snapshot.verdict}**`,
@@ -354,6 +367,19 @@ export const buildSummaryComment = (snapshot: SummarySnapshot) => {
     "",
     `Severity counts: critical ${snapshot.severityCounts.critical}, high ${snapshot.severityCounts.high}, medium ${snapshot.severityCounts.medium}, low ${snapshot.severityCounts.low}.`,
   ]
+
+  if (snapshot.summaryOnlyFindings.length > 0) {
+    lines.push("", "Summary-only findings:")
+
+    for (const finding of snapshot.summaryOnlyFindings) {
+      lines.push(
+        "",
+        `**${finding.title}** — \`${finding.filePath}:${finding.line}\``,
+        "",
+        renderFindingEvidence(finding),
+      )
+    }
+  }
 
   if (snapshot.unmappedNotes.length > 0) {
     lines.push("", "Summary-only notes:")
@@ -376,30 +402,29 @@ export const buildSummaryComment = (snapshot: SummarySnapshot) => {
   return lines.join("\n")
 }
 
-/** Identifies a failed first review without inventing a reviewed-commit checkpoint. */
-export const buildFailureSummaryComment = (snapshot: Omit<SummarySnapshot, "verdict">) => {
-  const content = buildSummaryComment({ ...snapshot, verdict: "fail" })
+/** Operational failures never carry a review checkpoint or replace completed-review evidence. */
+export const buildFailureSummaryComment = (snapshot: Pick<SummarySnapshot, "summary" | "buildLink">) => {
+  const content = buildSummaryComment({
+    verdict: "fail",
+    summary: snapshot.summary,
+    summaryOnlyFindings: [],
+    unmappedNotes: [],
+    severityCounts: { low: 0, medium: 0, high: 0, critical: 0 },
+    buildLink: snapshot.buildLink,
+  })
 
-  // Existing checkpoints keep their deployed marker; only unreviewed failures need separate identity.
-  return snapshot.persistedState
-    ? content
-    : `${content}\n\n${encodeManagedPayload(FAILURE_STATE_PREFIX, { kind: "failure" })}`
+  return `${content}\n\n${encodeManagedPayload(FAILURE_STATE_PREFIX, { kind: "failure" })}`
 }
 
+/** Adds the managed marker only to an inline finding's complete evidence. */
 export const buildInlineComment = (finding: ReviewFinding) =>
   [
     `**${finding.title}**`,
     "",
-    `**Severity:** ${finding.severity}`,
-    `**Confidence:** ${finding.confidence}`,
-    "",
-    finding.body,
-    finding.suggestion ? `\nSuggestion:\n\n\`\`\`\n${finding.suggestion}\n\`\`\`` : "",
+    renderFindingEvidence(finding),
     "",
     encodeManagedPayload(FINDING_MARKER_PREFIX, { kind: "finding", fingerprint: fingerprintFinding(finding), finding }),
-  ]
-    .filter(Boolean)
-    .join("\n")
+  ].join("\n")
 
 type ExistingSummaryThread = {
   readonly thread: ExistingThread
@@ -687,28 +712,14 @@ export const reconcileThreads = ({
   scopedDeletedLinesByFile,
 }: ReconcileThreadsInput): ThreadAction[] => {
   const actions: ThreadAction[] = []
-  const existingSummary = managedThreads.summary ?? managedThreads.failure
 
-  const summaryAction: ThreadAction = {
-    type: "upsert-summary",
-    content: summaryContent,
-    resolved: summaryVerdict === "pass",
-    existingThread: existingSummary?.thread,
-    commentId: existingSummary?.commentId,
-  }
-
-  // If both records exist, retain the committed summary and resolve the separate failure notice.
-  if (
-    managedThreads.summary &&
-    managedThreads.failure &&
-    managedThreads.summary.thread.id !== managedThreads.failure.thread.id &&
-    isActiveThreadStatus(managedThreads.failure.thread.status)
-  ) {
+  // Recovery and same-commit skips resolve operational notices without rewriting completed evidence.
+  if (managedThreads.failure && isActiveThreadStatus(managedThreads.failure.thread.status)) {
     actions.push({ type: "close-thread", existingThread: managedThreads.failure.thread })
   }
 
   if (reviewMode === "skipped") {
-    return [...actions, summaryAction]
+    return actions
   }
 
   const activeManagedFindingThreads = listActiveManagedFindingThreads(managedThreads)
@@ -761,7 +772,13 @@ export const reconcileThreads = ({
   }
 
   // Persist reviewedCommit only after every finding and status mutation succeeds.
-  actions.push(summaryAction)
+  actions.push({
+    type: "upsert-summary",
+    content: summaryContent,
+    resolved: summaryVerdict === "pass",
+    existingThread: managedThreads.summary?.thread,
+    commentId: managedThreads.summary?.commentId,
+  })
 
   return actions
 }

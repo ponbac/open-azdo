@@ -18,7 +18,8 @@ const MAX_WORK_ITEM_CONTEXT_CHARS = 24_000
 const MAX_RELATED_ITEMS = 4
 const MAX_THREAD_CONTEXT_CHARS = 24_000
 const MAX_MANAGED_FINDING_CONTEXT_CHARS = 12_000
-const MAX_MANAGED_FINDING_CANDIDATE_CONTEXT_CHARS = 20_000
+const MAX_FILE_DIFF_DETAILS = 100
+const MAX_DIFF_MANIFEST_CHARS = 250_000
 const SYSTEM_THREAD_AUTHORS = new Set(["Azure Pipelines Test Service", "Microsoft.VisualStudio.Services.TFS"])
 const SYSTEM_THREAD_PREFIXES = ["Policy status has been updated", "The reference refs/"]
 const SYSTEM_THREAD_SNIPPETS = ["set auto-complete", "published the pull request"]
@@ -118,9 +119,12 @@ export type ReviewContext = {
   readonly headRef: string
   readonly changedFiles: Array<{
     readonly path: string
-    readonly changedLineRanges: LineRange[]
-    readonly hunkHeaders: string[]
+    readonly renamedFrom?: string
+    readonly changedLineRanges?: LineRange[]
+    readonly hunkHeaders?: string[]
   }>
+  readonly deletedFiles: ReadonlyArray<string>
+  readonly diffMetadataTruncated?: boolean
   readonly pullRequestThreads?: {
     readonly omittedCount: number
     readonly items: ReadonlyArray<PromptThread>
@@ -130,7 +134,6 @@ export type ReviewContext = {
     readonly items: ReadonlyArray<PromptManagedFinding>
   }
   readonly managedFindingCandidates?: {
-    readonly omittedCount: number
     readonly items: ReadonlyArray<PromptManagedFindingCandidate>
   }
   readonly connectedWorkItems?: {
@@ -535,35 +538,6 @@ const truncatePromptThreadToFitBudget = (thread: PromptThread, maxSerializedChar
       })),
   })
 
-const truncatePromptManagedFindingCandidateToFitBudget = (
-  managedFindingCandidate: PromptManagedFindingCandidate,
-  maxSerializedChars: number,
-  totalCount: number,
-) =>
-  shrinkValueToFitSerializedBudget({
-    value: managedFindingCandidate,
-    maxSerializedChars,
-    serialize: (candidate) => serializeBudgetedPromptSection([candidate], totalCount),
-    getSlots: (candidate) => [
-      {
-        text: candidate.body,
-        write: (nextText: string) => ({ ...candidate, body: nextText }),
-      },
-      ...(candidate.suggestion
-        ? [
-            {
-              text: candidate.suggestion,
-              write: (nextText: string) => ({ ...candidate, suggestion: nextText }),
-            },
-          ]
-        : []),
-      {
-        text: candidate.title,
-        write: (nextText: string) => ({ ...candidate, title: nextText }),
-      },
-    ],
-  })
-
 /**
  * Keeps the managed-finding summary context small by retaining the newest items first and then
  * dropping older entries once the serialized section reaches its budget.
@@ -601,8 +575,8 @@ const selectManagedFindingsForPrompt = (managedThreads: ManagedThreads) => {
 
 /**
  * Provides the reviewer model with only active managed findings that still overlap the current
- * review scope so it can explicitly link or resolve those threads without spending prompt budget
- * on unrelated historical findings.
+ * review scope. Keep this authority pool complete: omitting eligible IDs would prevent the model
+ * from resolving them even when it verifies that their concerns are fixed.
  */
 const selectManagedFindingCandidatesForPrompt = (managedThreads: ManagedThreads, gitDiff: PullRequestDiff) => {
   const managedFindingCandidates = managedThreads.findings
@@ -618,12 +592,46 @@ const selectManagedFindingCandidatesForPrompt = (managedThreads: ManagedThreads,
     })
     .sort(compareUpdatedAtThenIdDesc)
 
-  return selectItemsWithinSerializedBudget({
-    items: managedFindingCandidates,
-    totalCount: managedFindingCandidates.length,
-    maxSerializedChars: MAX_MANAGED_FINDING_CANDIDATE_CONTEXT_CHARS,
-    truncateItemToFit: truncatePromptManagedFindingCandidateToFitBudget,
-  }) satisfies NonNullable<ReviewContext["managedFindingCandidates"]> | undefined
+  return managedFindingCandidates.length > 0 ? { items: managedFindingCandidates } : undefined
+}
+
+/** Keeps every Git path visible while treating hunk/range summaries as optional navigation aids. */
+const buildDiffManifest = (gitDiff: PullRequestDiff): Pick<ReviewContext, "changedFiles" | "diffMetadataTruncated"> => {
+  const patches = new Map(splitDiffByFile(gitDiff.diffText).map((file) => [file.path, file.patch]))
+  let diffMetadataTruncated = false
+
+  const fileIdentities = gitDiff.changedFiles.map((path) => {
+    const renamedFrom = gitDiff.renamedFromByFile.get(path)
+
+    return renamedFrom === undefined ? { path } : { path, renamedFrom }
+  })
+
+  const changedFiles = fileIdentities.map((file) => {
+    const path = file.path
+    const lineRanges = compressChangedLines(gitDiff.changedLinesByFile.get(path) ?? new Set<number>())
+    const hunkHeaders = extractHunkHeaders(patches.get(path) ?? "")
+
+    if (lineRanges.length > MAX_FILE_DIFF_DETAILS || hunkHeaders.length > MAX_FILE_DIFF_DETAILS) {
+      diffMetadataTruncated = true
+    }
+
+    return {
+      ...file,
+      changedLineRanges: lineRanges.slice(0, MAX_FILE_DIFF_DETAILS),
+      hunkHeaders: hunkHeaders.slice(0, MAX_FILE_DIFF_DETAILS),
+    }
+  })
+
+  if (JSON.stringify({ changedFiles, deletedFiles: gitDiff.deletedFiles }).length > MAX_DIFF_MANIFEST_CHARS) {
+    // A wide diff can exceed the detail budget even with one hunk per file. Paths are never capped;
+    // they may exceed this target on their own, and Git remains the complete source of patch detail.
+    return {
+      changedFiles: fileIdentities,
+      diffMetadataTruncated: true,
+    }
+  }
+
+  return { changedFiles, diffMetadataTruncated }
 }
 
 /**
@@ -753,11 +761,8 @@ export const buildReviewContext = ({
     pullRequestBaseRef,
     baseRef: gitDiff.baseRef,
     headRef: gitDiff.headRef,
-    changedFiles: splitDiffByFile(gitDiff.diffText).map((file) => ({
-      path: file.path,
-      changedLineRanges: compressChangedLines(gitDiff.changedLinesByFile.get(file.path) ?? new Set<number>()),
-      hunkHeaders: extractHunkHeaders(file.patch),
-    })),
+    ...buildDiffManifest(gitDiff),
+    deletedFiles: gitDiff.deletedFiles,
   }
 
   if (previousReviewedCommit !== undefined) {

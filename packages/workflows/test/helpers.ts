@@ -89,6 +89,7 @@ export const makeSummarySnapshot = (
 ) => ({
   verdict: persistedState.verdict,
   summary: "Summary",
+  summaryOnlyFindings: [],
   unmappedNotes: [],
   severityCounts: persistedState.severityCounts,
   persistedState,

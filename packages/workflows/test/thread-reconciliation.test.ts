@@ -377,10 +377,20 @@ describe("thread reconciliation", () => {
     expect(closedThread && "existingThread" in closedThread ? closedThread.existingThread.id : undefined).toBe(3)
   })
 
-  test("skipped mode only updates the summary thread", () => {
+  test("skipped mode only closes an active failure notice", () => {
     const actions = reconcileThreads({
       managedThreads: decodeManagedThreads(
-        [makeManagedSummaryThread(), makeManagedFindingThread(makeReviewFinding(), 2)],
+        [
+          makeManagedSummaryThread(),
+          makeManagedFindingThread(makeReviewFinding(), 2),
+          {
+            id: 8,
+            status: 1,
+            comments: [
+              { id: 80, author: { id: BOT_ID }, content: 'Failed\n<!-- open-azdo-failure:{"kind":"failure"} -->' },
+            ],
+          },
+        ],
         BOT_ID,
       ),
       summaryContent: buildSummaryComment(makeSummarySnapshot()),
@@ -393,6 +403,7 @@ describe("thread reconciliation", () => {
     })
 
     expect(actions).toHaveLength(1)
-    expect(actions[0]?.type).toBe("upsert-summary")
+    expect(actions.map((action) => action.type)).toEqual(["close-thread"])
+    expect(actions[0]?.existingThread?.id).toBe(8)
   })
 })

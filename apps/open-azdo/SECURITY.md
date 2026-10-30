@@ -45,11 +45,11 @@ If required history is missing, `open-azdo` fails with a remediation message ins
 
 Each review run starts a short-lived, password-protected OpenCode server bound to `127.0.0.1` on a dynamically chosen port and shuts it down on exit. The generated `azdo-review` agent is deny-by-default:
 
-- read, glob, grep, and shell tools allowed
+- read, glob, grep, shell, and skill tools allowed
 - native edit and write tools denied; shell commands can still write files and run repository code
 - web fetch and web search denied
-- subagents and skills denied
-- native tools may access the workspace and this run's task directory; other external directories are denied
+- subagents denied
+- external-directory access allowed for dependency inspection, scratch verification, and saved tool output
 
 The reviewer may run Bash/Python scripts and targeted tests to verify findings. Repository `opencode.json` and `.opencode` content, including plugins, is loaded as usual. Use repositories whose contributors you trust and a CI workspace appropriate for executing their code; command permissions do not provide strong containment.
 
@@ -57,7 +57,9 @@ The server runs under the same operating-system identity as the CLI. Environment
 
 OpenCode is prompted through `@opencode/client`. V2 has no native structured output, so a run-scoped plugin registers a JSON-schema submission tool and the workflow reads the validated tool input. If no valid submission exists, the workflow attempts JSON repair on the text reply. An undecodable review fails without advancing the reviewed commit, preserving eligibility for a rerun. Only the optional summary pass can fall back to deterministic rendering, using the findings from an already validated review.
 
-OpenCode handles compaction normally; compaction alone does not invalidate a review. A scoped task file and a persistent system instruction let the agent recover its original task and Git refs, and patches remain available through per-file Git inspection. There is no separate review patch or prompt-size cap. Model/context limits, workflow timeouts, and Git process-output limits still apply. An actual main-review failure retains the previous checkpoint; a typed optional-summary failure can use deterministic rendering of the completed review.
+OpenCode handles compaction normally; compaction alone does not invalidate a review. A scoped task file and an additive instruction let the agent recover its original task and Git refs, and patches remain available through per-file Git inspection. Only the file copy is line-wrapped so native reads can recover long context through pagination. Prompt metadata may omit optional range/hunk detail with an explicit flag; paths and eligible reconciliation candidates remain complete. Git diff/status output is bounded at 64 MiB per stream and two minutes, while other commands retain their defaults. Model/context limits and workflow timeouts still apply. A typed optional-summary failure can use deterministic rendering of the completed review.
+
+This short-lived session finishes at its first completed turn and cannot resume background verification afterward. The runtime therefore converts shell requests with `background: true` to foreground execution, and the prompt supplies the configured overall time budget. This does not prevent scripts or targeted tests; their results must arrive before review submission.
 
 ## Azure DevOps Mutations
 
@@ -69,7 +71,7 @@ The only intended write surface is PR thread management:
 
 Managed state is accepted only from nondeleted comments authored by the identity authenticated by the current Azure token. Display names and marker text alone do not establish ownership. Changing the token's identity can therefore cause a fresh review instead of adopting another account's checkpoint.
 
-A failed first review uses a separate bot-owned failure marker with no reviewed commit. Retries update that notice, and a successful review reuses it for the managed summary. Operational failures point to pipeline logs rather than publishing stack traces.
+Operational failures always use a separate bot-owned failure marker with no reviewed commit. Retries update that notice without replacing the last completed summary. Successful reviews or same-commit skips resolve an active failure notice; skips do not rewrite the summary comment. Failures point to pipeline logs rather than publishing stack traces.
 
 Findings and thread-status changes are published before the summary's reviewed-commit checkpoint. A partial publication failure is surfaced as an operational failure, retains the previous checkpoint, and leaves the missing work eligible for a rerun. Identical findings already posted by that identity can be reused on retry.
 

@@ -41,6 +41,7 @@ import {
 } from "./ReviewSummary"
 import { buildReviewSummaryPrompt } from "./ReviewSummaryPrompt"
 import {
+  SKIPPED_REVIEW_SUMMARY,
   buildManagedReviewState,
   buildSummaryComment,
   decodeManagedThreads,
@@ -672,7 +673,9 @@ const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(fu
     { concurrency: "unbounded" },
   )
 
-  yield* logInfo(`Loaded review inputs for ${fullPullRequestDiff.changedFiles.length} changed file(s).`)
+  yield* logInfo(
+    `Loaded review inputs for ${fullPullRequestDiff.changedFiles.length + fullPullRequestDiff.deletedFiles.length} changed file(s).`,
+  )
 
   const managedThreads = decodeManagedThreads(existingThreads, authenticatedIdentity)
   const previousSummaryState = managedThreads.summary?.reviewState
@@ -690,14 +693,7 @@ const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(fu
   if (reviewMode === "skipped") {
     const previousSummaryState = scope.previousSummaryState
 
-    const summaryContent = buildSummaryComment({
-      verdict: previousSummaryState.verdict,
-      summary: "⏭️ No new commits since the last managed review. Previous verdict still applies.",
-      unmappedNotes: [],
-      severityCounts: previousSummaryState.severityCounts,
-      buildLink,
-      persistedState: previousSummaryState,
-    })
+    const summaryContent = SKIPPED_REVIEW_SUMMARY
 
     const actions = reconcileThreads({
       managedThreads,
@@ -788,9 +784,14 @@ const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(fu
     connectedWorkItems,
   })
 
-  yield* logInfo(`Built ${reviewMode} review context.`)
+  yield* logInfo(`Built ${reviewMode} review context.`, {
+    omittedThreads: reviewContext.pullRequestThreads?.omittedCount,
+    omittedWorkItems: reviewContext.connectedWorkItems?.omittedCount,
+    omittedHistoricalFindings: reviewContext.managedFindings?.omittedCount,
+    managedFindingCandidates: reviewContext.managedFindingCandidates?.items.length ?? 0,
+  })
 
-  const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext)
+  const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext, config.opencodeTimeout)
   yield* logInfo("Built review prompt.")
 
   const managedFindingCandidateIds = new Set(reviewContext.managedFindingCandidates?.items.map((item) => item.id) ?? [])
@@ -859,6 +860,7 @@ const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(fu
   const summaryContent = buildSummaryComment({
     verdict: summaryState.verdict,
     summary: renderedSummary,
+    summaryOnlyFindings: outstandingReviewResult.summaryOnlyFindings,
     unmappedNotes: outstandingReviewResult.unmappedNotes,
     severityCounts: summaryState.severityCounts,
     buildLink,

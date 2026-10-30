@@ -30,7 +30,7 @@ export type OpenCodeConfig = {
   >
   readonly plugins?: ReadonlyArray<{
     readonly package: string
-    readonly options: { readonly schema: Schema.JsonObject }
+    readonly options: { readonly schema?: Schema.JsonObject }
   }>
 }
 

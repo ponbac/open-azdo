@@ -185,13 +185,13 @@ const normalizeManagedFindingReconciliation = (
   } satisfies ReviewResult
 }
 
+/** Resolves Git paths and chooses placement by changed lines and confidence without discarding evidence. */
 export const normalizeReviewResult = (
   reviewResult: ReviewResult,
   changedLinesByFile: Map<string, Set<number>>,
   managedFindingCandidateIds: ReadonlySet<number> = new Set<number>(),
 ): NormalizedReviewResult => {
   const normalizedReviewResult = normalizeManagedFindingReconciliation(reviewResult, managedFindingCandidateIds)
-  const unmappedNotes = [...normalizedReviewResult.unmappedNotes]
   const inlineFindings: ReviewFinding[] = []
   const summaryOnlyFindings: ReviewFinding[] = []
 
@@ -205,13 +205,7 @@ export const normalizeReviewResult = (
     const changedLines = changedLinesByFile.get(finding.filePath)
     const isChangedLine = changedLines?.has(finding.line) ?? false
 
-    if (!changedLines || !isChangedLine) {
-      summaryOnlyFindings.push(finding)
-      unmappedNotes.push(renderUnmappedFinding(finding))
-      continue
-    }
-
-    if (finding.confidence === "low") {
+    if (!isChangedLine || finding.confidence === "low") {
       summaryOnlyFindings.push(finding)
       continue
     }
@@ -224,7 +218,7 @@ export const normalizeReviewResult = (
     findings,
     inlineFindings,
     summaryOnlyFindings,
-    unmappedNotes: uniqueNotes(unmappedNotes),
+    unmappedNotes: uniqueNotes(normalizedReviewResult.unmappedNotes),
   }
 }
 
@@ -242,9 +236,6 @@ export const countBySeverity = (findings: ReadonlyArray<ReviewFinding>) => {
 
   return counts
 }
-
-export const renderUnmappedFinding = (finding: ReviewFinding) =>
-  `${finding.title} (${finding.severity}, ${finding.confidence}) at ${finding.filePath}:${finding.line}`
 
 export const getFindingEndLine = (finding: ReviewFinding) => finding.endLine ?? finding.line
 

@@ -23,7 +23,8 @@ type MockStep = (
   | { readonly text: string }
   | { readonly status: number; readonly message: string }
   | { readonly hang: true }
-  | { readonly recoverTask: true }
+  | { readonly recoverTask: true; readonly offset?: number; readonly limit?: number }
+  | { readonly readSavedOutput: true; readonly offset: number; readonly limit: number }
 ) & { readonly inputTokens?: number }
 
 const usageChunk = (inputTokens = 11) => ({
@@ -89,14 +90,24 @@ const startMockProvider = () => {
       state.transcripts.push(transcript)
       state.authorizations.push(request.headers.get("authorization"))
       const scriptedStep = steps.shift() ?? { text: "Done." }
-      const taskPath = taskFileFromSystem(transcript)
+      let step: Exclude<MockStep, { readonly recoverTask: true } | { readonly readSavedOutput: true }>
 
-      const step: Exclude<MockStep, { readonly recoverTask: true }> =
-        "recoverTask" in scriptedStep
-          ? taskPath
-            ? { tool: "read", input: { path: taskPath } }
-            : { text: "No task recovery instructions were provided." }
-          : scriptedStep
+      if ("recoverTask" in scriptedStep || "readSavedOutput" in scriptedStep) {
+        const savedOutput = transcript.messages.findLast(
+          (message) => message.role === "tool" && message.content?.includes("full output saved to "),
+        )?.content
+
+        const path =
+          "recoverTask" in scriptedStep
+            ? taskFileFromSystem(transcript)
+            : /full output saved to (.+)\]/u.exec(savedOutput ?? "")?.[1]
+
+        step = path
+          ? { tool: "read", input: { path, offset: scriptedStep.offset ?? 1, limit: scriptedStep.limit ?? 2_000 } }
+          : { text: "No readable file was provided by the task or tool output." }
+      } else {
+        step = scriptedStep
+      }
 
       if ("hang" in step) {
         return new Promise<Response>(() => undefined)
@@ -150,6 +161,13 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     await mkdir(workspace, { recursive: true })
     await mkdir(join(root, "config/opencode"), { recursive: true })
     await writeFile(join(workspace, "example.txt"), "hello\n")
+    await mkdir(join(workspace, ".opencode/skills/review-proof"), { recursive: true })
+    await writeFile(
+      join(workspace, ".opencode/skills/review-proof/SKILL.md"),
+      "---\nname: review-proof\ndescription: Use this repo verification skill during review.\n---\nRepository skill proof sentinel.\n",
+    )
+    await mkdir(join(root, "scratch"), { recursive: true })
+    await writeFile(join(root, "scratch/external-evidence.txt"), "External file proof sentinel.\n")
     await Bun.$`git init -q`.cwd(workspace)
 
     // The provider stays in the isolated global config so the runtime's generated config is exercised unchanged.
@@ -273,6 +291,71 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     60_000,
   )
 
+  test("uses scratch cwd and native reads for external evidence and saved long shell output", async () => {
+    mock.state.script([
+      { tool: "read", input: { path: join(root, "scratch/external-evidence.txt") } },
+      {
+        tool: "shell",
+        input: {
+          workdir: join(root, "scratch"),
+          command: `python3 -c 'from pathlib import Path; assert Path.cwd().name == "scratch"; [print("saved-output-proof-sentinel" if i == 5000 else str(i) + "x"*100) for i in range(10000)]'`,
+        },
+      },
+      { readSavedOutput: true, offset: 4_999, limit: 5 },
+      submit(validResult),
+    ])
+
+    const result = await Effect.runPromise(run())
+
+    const outputs = mock.state.transcripts.flatMap((request) =>
+      request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+    )
+
+    expect(result.structured).toEqual(validResult)
+    expect(outputs.some((output) => output.includes("External file proof sentinel."))).toBe(true)
+    expect(outputs.some((output) => output.includes("5001: saved-output-proof-sentinel"))).toBe(true)
+  }, 60_000)
+
+  test("discovers and loads repository skills through the native skill tool", async () => {
+    mock.state.script([{ tool: "skill", input: { id: "review-proof" } }, submit(validResult)])
+
+    const result = await Effect.runPromise(run())
+
+    expect(result.structured).toEqual(validResult)
+    expect(mock.state.transcripts[0]?.messages.some((message) => message.content?.includes("review-proof"))).toBe(true)
+    expect(
+      mock.state.transcripts.some((request) =>
+        request.messages.some(
+          (message) => message.role === "tool" && message.content?.includes("Repository skill proof sentinel."),
+        ),
+      ),
+    ).toBe(true)
+  }, 60_000)
+
+  test("awaits background-requested verification before accepting a structured submission", async () => {
+    mock.state.script([
+      {
+        tool: "shell",
+        input: {
+          command: `python3 -c 'import time; time.sleep(2.5); print("foreground-proof-sentinel")'`,
+          background: true,
+          timeout: 10_000,
+        },
+      },
+      submit(validResult),
+    ])
+
+    const result = await Effect.runPromise(run())
+
+    const outputs = mock.state.transcripts.flatMap((request) =>
+      request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+    )
+
+    expect(result.structured).toEqual(validResult)
+    expect(outputs.some((output) => output.includes("foreground-proof-sentinel"))).toBe(true)
+    expect(outputs.some((output) => output.includes("Command moved to the background"))).toBe(false)
+  }, 60_000)
+
   test("omits Azure job credentials from the real server environment while preserving provider credentials", async () => {
     mock.state.script([submit(validResult)])
 
@@ -283,11 +366,23 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
   }, 60_000)
 
   test("recovers the original task through native read after mid-run compaction", async () => {
-    const prompt = "Original task scope sentinel: inspect example.txt and submit a review for the exact supplied refs."
+    const lateEvidence = {
+      baseRef: "base-ref-late-sentinel",
+      headRef: "head-ref-late-sentinel",
+      candidate: "candidate-late-sentinel",
+    }
+
+    const prompt =
+      "Original task scope sentinel: inspect the exact supplied refs.\n" +
+      JSON.stringify({ filler: "x".repeat(988) + "🚀".repeat(1_200) + "tail".repeat(1_000), ...lateEvidence })
+
     mock.state.script([
       { tool: "read", input: { path: "example.txt" }, inputTokens: 45_000 },
       { text: "## Objective\n- Continue reviewing.\n\n## Next Move\n1. Recover the original task." },
-      { recoverTask: true },
+      { recoverTask: true, offset: 1, limit: 3 },
+      { recoverTask: true, offset: 4, limit: 3 },
+      { recoverTask: true, offset: 7, limit: 3 },
+      { recoverTask: true, offset: 10, limit: 3 },
       submit(validResult),
       { text: "Done." },
     ])
@@ -311,15 +406,20 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
         ),
       ),
     ).toBe(true)
+
+    const recovered = afterCompaction
+      .flatMap((request) =>
+        request.messages.flatMap((message) => (message.role === "tool" && message.content ? [message.content] : [])),
+      )
+      .join("\n")
+
+    for (const sentinel of Object.values(lateEvidence)) expect(recovered).toContain(sentinel)
+    expect(recovered).toContain("open_azdo_submit_result")
+    expect(recovered).toContain("🚀")
+    expect(recovered).not.toContain("\uFFFD")
+    expect(recovered).not.toContain("line truncated to")
     expect(
-      afterCompaction.some((request) =>
-        request.messages.some(
-          (message) =>
-            message.role === "tool" &&
-            message.content?.includes(prompt) &&
-            message.content.includes("open_azdo_submit_result"),
-        ),
-      ),
+      mock.state.transcripts[0]?.messages.find((message) => message.role === "user")?.content?.startsWith(prompt),
     ).toBe(true)
     expect(taskPath).toBeDefined()
 

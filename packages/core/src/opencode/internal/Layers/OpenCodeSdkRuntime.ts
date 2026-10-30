@@ -581,14 +581,19 @@ export const decodePromptResult = ({
 }
 
 /**
- * Dependency-free server plugin that registers the structured output tool.
- * Its JSON Schema `input` gives the model the same validate-and-correct loop as
- * V1's native `format` option, and the validated input is read back from the
- * assistant message.
+ * The run-owned plugin keeps shell verification in the foreground: this private session ends at
+ * its first idle and cannot deliver later background results. When requested, it also registers
+ * the JSON-schema submission tool whose validated input is read back from the assistant message.
  */
-const STRUCTURED_OUTPUT_PLUGIN_SOURCE = `export default {
-  id: "open-azdo.structured-output",
+const REVIEW_PLUGIN_SOURCE = `export default {
+  id: "open-azdo.review",
   async setup(ctx) {
+    await ctx.tool.hook("execute.before", (event) => {
+      if (event.tool === "shell" && event.input?.background === true) {
+        event.input = { ...event.input, background: false }
+      }
+    })
+    if (!ctx.options.schema) return
     await ctx.tool.transform((editor) => {
       editor.add({
         name: ${JSON.stringify(OPEN_CODE_STRUCTURED_OUTPUT_TOOL)},
@@ -614,50 +619,34 @@ const STRUCTURED_OUTPUT_PROMPT = [
  */
 const prepareTask = Effect.fn("OpenCodeSdkRuntime.prepareTask")(
   function* (request: OpenCodeSdkPromptRequest, fileSystem: FileSystem.FileSystem) {
-    const agent = request.config.agents[request.agent]
-
-    if (!agent) {
-      return yield* toInvocationError({
-        message: `OpenCode agent "${request.agent}" is missing from the run configuration.`,
-      })
-    }
-
     const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "open-azdo-opencode-" })
     const taskPath = join(directory, "task.md")
     const recoveryPath = join(directory, "recovery.md")
 
     const recovery = [
       `Task file: ${JSON.stringify(taskPath)}`,
-      "Read this file before starting. After compaction, read it again as needed to recover the original task, scope, and output requirements.",
+      "Read this file after compaction or when the original task is no longer visible. Its text is line-wrapped; paginate with the read tool's offset to recover the complete task, scope, and output requirements.",
     ].join("\n")
 
     const config: Types.Mutable<OpenCodeConfig> = {
       ...request.config,
       instructions: [...(request.config.instructions ?? []), recoveryPath],
-      agents: {
-        ...request.config.agents,
-        [request.agent]: {
-          ...agent,
-          permissions: [
-            ...agent.permissions,
-            { action: "external_directory", resource: `${directory.replaceAll("\\", "/")}/*`, effect: "allow" },
-          ],
-        },
-      },
     }
 
+    const options: Types.Mutable<NonNullable<OpenCodeConfig["plugins"]>[number]["options"]> = {}
     let prompt = request.prompt
 
     if (request.format?.type === "json_schema") {
-      yield* fileSystem.writeFileString(join(directory, "index.js"), STRUCTURED_OUTPUT_PLUGIN_SOURCE)
-      config.plugins = [
-        ...(request.config.plugins ?? []),
-        { package: directory, options: { schema: request.format.schema } },
-      ]
+      options.schema = request.format.schema
       prompt = `${prompt}\n\n${STRUCTURED_OUTPUT_PROMPT}`
     }
 
-    yield* fileSystem.writeFileString(taskPath, prompt)
+    // Install the foreground hook for text requests too; only the submission tool needs a schema.
+    config.plugins = [...(request.config.plugins ?? []), { package: directory, options }]
+    yield* fileSystem.writeFileString(join(directory, "index.js"), REVIEW_PLUGIN_SOURCE)
+    // Native read clips at 2,000 UTF-16 units per line. Unicode mode preserves astral code points;
+    // wrapping only this saved copy keeps both the actual model prompt and captured prompt unchanged.
+    yield* fileSystem.writeFileString(taskPath, prompt.replace(/[^\n]{1000}/gu, "$&\n"))
     yield* fileSystem.writeFileString(recoveryPath, recovery)
 
     return { config, prompt }
@@ -665,12 +654,10 @@ const prepareTask = Effect.fn("OpenCodeSdkRuntime.prepareTask")(
   (effect) =>
     effect.pipe(
       Effect.mapError((error) =>
-        error instanceof OpenCodeInvocationError
-          ? error
-          : toInvocationError({
-              message: "Failed to prepare the OpenCode task and output plugin.",
-              detail: formatUnknownDetail(error),
-            }),
+        toInvocationError({
+          message: "Failed to prepare the OpenCode task and review plugin.",
+          detail: formatUnknownDetail(error),
+        }),
       ),
     ),
 )

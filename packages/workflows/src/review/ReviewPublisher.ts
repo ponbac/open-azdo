@@ -37,13 +37,6 @@ export type PublishReviewResult = {
   readonly summaryContent: string
 }
 
-const EMPTY_SEVERITY_COUNTS = {
-  low: 0,
-  medium: 0,
-  high: 0,
-  critical: 0,
-} as const
-
 const createInlineThreadContext = (finding: ReviewFinding) => ({
   // Normalization already resolved the exact Git path; backslashes can be filename characters.
   filePath: `/${finding.filePath}`,
@@ -170,7 +163,7 @@ export const publishReview = Effect.fn("ReviewPublisher.publishReview")(function
   return { actions, summaryContent }
 })
 
-/** Reports failure using the previously committed state from the caller's fresh trusted listing. */
+/** Reports failure in its own authenticated notice, leaving the committed summary untouched. */
 export const publishFailureSummary = Effect.fn("ReviewPublisher.publishFailureSummary")(function* ({
   context,
   token,
@@ -181,14 +174,11 @@ export const publishFailureSummary = Effect.fn("ReviewPublisher.publishFailureSu
 }: PublishFailureSummaryInput) {
   const client = yield* AzureDevOpsClient
 
-  const existingSummary = managedThreads.summary ?? managedThreads.failure
+  const existingFailure = managedThreads.failure
 
   const summaryContent = buildFailureSummaryComment({
     summary: `Review execution failed.\n\n${failureReason}`,
-    unmappedNotes: [],
-    severityCounts: EMPTY_SEVERITY_COUNTS,
     buildLink,
-    persistedState: managedThreads.summary?.reviewState,
   })
 
   if (!dryRun) {
@@ -197,8 +187,8 @@ export const publishFailureSummary = Effect.fn("ReviewPublisher.publishFailureSu
       context,
       token,
       summaryContent,
-      existingSummary?.thread,
-      existingSummary?.commentId,
+      existingFailure?.thread,
+      existingFailure?.commentId,
       false,
     )
   }

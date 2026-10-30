@@ -306,6 +306,77 @@ const extractCommentContent = (body: BodyInit | null | undefined) => {
   return parsed.content ?? parsed.comments?.[0]?.content ?? ""
 }
 
+/** Records accepted Azure thread writes so retries observe real prior mutations through listThreads. */
+const makeThreadStore = (
+  initialThreads: ReadonlyArray<TestThread> = [],
+  rejectWrite?: (
+    url: string,
+    init: RequestInit,
+    body: Schema.Schema.Type<typeof AzureRequestBodySchema>,
+  ) => Response | undefined,
+) => {
+  let threads = [...initialThreads]
+  let nextThreadId = Math.max(0, ...threads.map((thread) => thread.id)) + 1
+
+  return {
+    get threads() {
+      return threads
+    },
+    handle: (url: string, init: RequestInit | undefined): Response | undefined => {
+      if (url.endsWith("/threads?api-version=7.1") && init?.method === "GET") {
+        return makeThreadsResponse(threads)
+      }
+
+      if (!init || (init.method !== "POST" && init.method !== "PATCH")) return undefined
+
+      const body = parseRequestBody(init.body)
+      const rejected = rejectWrite?.(url, init, body)
+
+      if (rejected) return rejected
+
+      if (url.endsWith("/threads?api-version=7.1") && init.method === "POST") {
+        const id = nextThreadId++
+
+        const thread: TestThread = {
+          id,
+          status: body.status ?? 1,
+          comments: [
+            {
+              id: id * 10,
+              content: body.comments?.[0]?.content ?? "",
+              author: { id: BOT_ID, displayName: "Open AZDO" },
+            },
+          ],
+        }
+
+        threads.push(body.threadContext ? { ...thread, threadContext: body.threadContext } : thread)
+
+        return Response.json({ id })
+      }
+
+      const target = new URL(url).pathname.match(/\/threads\/(\d+)(?:\/comments\/(\d+))?$/)
+
+      if (!target || init.method !== "PATCH") return undefined
+
+      const threadId = Number(target[1])
+      const commentId = target[2] ? Number(target[2]) : undefined
+      threads = threads.map((thread) =>
+        thread.id !== threadId
+          ? thread
+          : {
+              ...thread,
+              status: body.status ?? thread.status,
+              comments: thread.comments.map((comment) =>
+                comment.id === commentId ? { ...comment, content: body.content ?? comment.content } : comment,
+              ),
+            },
+      )
+
+      return Response.json({ id: threadId })
+    },
+  }
+}
+
 const runReview = (
   repoDir: string,
   env: Record<string, string>,
@@ -451,9 +522,9 @@ const runReviewScenario = async ({
 }
 
 describe("e2e", () => {
-  test("updates one first-review failure thread across retries and reuses it after recovery", async () => {
+  test("updates one failure-only thread across retries and closes it after recovery", async () => {
     let failReview = true
-    let threads: TestThread[] = []
+    const store = makeThreadStore()
 
     const run = () =>
       runReviewScenario({
@@ -468,66 +539,23 @@ describe("e2e", () => {
         capturePrompt: true,
         buildPullRequestResponse: () =>
           Response.json({ title: "Feature PR", description: "Adds a new export", workItemRefs: [] }),
-        buildThreadsResponse: () => makeThreadsResponse(threads),
-        buildExtraResponse: (url, init) => {
-          const body = parseRequestBody(init?.body)
-
-          if (url.endsWith("/threads?api-version=7.1") && init?.method === "POST") {
-            const id = threads.length + 1
-
-            threads.push({
-              id,
-              status: body.status ?? 1,
-              comments: [
-                {
-                  id: id * 10,
-                  content: body.comments?.[0]?.content ?? "",
-                  author: { id: BOT_ID, displayName: "Open AZDO" },
-                },
-              ],
-            })
-
-            return Response.json({ id })
-          }
-
-          const target = new URL(url).pathname.match(/\/threads\/(\d+)(?:\/comments\/(\d+))?$/)
-
-          if (target && init?.method === "PATCH") {
-            const threadId = Number(target[1])
-            const commentId = target[2] ? Number(target[2]) : undefined
-
-            threads = threads.map((thread) =>
-              thread.id !== threadId
-                ? thread
-                : {
-                    ...thread,
-                    status: body.status ?? thread.status,
-                    comments: thread.comments.map((comment) =>
-                      comment.id === commentId ? { ...comment, content: body.content ?? comment.content } : comment,
-                    ),
-                  },
-            )
-
-            return Response.json({ id: threadId })
-          }
-
-          return undefined
-        },
+        buildThreadsResponse: () => makeThreadsResponse(store.threads),
+        buildExtraResponse: store.handle,
       })
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const result = await run()
-      const content = threads[0]?.comments[0]?.content ?? ""
+      const content = store.threads[0]?.comments[0]?.content ?? ""
 
       expect(result.exitCode).toBe(1)
       expect(result.prompt).toBeDefined()
-      expect(threads).toHaveLength(1)
-      expect(threads[0]?.status).toBe(1)
+      expect(store.threads).toHaveLength(1)
+      expect(store.threads[0]?.status).toBe(1)
       expect(content).toContain("See the pipeline logs for details.")
       expect(content).not.toContain("reviewedCommit")
     }
 
-    const failureContent = threads[0]?.comments[0]?.content ?? ""
+    const failureContent = store.threads[0]?.comments[0]?.content ?? ""
 
     expect(failureContent).not.toContain("ReviewWorkflow.ts:")
     expect(failureContent).not.toContain("/home/")
@@ -538,9 +566,10 @@ describe("e2e", () => {
 
     expect(recovered.exitCode).toBe(0)
     expect(recovered.prompt).not.toContain("Review execution failed.")
-    expect(threads).toHaveLength(1)
-    expect(threads[0]?.status).toBe(2)
-    expect(threads[0]?.comments[0]?.content).toContain(`"reviewedCommit":"${recovered.fixture.featureSha}"`)
+    expect(store.threads).toHaveLength(2)
+    expect(store.threads[0]?.status).toBe(2)
+    expect(store.threads[0]?.comments[0]?.content).toBe(failureContent)
+    expect(store.threads[1]?.comments[0]?.content).toContain(`"reviewedCommit":"${recovered.fixture.featureSha}"`)
   })
 
   test.each(["scoped patch", "complete prompt"] as const)(
@@ -571,7 +600,7 @@ describe("e2e", () => {
       const content = extractCommentContent(summaryUpdate?.init?.body)
 
       expect(result.exitCode).toBe(0)
-      expect(result.prompt).toContain("git diff --no-ext-diff --no-textconv")
+      expect(result.prompt).toContain("git diff --find-renames --no-ext-diff --no-textconv")
       expect(result.prompt).toContain('"path":"src/example.ts"')
       expect(result.prompt).not.toContain("diff --git")
       expect(result.summaryPrompt).toBeUndefined()
@@ -645,8 +674,6 @@ describe("e2e", () => {
         }),
       )
 
-      let threads: TestThread[] = [initialSummary]
-      let nextThreadId = 2
       let rejectOnce = true
       let findingCreates = 0
       let reviewRuns = 0
@@ -665,6 +692,33 @@ describe("e2e", () => {
         unmappedNotes: [],
       })
 
+      const store = makeThreadStore([initialSummary], (url, init, body) => {
+        const content = body.comments?.[0]?.content ?? ""
+
+        if (init.method === "POST" && content.includes("<!-- open-azdo:")) {
+          findingCreates += 1
+
+          if (failurePoint === "second finding" && rejectOnce && content.includes("Second finding")) {
+            rejectOnce = false
+
+            return Response.json({ message: "Second finding rejected" }, { status: 400 })
+          }
+        }
+
+        if (
+          failurePoint === "summary status" &&
+          rejectOnce &&
+          init.method === "PATCH" &&
+          url.endsWith("/threads/1?api-version=7.1")
+        ) {
+          rejectOnce = false
+
+          return Response.json({ message: "Summary status rejected" }, { status: 400 })
+        }
+
+        return undefined
+      })
+
       const env = { ...makeBaseEnv(), BUILD_SOURCESDIRECTORY: fixture.repoDir }
 
       const { fetchMock, calls } = makeFetchMock((url, init) => {
@@ -676,69 +730,7 @@ describe("e2e", () => {
           return Response.json({ title: "Feature PR", description: "Adds exports", workItemRefs: [] })
         }
 
-        if (url.endsWith("/threads?api-version=7.1") && init?.method === "GET") {
-          return makeThreadsResponse(threads)
-        }
-
-        const body = parseRequestBody(init?.body)
-
-        if (url.endsWith("/threads?api-version=7.1") && init?.method === "POST") {
-          const content = body.comments?.[0]?.content ?? ""
-
-          if (content.includes("<!-- open-azdo:")) {
-            findingCreates += 1
-
-            if (failurePoint === "second finding" && rejectOnce && content.includes("Second finding")) {
-              rejectOnce = false
-
-              return Response.json({ message: "Second finding rejected" }, { status: 400 })
-            }
-          }
-
-          const id = nextThreadId++
-
-          const thread: TestThread = {
-            id,
-            status: body.status ?? 1,
-            comments: [{ id: id * 10, content, author: { id: BOT_ID, displayName: "Open AZDO" } }],
-          }
-
-          threads.push(body.threadContext ? { ...thread, threadContext: body.threadContext } : thread)
-
-          return Response.json({ id })
-        }
-
-        const target = new URL(url).pathname.match(/\/threads\/(\d+)(?:\/comments\/(\d+))?$/)
-
-        if (target && init?.method === "PATCH") {
-          const threadId = Number(target[1])
-          const commentId = target[2] ? Number(target[2]) : undefined
-
-          if (failurePoint === "summary status" && rejectOnce && threadId === 1 && commentId === undefined) {
-            rejectOnce = false
-
-            return Response.json({ message: "Summary status rejected" }, { status: 400 })
-          }
-
-          threads = threads.map((thread) => {
-            if (thread.id !== threadId) return thread
-
-            if (commentId !== undefined) {
-              return {
-                ...thread,
-                comments: thread.comments.map((comment) =>
-                  comment.id === commentId ? { ...comment, content: body.content ?? comment.content } : comment,
-                ),
-              }
-            }
-
-            return { ...thread, status: body.status ?? thread.status }
-          })
-
-          return Response.json({ id: threadId })
-        }
-
-        return Response.json({})
+        return store.handle(url, init) ?? Response.json({})
       })
 
       const run = () =>
@@ -756,20 +748,182 @@ describe("e2e", () => {
 
       try {
         expect(await run()).toBe(1)
-        const failedSummary = threads.find((thread) => thread.id === 1)?.comments[0]?.content ?? ""
+        const failedSummary = store.threads.find((thread) => thread.id === 1)?.comments[0]?.content ?? ""
+        expect(failedSummary).toBe(initialSummary.comments[0]?.content ?? "")
+
+        const failureNotice = store.threads.find((thread) =>
+          thread.comments[0]?.content.includes("<!-- open-azdo-failure:"),
+        )
+
+        expect(failureNotice?.status).toBe(1)
+        expect(failureNotice?.comments[0]?.content).not.toContain("reviewedCommit")
         expect(failedSummary).toContain(`"reviewedCommit":"${fixture.mainSha}"`)
         expect(failedSummary).not.toContain(`"reviewedCommit":"${fixture.featureSha}"`)
-        expect(threads.filter((thread) => thread.comments[0]?.content.includes("<!-- open-azdo:"))).toHaveLength(
+        expect(store.threads.filter((thread) => thread.comments[0]?.content.includes("<!-- open-azdo:"))).toHaveLength(
           failurePoint === "second finding" ? 1 : 2,
         )
 
         expect(await run()).toBe(0)
+        expect(store.threads.find((thread) => thread.id === failureNotice?.id)?.status).toBe(2)
         expect(reviewRuns).toBe(2)
         expect(findingCreates).toBe(failurePoint === "second finding" ? 3 : 2)
-        expect(threads.filter((thread) => thread.comments[0]?.content.includes("<!-- open-azdo:"))).toHaveLength(2)
-        const finalSummary = threads.find((thread) => thread.id === 1)?.comments[0]?.content ?? ""
+        expect(store.threads.filter((thread) => thread.comments[0]?.content.includes("<!-- open-azdo:"))).toHaveLength(
+          2,
+        )
+        const finalSummary = store.threads.find((thread) => thread.id === 1)?.comments[0]?.content ?? ""
         expect(finalSummary).toContain(`"reviewedCommit":"${fixture.featureSha}"`)
         expect(calls.filter((call) => call.url.endsWith("/_apis/connectionData"))).toHaveLength(2)
+      } finally {
+        await rm(fixture.repoDir, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test.each(["model summary", "fallback"] as const)(
+    "preserves complete summary-only evidence with %s through failures and skips",
+    async (summaryMode) => {
+      const fixture = await createFixtureRepo()
+      const store = makeThreadStore()
+      let failMetadata = false
+      let reviewRuns = 0
+      let summaryPrompt = ""
+
+      const { fetchMock, calls } = makeFetchMock((url, init) => {
+        if (url.endsWith("/_apis/connectionData")) return Response.json({ authenticatedUser: { id: BOT_ID } })
+
+        if (url.includes("/pullRequests/42?includeWorkItemRefs=true")) {
+          return failMetadata
+            ? Response.json({ message: "Unavailable" }, { status: 500 })
+            : Response.json({ title: "Feature PR", description: "Adds exports", workItemRefs: [] })
+        }
+
+        return store.handle(url, init) ?? Response.json({})
+      })
+
+      const output = makePromptResponse({
+        verdict: "concerns",
+        findings: [
+          {
+            severity: "high",
+            confidence: "high",
+            title: "Inline issue",
+            body: "Inline evidence",
+            filePath: "src/example.ts",
+            line: 2,
+          },
+          {
+            severity: "medium",
+            confidence: "high",
+            title: "Off-diff issue",
+            body: "OFF_DIFF_EVIDENCE",
+            suggestion: "return fixedOffDiff",
+            filePath: "src/example.ts",
+            line: 99,
+          },
+          {
+            severity: "low",
+            confidence: "low",
+            title: "Low-confidence issue",
+            body: "LOW_CONFIDENCE_EVIDENCE",
+            suggestion: "return fixedLowConfidence",
+            filePath: "src/example.ts",
+            line: 2,
+          },
+        ],
+        resolvedManagedFindingIds: [],
+        unmappedNotes: ["GENUINE_UNLOCATED_NOTE"],
+      })
+
+      const summary: ReviewScript =
+        summaryMode === "fallback"
+          ? { type: "success", output: { response: "{}{}" } }
+          : {
+              type: "success",
+              output: makePromptResponse({
+                highlights: [
+                  {
+                    subjectIds: [
+                      "inline-finding-1",
+                      "summary-only-finding-1",
+                      "summary-only-finding-2",
+                      "unmapped-note-1",
+                    ],
+                    text: "A concise grouped overview.",
+                  },
+                ],
+              }),
+            }
+
+      const run = () =>
+        runReview(
+          fixture.repoDir,
+          { ...makeBaseEnv(), BUILD_SOURCESDIRECTORY: fixture.repoDir },
+          fetchMock,
+          { review: { type: "success", output }, summary },
+          (prompt, pass) => {
+            if (pass === "review") reviewRuns += 1
+            else summaryPrompt = prompt
+          },
+        )
+
+      try {
+        expect(await run()).toBe(0)
+        const completed = store.threads.find((thread) => thread.comments[0]?.content.includes("<!-- open-azdo-review:"))
+        const completedContent = completed?.comments[0]?.content ?? ""
+
+        for (const evidence of [
+          "OFF_DIFF_EVIDENCE",
+          "LOW_CONFIDENCE_EVIDENCE",
+          "return fixedOffDiff",
+          "return fixedLowConfidence",
+          "GENUINE_UNLOCATED_NOTE",
+        ]) {
+          expect(completedContent.split(evidence)).toHaveLength(2)
+        }
+
+        expect(completedContent).toContain("**Off-diff issue**")
+        expect(completedContent).toContain("`src/example.ts:99`")
+        expect(completedContent).toContain("**Severity:** medium")
+        expect(completedContent).toContain("**Confidence:** low")
+        expect(completedContent).toContain("3 findings and 1 summary-only note")
+        expect(completedContent).toContain('"findingsCount":3')
+        expect(completedContent).toContain('"inlineFindingsCount":1')
+        expect(completedContent).toContain('"unmappedNotesCount":1')
+        expect(completedContent).toContain("high 1, medium 1, low 1")
+        expect(summaryPrompt.match(/"id":/g)).toHaveLength(4)
+        expect(store.threads.filter((thread) => thread.threadContext)).toHaveLength(1)
+        expect(completedContent).not.toContain("<!-- open-azdo:")
+
+        const beforeSkip = calls.length
+        expect(await run()).toBe(0)
+        expect(reviewRuns).toBe(1)
+        expect(
+          calls.slice(beforeSkip).filter((call) => call.init?.method === "POST" || call.init?.method === "PATCH"),
+        ).toEqual([])
+        expect(store.threads.find((thread) => thread.id === completed?.id)?.comments[0]?.content).toBe(completedContent)
+
+        failMetadata = true
+        expect(await run()).toBe(1)
+        expect(await run()).toBe(1)
+        expect(store.threads.find((thread) => thread.id === completed?.id)?.comments[0]?.content).toBe(completedContent)
+
+        const failures = store.threads.filter((thread) =>
+          thread.comments[0]?.content.includes("<!-- open-azdo-failure:"),
+        )
+
+        expect(failures).toHaveLength(1)
+        expect(failures[0]?.status).toBe(1)
+        expect(failures[0]?.comments[0]?.content).not.toContain("reviewedCommit")
+
+        failMetadata = false
+        const beforeRecovery = calls.length
+        expect(await run()).toBe(0)
+        expect(reviewRuns).toBe(1)
+        expect(store.threads.find((thread) => thread.id === failures[0]?.id)?.status).toBe(2)
+        expect(
+          calls.slice(beforeRecovery).filter((call) => call.init?.method === "POST" || /\/comments\//.test(call.url)),
+        ).toEqual([])
+        expect(store.threads.find((thread) => thread.id === completed?.id)?.comments[0]?.content).toBe(completedContent)
       } finally {
         await rm(fixture.repoDir, { recursive: true, force: true })
       }
@@ -794,7 +948,7 @@ describe("e2e", () => {
     expect(result.exitCode).toBe(0)
     expect(result.calls.filter((call) => call.init?.method === "POST")).toHaveLength(2)
     expect(result.prompt).toContain('"changedFiles"')
-    expect(result.prompt).toContain("git diff --no-ext-diff --no-textconv")
+    expect(result.prompt).toContain("git diff --find-renames --no-ext-diff --no-textconv")
     expect(result.prompt).toContain('"path":"src/example.ts"')
     expect(result.prompt).not.toContain("diff --git")
     expect(result.summaryPrompt).toContain('"id":"inline-finding-1"')
@@ -961,7 +1115,7 @@ describe("e2e", () => {
     expect(result.prompt).not.toContain("Policy status has been updated")
   })
 
-  test("skips same-commit reruns and only updates the managed summary thread", async () => {
+  test("skips same-commit reruns without rewriting the managed summary", async () => {
     const result = await runReviewScenario({
       opencode: {
         review: {
@@ -994,14 +1148,9 @@ describe("e2e", () => {
         ]),
     })
 
-    const summaryUpdate = result.calls.find((call) => call.url.endsWith("/threads/1/comments/10?api-version=7.1"))
-    const summaryContent = extractCommentContent(summaryUpdate?.init?.body)
-
     expect(result.exitCode).toBe(0)
-    expect(result.calls.filter((call) => call.init?.method === "PATCH")).toHaveLength(2)
-    expect(result.calls.filter((call) => call.init?.method === "POST")).toHaveLength(0)
-    expect(summaryContent).toContain("$0.1234")
-    expect(summaryContent).not.toContain("$0.0456")
+    expect(result.calls.filter((call) => call.init?.method === "PATCH")).toEqual([])
+    expect(result.calls.filter((call) => call.init?.method === "POST")).toEqual([])
   })
 
   test("reruns a full review when the stored managed-review base differs", async () => {
@@ -1174,19 +1323,21 @@ describe("e2e", () => {
       })
 
       const summaryUpdate = result.calls.find(
-        (call) => call.init?.method === "PATCH" && call.url.endsWith("/threads/1/comments/10?api-version=7.1"),
+        (call) => call.init?.method === "PATCH" && /\/threads\/1(?:\/comments\/10)?\?/.test(call.url),
       )
 
-      const content = extractCommentContent(summaryUpdate?.init?.body)
+      const failureCreate = result.calls.find(
+        (call) => call.init?.method === "POST" && call.url.endsWith("/threads?api-version=7.1"),
+      )
+
+      const content = extractCommentContent(failureCreate?.init?.body)
 
       expect(result.exitCode).toBe(1)
       expect(result.summaryPrompt).toBeUndefined()
+      expect(summaryUpdate).toBeUndefined()
       expect(content).toContain("Verdict: **fail**")
-      expect(content).toContain(`"reviewedCommit":"${result.fixture.mainSha}"`)
-      expect(content).not.toContain(`"reviewedCommit":"${result.fixture.featureSha}"`)
-      expect(
-        result.calls.filter((call) => call.init?.method === "POST" && call.url.endsWith("/threads?api-version=7.1")),
-      ).toEqual([])
+      expect(content).toContain("<!-- open-azdo-failure:")
+      expect(content).not.toContain("reviewedCommit")
     },
   )
 
@@ -1343,7 +1494,7 @@ describe("e2e", () => {
       expect(prompt).toContain("This is a full pull-request review over the scoped changed files.")
       expect(prompt).not.toContain("This is a follow-up review.")
       expect(prompt).toContain('"path":"src/example.ts"')
-      expect(prompt).toContain("git diff --no-ext-diff --no-textconv")
+      expect(prompt).toContain("git diff --find-renames --no-ext-diff --no-textconv")
       expect(prompt).toContain(`"baseRef":"${fixture.targetSha}"`)
       expect(prompt).toContain('"headRef":"HEAD"')
       expect(prompt).not.toContain("open-azdo.yaml")

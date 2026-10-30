@@ -1,13 +1,18 @@
-import { Effect } from "effect"
+import { Duration, Effect } from "effect"
 
-import { MissingGitHistoryError } from "../errors"
+import { GitCommandError, MissingGitHistoryError } from "../errors"
 import { GitExec } from "./Services/GitExec"
 
 export type PullRequestDiff = {
   readonly baseRef: string
   readonly headRef: string
   readonly diffText: string
+  /** Non-deleted paths from Git status metadata, including files without textual hunks. */
   readonly changedFiles: string[]
+  /** Whole-file deletions from Git status metadata, including files with no textual hunks. */
+  readonly deletedFiles: string[]
+  /** Renamed destination to its previous path. */
+  readonly renamedFromByFile: ReadonlyMap<string, string>
   readonly changedLinesByFile: Map<string, Set<number>>
   readonly deletedLinesByFile: Map<string, Set<number>>
 }
@@ -384,36 +389,103 @@ export const hasTargetMergeCommitInRange = ({
     return false
   })
 
+/** Decodes Git's NUL status records once; renames consume two exact path fields. */
+const parseDiffStatus = Effect.fn("Git.parseDiffStatus")(function* (output: string, workspace: string) {
+  const fields = output.split("\0")
+  const changedFiles: string[] = []
+  const deletedFiles: string[] = []
+  const renamedFromByFile = new Map<string, string>()
+
+  const invalidMetadata = new GitCommandError({
+    operation: "Git.resolveDiffRange.fileStatus",
+    command: "git diff --name-status -z --find-renames",
+    cwd: workspace,
+    detail: "Git returned malformed NUL-delimited file-status metadata.",
+  })
+
+  if (fields.pop() !== "") {
+    return yield* invalidMetadata
+  }
+
+  let index = 0
+
+  while (index < fields.length) {
+    const status = fields[index]
+    const sourcePath = fields[index + 1]
+
+    if (
+      status === undefined ||
+      !/^(?:[ADMTUXB]|[RM]\d{1,3})$/.test(status) ||
+      sourcePath === undefined ||
+      sourcePath === ""
+    ) {
+      return yield* invalidMetadata
+    }
+
+    index += 2
+
+    if (status.startsWith("R")) {
+      const destinationPath = fields[index]
+
+      if (destinationPath === undefined || destinationPath === "") {
+        return yield* invalidMetadata
+      }
+
+      index += 1
+      changedFiles.push(destinationPath)
+
+      renamedFromByFile.set(destinationPath, sourcePath)
+    } else if (status === "D") {
+      deletedFiles.push(sourcePath)
+    } else {
+      changedFiles.push(sourcePath)
+    }
+  }
+
+  return { changedFiles, deletedFiles, renamedFromByFile }
+})
+
+/** Collects bounded patch data and authoritative file identities for one commit range. */
 export const resolveDiffRange = ({ workspace, baseRef, headRef }: ResolveDiffRangeInput) =>
   Effect.gen(function* () {
-    const diff = yield* runGit(workspace, "Git.resolveDiffRange.diff", [
-      "-c",
-      "core.quotePath=false",
-      "-c",
-      "diff.suppressBlankEmpty=false",
-      "diff",
-      // The parser owns canonical a/b headers independently of the checkout's diff preferences.
-      "--src-prefix=a/",
-      "--dst-prefix=b/",
-      "--no-ext-diff",
-      "--no-textconv",
-      "--unified=3",
-      "--find-renames",
-      "--no-color",
-      baseRef,
-      headRef,
-    ])
+    const git = yield* GitExec
 
-    const changedFilesOutput = yield* runGit(workspace, "Git.resolveDiffRange.changedFiles", [
-      "diff",
-      "--name-only",
-      "-z",
-      "--diff-filter=ACMRT",
-      baseRef,
-      headRef,
-    ])
+    // Patch and path metadata grow with the review range; short ref/history commands retain their defaults.
+    const diffOptions = {
+      cwd: workspace,
+      maxOutputBytes: 64 * 1024 * 1024,
+      timeout: Duration.minutes(2),
+    }
 
-    const changedFiles = changedFilesOutput.stdout.split("\0").filter(Boolean)
+    const diff = yield* git.execute({
+      ...diffOptions,
+      operation: "Git.resolveDiffRange.diff",
+      args: [
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "diff",
+        // The parser owns canonical a/b headers independently of the checkout's diff preferences.
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--unified=3",
+        "--find-renames",
+        "--no-color",
+        baseRef,
+        headRef,
+      ],
+    })
+
+    const fileStatus = yield* git.execute({
+      ...diffOptions,
+      operation: "Git.resolveDiffRange.fileStatus",
+      args: ["diff", "--name-status", "-z", "--find-renames", baseRef, headRef],
+    })
+
+    const { changedFiles, deletedFiles, renamedFromByFile } = yield* parseDiffStatus(fileStatus.stdout, workspace)
 
     const { changedLinesByFile, deletedLinesByFile } = parseDiff(diff.stdout)
 
@@ -422,6 +494,8 @@ export const resolveDiffRange = ({ workspace, baseRef, headRef }: ResolveDiffRan
       headRef,
       diffText: diff.stdout,
       changedFiles,
+      deletedFiles,
+      renamedFromByFile,
       changedLinesByFile,
       deletedLinesByFile,
     } satisfies PullRequestDiff

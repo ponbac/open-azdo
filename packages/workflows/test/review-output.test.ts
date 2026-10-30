@@ -105,7 +105,8 @@ describe("review output", () => {
 
     expect(result.inlineFindings).toHaveLength(0)
     expect(result.summaryOnlyFindings).toHaveLength(1)
-    expect(result.unmappedNotes[0]).toContain("Old line")
+    expect(result.unmappedNotes).toEqual([])
+    expect(result.summaryOnlyFindings[0]?.body).toBe("Body")
   })
 
   test("trims and drops blank unmapped notes during normalization", async () => {

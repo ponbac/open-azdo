@@ -262,7 +262,7 @@ describe("opencode", () => {
     expect(permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" })
     expect(permissions.slice(1).every((rule) => rule.effect === "allow")).toBe(true)
     expect(new Set(permissions.slice(1).map((rule) => rule.action))).toEqual(
-      new Set(["read", "glob", "grep", "shell", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
+      new Set(["read", "glob", "grep", "shell", "external_directory", "skill", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
     )
     expect(permissions.find((rule) => rule.action === "shell")).toEqual({
       action: "shell",

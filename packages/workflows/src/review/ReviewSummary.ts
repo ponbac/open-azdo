@@ -305,7 +305,8 @@ export const renderReviewSummaryFromHighlights = ({
 
 /**
  * Renders the plain fallback summary used when the summary pass is skipped or rejected.
- * The output is intentionally simple and can only mention the validated subject list.
+ * Only inline and retained findings need short bullets here; final comment composition renders
+ * complete summary-only findings and genuine notes once, independently of the highlights.
  */
 export const renderReviewSummaryFallback = ({
   verdict,
@@ -322,7 +323,14 @@ export const renderReviewSummaryFallback = ({
     return overview
   }
 
-  return `${overview}\n\n${subjects.map((subject) => `- ${renderSubjectFallbackText(subject)}`).join("\n")}`
+  // Complete summary-only evidence and genuine notes are rendered once by the final comment owner.
+  const highlights = subjects.flatMap((subject) =>
+    subject.kind === "inline-finding" || subject.kind === "carried-forward-finding"
+      ? [`- ${renderSubjectFallbackText(subject)}`]
+      : [],
+  )
+
+  return highlights.length > 0 ? `${overview}\n\n${highlights.join("\n")}` : overview
 }
 
 export const validateReviewSummaryPassOutput = ({

@@ -3,9 +3,10 @@ import { describe, expect, test } from "bun:test"
 import type { ExistingThread } from "@open-azdo/azdo/schemas"
 import { type PullRequestDiff } from "@open-azdo/core/git"
 import { buildReviewContext } from "../src/review/ReviewContext"
+import { normalizeReviewResult } from "../src/review/ReviewOutput"
 
 import { decodeManagedThreads } from "../src/review/ThreadReconciliation"
-import { BOT_ID, makeManagedSummaryThread } from "./helpers"
+import { BOT_ID, makeManagedFindingThread, makeManagedSummaryThread, makeReviewFinding } from "./helpers"
 
 const buildContext = (input: Omit<Parameters<typeof buildReviewContext>[0], "managedThreads">) =>
   buildReviewContext({
@@ -54,11 +55,13 @@ describe("review context", () => {
       baseRef: "abc123",
       headRef: "HEAD",
       diffText,
-      changedFiles: ["src/example.ts", "src/other.ts"],
+      changedFiles: ["src/example.ts", "src/other.ts", "image.bin", "src/new-name.ts", "empty.txt"],
       changedLinesByFile: new Map([
         ["src/example.ts", new Set([2, 3, 8, 9])],
         ["src/other.ts", new Set([10])],
       ]),
+      deletedFiles: ["src/removed.ts", "empty-old.txt"],
+      renamedFromByFile: new Map([["src/new-name.ts", "src/old-name.ts"]]),
       deletedLinesByFile: new Map(),
     }
 
@@ -90,7 +93,84 @@ describe("review context", () => {
         changedLineRanges: [{ start: 10, end: 10 }],
         hunkHeaders: ["@@ -10,1 +10,2 @@ export function run() {"],
       },
+      { path: "image.bin", changedLineRanges: [], hunkHeaders: [] },
+      { path: "src/new-name.ts", renamedFrom: "src/old-name.ts", changedLineRanges: [], hunkHeaders: [] },
+      { path: "empty.txt", changedLineRanges: [], hunkHeaders: [] },
     ])
+    expect(context.deletedFiles).toEqual(["src/removed.ts", "empty-old.txt"])
+  })
+
+  test("clips per-file manifest detail without changing the authoritative line map", () => {
+    const lines = Array.from({ length: 500 }, (_, index) => index * 10 + 1)
+    const changedLines = new Set(lines)
+    const changedLinesByFile = new Map([["src/scattered.ts", changedLines]])
+
+    const context = buildContext({
+      metadata: { title: "Scattered changes", description: "One file with many hunks" },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        changedFiles: ["src/scattered.ts"],
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
+        changedLinesByFile,
+        deletedLinesByFile: new Map(),
+        diffText: [
+          "diff --git a/src/scattered.ts b/src/scattered.ts",
+          "--- a/src/scattered.ts",
+          "+++ b/src/scattered.ts",
+          ...lines.map((line) => `@@ -${line} +${line} @@\n-old\n+new`),
+        ].join("\n"),
+      },
+    })
+
+    expect(context.changedFiles[0]?.changedLineRanges).toHaveLength(100)
+    expect(context.changedFiles[0]?.hunkHeaders).toHaveLength(100)
+    expect(context.diffMetadataTruncated).toBe(true)
+
+    const finding = makeReviewFinding({ filePath: "src/scattered.ts", line: 4_991 })
+
+    const normalized = normalizeReviewResult(
+      { verdict: "concerns", findings: [finding], resolvedManagedFindingIds: [], unmappedNotes: [] },
+      changedLinesByFile,
+    )
+
+    expect(normalized.inlineFindings).toEqual([finding])
+    expect(normalized.summaryOnlyFindings).toEqual([])
+  })
+
+  test.each([0, 80])("keeps every path when a wide manifest drops optional detail (path padding %i)", (padding) => {
+    const paths = Array.from({ length: 5_000 }, (_, index) => `src/${"x".repeat(padding)}file-${index}.ts`)
+
+    const context = buildContext({
+      metadata: { title: "Wide changes", description: "Many one-hunk files" },
+      reviewMode: "full",
+      pullRequestBaseRef: "base",
+      gitDiff: {
+        baseRef: "base",
+        headRef: "HEAD",
+        changedFiles: paths,
+        deletedFiles: [],
+        renamedFromByFile: new Map([[paths[0] ?? "", "src/old-name.ts"]]),
+        changedLinesByFile: new Map(paths.map((path) => [path, new Set([1])])),
+        deletedLinesByFile: new Map(),
+        diffText: paths
+          .map((path) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+new`)
+          .join("\n"),
+      },
+    })
+
+    expect(context.changedFiles.map((file) => file.path)).toEqual(paths)
+    expect(context.changedFiles[0]?.renamedFrom).toBe("src/old-name.ts")
+    expect(
+      context.changedFiles.every((file) => file.changedLineRanges === undefined && file.hunkHeaders === undefined),
+    ).toBe(true)
+    expect(context.diffMetadataTruncated).toBe(true)
+
+    if (padding === 0) expect(JSON.stringify(context.changedFiles).length).toBeLessThan(250_000)
+    else expect(JSON.stringify(context.changedFiles).length).toBeGreaterThan(250_000)
   })
 
   test("includes follow-up review metadata when present", () => {
@@ -114,6 +194,8 @@ describe("review context", () => {
         ].join("\n"),
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([1])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
     })
@@ -149,6 +231,8 @@ describe("review context", () => {
         diffText,
         changedFiles: ["src/huge.ts"],
         changedLinesByFile: new Map([["src/huge.ts", new Set(Array.from({ length: 200 }, (_, index) => index + 1))]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
     })
@@ -175,6 +259,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       connectedWorkItems: [
@@ -246,6 +332,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       connectedWorkItems: [
@@ -291,6 +379,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -360,6 +450,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -410,6 +502,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [makeManagedSummaryThread()],
@@ -434,6 +528,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([2])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -506,7 +602,6 @@ describe("review context", () => {
       ],
     })
     expect(context.managedFindingCandidates).toEqual({
-      omittedCount: 0,
       items: [
         {
           id: 7,
@@ -536,6 +631,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/legacy.ts"],
         changedLinesByFile: new Map([["src/legacy.ts", new Set([9])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -580,6 +677,9 @@ describe("review context", () => {
   })
 
   test("limits managed finding candidates to active findings that intersect the scoped diff", () => {
+    const completeBody = "Evidence for an eligible finding. ".repeat(1_000)
+    const completeSuggestion = "return correctValue\n".repeat(1_000)
+
     const context = buildContext({
       metadata: {
         title: "Feature PR",
@@ -593,9 +693,15 @@ describe("review context", () => {
         diffText: "",
         changedFiles: ["src/example.ts"],
         changedLinesByFile: new Map([["src/example.ts", new Set([5])]]),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
+        makeManagedFindingThread(
+          makeReviewFinding({ title: "Large candidate", body: completeBody, suggestion: completeSuggestion, line: 5 }),
+          24,
+        ),
         makeThread({
           id: 21,
           threadContext: {
@@ -646,7 +752,6 @@ describe("review context", () => {
     })
 
     expect(context.managedFindingCandidates).toEqual({
-      omittedCount: 0,
       items: [
         {
           id: 21,
@@ -655,6 +760,17 @@ describe("review context", () => {
           updatedAt: "2026-03-21T10:00:00.000Z",
           title: "Current",
           body: "Body",
+          severity: "high",
+          confidence: "high",
+        },
+        {
+          id: 24,
+          filePath: "src/example.ts",
+          line: 5,
+          endLine: 5,
+          title: "Large candidate",
+          body: completeBody,
+          suggestion: completeSuggestion,
           severity: "high",
           confidence: "high",
         },
@@ -676,6 +792,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [
@@ -727,6 +845,8 @@ describe("review context", () => {
         diffText: "",
         changedFiles: [],
         changedLinesByFile: new Map(),
+        deletedFiles: [],
+        renamedFromByFile: new Map(),
         deletedLinesByFile: new Map(),
       },
       existingThreads: [

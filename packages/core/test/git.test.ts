@@ -1,8 +1,8 @@
-import { mkdir, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Duration, Effect, Layer } from "effect"
 
 import { MissingGitHistoryError } from "@open-azdo/core/errors"
 import { ProcessRunner, type ExecuteCommandInput } from "@open-azdo/core/process-runner"
@@ -19,6 +19,7 @@ import {
   resolvePullRequestDiff,
   resolveReviewedSourceCommit,
   splitDiffByFile,
+  type ExecuteGitInput,
 } from "@open-azdo/core/git"
 import {
   createDeletedFileFollowUpRepo,
@@ -173,6 +174,166 @@ describe("git", () => {
       expect(diff.headRef).toBe(featureSha)
       expect(diff.changedFiles).toEqual(["src/example.ts"])
       expect(diff.deletedLinesByFile).toEqual(new Map([["src/example.ts", new Set([1])]]))
+
+      const empty = await Effect.runPromise(
+        resolveDiffRange({ workspace: repoDir, baseRef: featureSha, headRef: featureSha }).pipe(
+          Effect.provide(makeRealGitExecLayer()),
+          withSilentLogs,
+        ),
+      )
+
+      expect(empty.changedFiles).toEqual([])
+      expect(empty.deletedFiles).toEqual([])
+      expect(empty.renamedFromByFile).toEqual(new Map())
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  test("collects a real diff above one megabyte with bounded diff-specific command options", async () => {
+    const { repoDir } = await createFixtureRepo()
+    const lines = 8192
+    const calls: ExecuteGitInput[] = []
+
+    try {
+      await writeFile(join(repoDir, "src/large.txt"), "old ".repeat(31).concat("\n").repeat(lines))
+      await Bun.$`git add .`.cwd(repoDir).quiet()
+      await Bun.$`git commit -m large-base`.cwd(repoDir).quiet()
+      const baseRef = (await Bun.$`git rev-parse HEAD`.cwd(repoDir).quiet()).text().trim()
+
+      await writeFile(join(repoDir, "src/large.txt"), "new ".repeat(31).concat("\n").repeat(lines))
+      await Bun.$`git commit -am large-head`.cwd(repoDir).quiet()
+
+      const diff = await Effect.runPromise(
+        Effect.gen(function* () {
+          const live = yield* GitExec
+
+          return yield* resolveDiffRange({ workspace: repoDir, baseRef, headRef: "HEAD" }).pipe(
+            Effect.provideService(
+              GitExec,
+              GitExec.of({
+                execute: (input) => {
+                  calls.push(input)
+
+                  return live.execute(input)
+                },
+              }),
+            ),
+          )
+        }).pipe(Effect.provide(makeRealGitExecLayer()), withSilentLogs),
+      )
+
+      expect(Buffer.byteLength(diff.diffText)).toBeGreaterThan(1_000_000)
+      expect(diff.changedLinesByFile.get("src/large.txt")?.size).toBe(lines)
+      expect(diff.deletedLinesByFile.get("src/large.txt")?.size).toBe(lines)
+      expect(calls).toHaveLength(2)
+
+      for (const call of calls) {
+        expect(call.timeout).toEqual(Duration.minutes(2))
+        expect(call.maxOutputBytes).toBe(64 * 1024 * 1024)
+      }
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  test("inventories every changed path including changes without right-side text hunks", async () => {
+    const { repoDir } = await createFixtureRepo()
+    const pureSource = Array.from({ length: 30 }, (_, i) => `pure line ${i}`).join("\n")
+    const editedSource = Array.from({ length: 30 }, (_, i) => `edited line ${i}`)
+
+    try {
+      await writeFile(join(repoDir, ".gitattributes"), "suppressed.txt -diff\n")
+      await writeFile(join(repoDir, "ordinary.txt"), "before\n")
+      await writeFile(join(repoDir, "modified.bin"), new Uint8Array([0, 1, 2]))
+      await writeFile(join(repoDir, "suppressed.txt"), "before\n")
+      await writeFile(join(repoDir, "mode-only.sh"), "echo unchanged\n")
+      await writeFile(join(repoDir, "pure-old.ts"), pureSource)
+      await writeFile(join(repoDir, "edited-old.ts"), `${editedSource.join("\n")}\n`)
+      await Bun.$`git add .`.cwd(repoDir).quiet()
+      await Bun.$`git commit -m inventory-base`.cwd(repoDir).quiet()
+      const baseRef = (await Bun.$`git rev-parse HEAD`.cwd(repoDir).quiet()).text().trim()
+
+      await writeFile(join(repoDir, "ordinary.txt"), "after\n")
+      await writeFile(join(repoDir, "added.bin"), new Uint8Array([0, 9, 10]))
+      await writeFile(join(repoDir, "modified.bin"), new Uint8Array([0, 3, 4]))
+      await writeFile(join(repoDir, "empty.txt"), "")
+      await writeFile(join(repoDir, "suppressed.txt"), "after\n")
+      await chmod(join(repoDir, "mode-only.sh"), 0o755)
+      await rename(join(repoDir, "pure-old.ts"), join(repoDir, "pure-new.ts"))
+      await rename(join(repoDir, "edited-old.ts"), join(repoDir, "edited-new.ts"))
+      await writeFile(join(repoDir, "edited-new.ts"), `${editedSource.with(7, "updated").join("\n")}\n`)
+      await Bun.$`git add -A`.cwd(repoDir).quiet()
+      await Bun.$`git commit -m inventory-head`.cwd(repoDir).quiet()
+      await Bun.$`git config diff.renames false`.cwd(repoDir).quiet()
+
+      const diff = await Effect.runPromise(
+        resolveDiffRange({ workspace: repoDir, baseRef, headRef: "HEAD" }).pipe(
+          Effect.provide(makeRealGitExecLayer()),
+          withSilentLogs,
+        ),
+      )
+
+      expect(new Set(diff.changedFiles)).toEqual(
+        new Set([
+          "ordinary.txt",
+          "added.bin",
+          "modified.bin",
+          "empty.txt",
+          "suppressed.txt",
+          "mode-only.sh",
+          "pure-new.ts",
+          "edited-new.ts",
+        ]),
+      )
+      expect(diff.deletedFiles).toEqual([])
+      expect(diff.renamedFromByFile).toEqual(
+        new Map([
+          ["pure-new.ts", "pure-old.ts"],
+          ["edited-new.ts", "edited-old.ts"],
+        ]),
+      )
+      expect(diff.changedLinesByFile.has("added.bin")).toBe(false)
+      expect(diff.changedLinesByFile.has("modified.bin")).toBe(false)
+      expect(diff.changedLinesByFile.has("empty.txt")).toBe(false)
+      expect(diff.changedLinesByFile.has("suppressed.txt")).toBe(false)
+      expect(diff.changedLinesByFile.has("mode-only.sh")).toBe(false)
+      expect(diff.changedLinesByFile.has("pure-new.ts")).toBe(false)
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  test("inventories text, empty and binary deletions using exact Git path identities", async () => {
+    const { repoDir } = await createFixtureRepo()
+    const unusualPath = "src/deleted åäö\tfile\nname.txt "
+    const paths = [unusualPath, "src/empty.txt", "src/deleted.bin"]
+
+    try {
+      await writeFile(join(repoDir, unusualPath), "removed\n")
+      await writeFile(join(repoDir, "src/empty.txt"), "")
+      await writeFile(join(repoDir, "src/deleted.bin"), new Uint8Array([0, 1, 2]))
+      await Bun.$`git add .`.cwd(repoDir).quiet()
+      await Bun.$`git commit -m deletion-base`.cwd(repoDir).quiet()
+      const baseRef = (await Bun.$`git rev-parse HEAD`.cwd(repoDir).quiet()).text().trim()
+
+      for (const path of paths) {
+        await rm(join(repoDir, path))
+      }
+
+      await Bun.$`git commit -am deletion-head`.cwd(repoDir).quiet()
+
+      const diff = await Effect.runPromise(
+        resolveDiffRange({ workspace: repoDir, baseRef, headRef: "HEAD" }).pipe(
+          Effect.provide(makeRealGitExecLayer()),
+          withSilentLogs,
+        ),
+      )
+
+      expect(diff.changedFiles).toEqual([])
+      expect(new Set(diff.deletedFiles)).toEqual(new Set(paths))
+      expect(diff.renamedFromByFile).toEqual(new Map())
+      expect(diff.deletedLinesByFile).toEqual(new Map([[unusualPath, new Set([1])]]))
     } finally {
       await rm(repoDir, { recursive: true, force: true })
     }
@@ -343,6 +504,8 @@ describe("git", () => {
 
       expect(diff.diffText).toContain("rename from")
       expect(diff.changedFiles).toEqual([newPath])
+      expect(diff.deletedFiles).toEqual([])
+      expect(diff.renamedFromByFile).toEqual(new Map([[newPath, oldPath]]))
       expect(diff.changedLinesByFile).toEqual(new Map([[newPath, new Set([8])]]))
       expect(diff.deletedLinesByFile).toEqual(new Map([[oldPath, new Set([8])]]))
       expect(splitDiffByFile(diff.diffText).map((file) => file.path)).toEqual([newPath])
@@ -365,6 +528,7 @@ describe("git", () => {
 
       expect(diff.changedFiles).toEqual(["src/example.ts"])
       expect(diff.changedLinesByFile.get("src/example.ts") ?? new Set()).toEqual(new Set<number>())
+      expect(diff.deletedFiles).toEqual([])
       expect(diff.deletedLinesByFile).toEqual(new Map([["src/example.ts", new Set([2])]]))
     } finally {
       await rm(repoDir, { recursive: true, force: true })
@@ -384,6 +548,7 @@ describe("git", () => {
       )
 
       expect(diff.changedFiles).toEqual([])
+      expect(diff.deletedFiles).toEqual(["src/obsolete.ts"])
       expect(diff.changedLinesByFile).toEqual(new Map())
       expect(diff.deletedLinesByFile).toEqual(new Map([["src/obsolete.ts", new Set([1])]]))
     } finally {
