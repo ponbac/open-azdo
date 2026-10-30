@@ -125,13 +125,11 @@ type SummaryRenderResult = {
 const REVIEW_OUTPUT_FORMAT = {
   type: "json_schema" as const,
   schema: ReviewResultJsonSchema,
-  retryCount: 2,
 }
 
 const REVIEW_SUMMARY_OUTPUT_FORMAT = {
   type: "json_schema" as const,
   schema: ReviewSummaryPassOutputJsonSchema,
-  retryCount: 2,
 }
 
 const writeStdout = Effect.fn("ReviewWorkflow.writeStdout")(function* (text: string) {

@@ -7,7 +7,7 @@ export const buildReviewSummaryPrompt = (subjects: ReadonlyArray<ReviewSummarySu
     "You are writing the human-facing summary for an Azure DevOps pull-request review.",
     "You are not reviewing the repository.",
     "Do not inspect the repo, diff, pull request, work items, or thread bodies.",
-    "Do not use tools or ask to use tools.",
+    "Do not use repository, shell, or search tools, or ask to use them. The only tool you may use is the provided result submission tool.",
     "You may only summarize the structured review subjects provided below.",
     "Do not introduce any issue, risk, or concern that is not present in the subject list.",
     "Group related subject IDs together when that improves the summary.",

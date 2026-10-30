@@ -1,73 +1,60 @@
-import type { Config } from "@opencode-ai/sdk/v2"
-
 import { Effect, Layer } from "effect"
 
 import { OpenCodeOutputError } from "../../errors"
 import { logInfo } from "../../Logging"
 import { OpenCodeRunner, type OpenCodeRunRequest, type OpenCodeRunResult } from "../Services/OpenCodeRunner"
 import { OpenCodeSdkRuntimeLive } from "../internal/Layers/OpenCodeSdkRuntime"
-import { OpenCodeSdkRuntime } from "../internal/Services/OpenCodeSdkRuntime"
+import {
+  OPEN_CODE_STRUCTURED_OUTPUT_TOOL,
+  OpenCodeSdkRuntime,
+  type OpenCodeConfig,
+  type OpenCodePermissionRule,
+} from "../internal/Services/OpenCodeSdkRuntime"
 
 const OPEN_CODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
-/**
- * Override OpenCode's built-in TypeScript LSP spawn so nested JS/TS package
- * roots can use their own installed TypeScript version even when OpenCode runs
- * from the repository root.
- */
-const OPEN_CODE_TYPESCRIPT_LSP_COMMAND = [process.execPath, "x", "typescript-language-server", "--stdio"]
-
 type ParsedModel = {
   readonly providerID: string
   readonly modelID: string
 }
 
-const openCodePermission = {
-  edit: "deny",
-  read: "allow",
-  grep: "allow",
-  list: "allow",
-  glob: "allow",
-  lsp: "allow",
-  webfetch: "deny",
-  websearch: "deny",
-  codesearch: "deny",
-  bash: {
-    "*": "deny",
-    "git diff *": "allow",
-    "git show *": "allow",
-    "git log *": "allow",
-    "git status *": "allow",
-    "git rev-parse *": "allow",
-    "rg *": "allow",
-    "grep *": "allow",
-    "find *": "allow",
-    "ls *": "allow",
-    "cat *": "allow",
-    "sed *": "allow",
-  },
-} as const
+const allow = (action: string, resource = "*"): OpenCodePermissionRule => ({ action, resource, effect: "allow" })
 
-export const buildOpenCodeConfig = (agentName: string): Config => ({
+const OPEN_CODE_ALLOWED_SHELL_COMMANDS = [
+  "git diff *",
+  "git show *",
+  "git log *",
+  "git status *",
+  "git rev-parse *",
+  "rg *",
+  "grep *",
+  "find *",
+  "ls *",
+  "cat *",
+  "sed *",
+]
+
+/**
+ * Deny-by-default read-only rules. The leading catch-all also keeps headless
+ * runs moving: V2 treats an unmatched request as `ask`, and nobody can answer.
+ */
+const openCodePermissions: ReadonlyArray<OpenCodePermissionRule> = [
+  { action: "*", resource: "*", effect: "deny" },
+  allow("read"),
+  allow("glob"),
+  allow("grep"),
+  allow(OPEN_CODE_STRUCTURED_OUTPUT_TOOL),
+  ...OPEN_CODE_ALLOWED_SHELL_COMMANDS.map((command) => allow("shell", command)),
+]
+
+export const buildOpenCodeConfig = (agentName: string): OpenCodeConfig => ({
   $schema: OPEN_CODE_CONFIG_SCHEMA,
-  share: "disabled",
-  autoupdate: false,
+  update: "disable",
   default_agent: agentName,
-  lsp: {
-    typescript: {
-      command: OPEN_CODE_TYPESCRIPT_LSP_COMMAND,
-    },
-  },
-  permission: openCodePermission,
-  agent: {
+  agents: {
     [agentName]: {
       mode: "primary",
       description: "Read-only Azure DevOps pull request reviewer",
-      permission: {
-        edit: "deny",
-        webfetch: "deny",
-        websearch: "deny",
-        codesearch: "deny",
-      },
+      permissions: openCodePermissions,
     },
   },
 })

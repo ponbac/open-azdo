@@ -1,11 +1,21 @@
-import { createServer } from "node:net"
+import { randomBytes } from "node:crypto"
+import { join } from "node:path"
 
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
-import type { AssistantMessage, Event, Part, SessionStatus, Todo, ToolPart } from "@opencode-ai/sdk/v2"
+import { OpenCode } from "@opencode/client"
+import type {
+  EventSubscribeOutput,
+  OpenCodeClient,
+  SessionInfo,
+  SessionMessageAssistant,
+  SessionMessageAssistantTool,
+  SessionMessageIdle,
+  SessionStructuredError,
+} from "@opencode/client"
 import * as ChildProcess from "effect/process/ChildProcess"
 import { ChildProcessSpawner, type ChildProcessHandle } from "effect/process/ChildProcessSpawner"
+import * as FileSystem from "effect/FileSystem"
 
-import { Duration, Effect, Fiber, Layer, Option, Ref, Stream } from "effect"
+import { Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Ref, Schema, Stream } from "effect"
 
 import { OpenCodeInvocationError, OpenCodeOutputError } from "../../../errors"
 import { formatUnknownDetail } from "../../../format-unknown"
@@ -13,12 +23,22 @@ import { stringifyJson } from "../../../Json"
 import { logInfo, logWarning, truncateForLog } from "../../../Logging"
 import { type OpenCodeModelError, type OpenCodeRunTokens, type OpenCodeRunUsage } from "../../Services/OpenCodeRunner"
 import {
+  OPEN_CODE_STRUCTURED_OUTPUT_TOOL,
   OpenCodeSdkRuntime,
+  type OpenCodeConfig,
   type OpenCodeSdkPromptRequest,
   type OpenCodeSdkPromptResult,
 } from "../Services/OpenCodeSdkRuntime"
 
 const SERVER_HOST = "127.0.0.1"
+const SERVER_USERNAME = "opencode"
+const SERVER_OUTPUT_TAIL_LINES = 20
+const SESSION_TITLE = "open-azdo review"
+const IDLE_POLL_INTERVAL = Duration.millis(250)
+const ASSISTANT_PAGE_SIZE = 50
+/** Live progress is optional, so a stalled event stream may only delay the prompt briefly. */
+const PROGRESS_CONNECT_TIMEOUT = Duration.seconds(5)
+const INTERRUPT_SETTLE_TIMEOUT = Duration.seconds(2)
 
 const toInvocationError = ({
   message,
@@ -64,11 +84,8 @@ const ignoreFailure = <E>(effect: Effect.Effect<unknown, E>) =>
     }),
   )
 
-type OpenCodeEvent = Event
-type OpenCodeClient = ReturnType<typeof createOpencodeClient>
+type OpenCodeEvent = EventSubscribeOutput
 type OpenCodeEventClient = Pick<OpenCodeClient, "event">
-type OpenCodeEventSubscribeInput = Parameters<OpenCodeEventClient["event"]["subscribe"]>[0]
-type OpenCodeEventSubscribeOptions = Parameters<OpenCodeEventClient["event"]["subscribe"]>[1]
 
 type OpenCodeProgressLog = {
   readonly level: "info" | "warning"
@@ -77,14 +94,14 @@ type OpenCodeProgressLog = {
 }
 
 type OpenCodeToolProgressState = {
-  readonly status: ToolPart["state"]["status"]
+  readonly name: string
+  readonly title?: string | undefined
+  readonly started: boolean
 }
 
 export type OpenCodeProgressState = {
-  readonly lastStatusKey?: string | undefined
   readonly toolStatesByCallId: Readonly<Record<string, OpenCodeToolProgressState>>
   readonly seenRetryAttempts: ReadonlyArray<number>
-  readonly todoFingerprint?: string | undefined
   readonly eventStreamFailed: boolean
 }
 
@@ -104,36 +121,12 @@ const isAbortError = (error: unknown) =>
 const emitProgressLog = (entry: OpenCodeProgressLog) =>
   entry.level === "warning" ? logWarning(entry.message, entry.fields) : logInfo(entry.message, entry.fields)
 
-const mergeAbortSignals = (signal: AbortSignal | null | undefined, lifetime: AbortSignal) =>
-  signal === undefined || signal === null ? lifetime : AbortSignal.any([signal, lifetime])
-
-/**
- * Adapts the SDK event client so scoped cleanup can stop an active SSE stream
- * using the lifetime signal, while initial subscription cancellation still
- * comes from Effect.tryPromise.
- */
-const withSubscriptionLifetime = (client: OpenCodeEventClient, lifetime: AbortSignal): OpenCodeEventClient => ({
-  event: Object.assign(Object.create(client.event), {
-    subscribe: (input: OpenCodeEventSubscribeInput, options?: OpenCodeEventSubscribeOptions) =>
-      client.event.subscribe(input, {
-        ...options,
-        signal: mergeAbortSignals(options?.signal, lifetime),
-      }),
-  }) as OpenCodeEventClient["event"],
-})
-
-const sessionStatusKey = (status: SessionStatus) =>
-  status.type === "retry" ? `${status.type}:${status.attempt}` : status.type
-
 const TOOL_TITLE_INPUT_KEYS = ["title", "filePath", "command", "query", "pattern", "path", "url"] as const
 const TOOL_PROGRESS_ICONS: Record<string, string> = {
-  bash: "🔧",
+  shell: "🔧",
   read: "📖",
   glob: "✱",
-  edit: "✏️",
   grep: "🔎",
-  list: "📂",
-  webfetch: "🌐",
 }
 
 const titleFromToolInput = (input: Record<string, unknown>) => {
@@ -148,55 +141,17 @@ const titleFromToolInput = (input: Record<string, unknown>) => {
   return undefined
 }
 
-const getToolTitle = (part: ToolPart) => {
-  switch (part.state.status) {
-    case "running":
-    case "completed":
-      return titleFromToolInput(part.state.input) || part.state.title
-    case "pending":
-    case "error":
-      return titleFromToolInput(part.state.input)
-  }
-}
-
-const getToolDurationMs = (part: ToolPart) => {
-  switch (part.state.status) {
-    case "completed":
-    case "error":
-      return Math.max(0, part.state.time.end - part.state.time.start)
-    case "pending":
-    case "running":
-      return undefined
-  }
-}
-
-const getToolProgressFields = (part: ToolPart) => {
-  const title = getToolTitle(part)
-  const durationMs = getToolDurationMs(part)
-
-  return {
-    tool: part.tool,
-    callId: part.callID,
-    ...(title ? { title } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
-  }
-}
-
 const getToolProgressIcon = (toolName: string) => TOOL_PROGRESS_ICONS[toolName] ?? "⚙️"
 
-const getToolProgressMessage = (
-  phase: "started" | "failed",
-  part: ToolPart,
-  fields: ReturnType<typeof getToolProgressFields>,
-) => {
-  const title = fields.title ? truncateForLog(String(fields.title), 160) : undefined
-  const icon = getToolProgressIcon(part.tool)
+const getToolProgressMessage = (phase: "started" | "failed", tool: OpenCodeToolProgressState) => {
+  const title = tool.title ? truncateForLog(tool.title, 160) : undefined
+  const icon = getToolProgressIcon(tool.name)
 
   switch (phase) {
     case "started":
-      return title ? `${icon} ${title}` : `${icon} ${part.tool}`
+      return title ? `${icon} ${title}` : `${icon} ${tool.name}`
     case "failed":
-      return title ? `⚠️ ${part.tool}: ${title}` : `⚠️ ${part.tool}`
+      return title ? `⚠️ ${tool.name}: ${title}` : `⚠️ ${tool.name}`
   }
 }
 
@@ -205,34 +160,17 @@ const getAssistantRunMessage = (request: OpenCodeSdkPromptRequest) =>
     ? `Starting OpenCode assistant run with ${request.model.modelID} (${request.variant}).`
     : "Starting OpenCode assistant run."
 
-const summarizeTodoCounts = (todos: ReadonlyArray<Todo>) => {
-  const counts: Record<string, number> = {}
-
-  for (const todo of todos) {
-    counts[todo.status] = (counts[todo.status] ?? 0) + 1
-  }
-
-  return counts
-}
-
-const todoFingerprint = (counts: Record<string, number>) =>
-  Object.entries(counts)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([status, count]) => `${status}:${count}`)
-    .join("|")
-
 const getEventSessionId = (event: OpenCodeEvent): string | undefined => {
   switch (event.type) {
-    case "message.part.delta":
-    case "message.part.updated":
-    case "session.idle":
-    case "session.status":
-    case "todo.updated":
-      return event.properties.sessionID
-    case "message.updated":
-      return event.properties.info.sessionID
-    case "session.error":
-      return event.properties.sessionID
+    case "session.execution.started":
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+    case "session.execution.interrupted":
+    case "session.retry.scheduled":
+    case "session.tool.input.started":
+    case "session.tool.called":
+    case "session.tool.failed":
+      return event.data.sessionID
     default:
       return undefined
   }
@@ -242,8 +180,11 @@ export const isOpenCodeProgressEventForSession = (event: OpenCodeEvent, sessionI
   getEventSessionId(event) === sessionId
 
 /**
- * Collapses noisy OpenCode SDK events into a small per-session progress model
- * and a concise log stream that is readable in terminals and CI logs.
+ * Collapses noisy OpenCode events into a small per-session progress model and
+ * a concise log stream that is readable in terminals and CI logs.
+ *
+ * Tool events carry the name and input separately, so the name is remembered
+ * from `session.tool.input.started` for the later `called` and `failed` logs.
  */
 export const reduceOpenCodeProgressBatch = (
   state: OpenCodeProgressState,
@@ -257,127 +198,84 @@ export const reduceOpenCodeProgressBatch = (
   const toolStatesByCallId: Record<string, OpenCodeToolProgressState> = {
     ...state.toolStatesByCallId,
   }
-  let lastStatusKey = state.lastStatusKey
-  let nextTodoFingerprint = state.todoFingerprint
 
   for (const event of events) {
     switch (event.type) {
-      case "session.status": {
-        const statusKey = sessionStatusKey(event.properties.status)
+      case "session.execution.started":
+        logs.push({ level: "info", message: "OpenCode assistant is working." })
+        break
 
-        if (event.properties.status.type === "retry") {
-          if (!seenRetryAttempts.has(event.properties.status.attempt)) {
-            seenRetryAttempts.add(event.properties.status.attempt)
-            logs.push({
-              level: "info",
-              message: "OpenCode is retrying the assistant response.",
-              fields: {
-                attempt: event.properties.status.attempt,
-                nextDelayMs: event.properties.status.next,
-                retryMessage: truncateForLog(event.properties.status.message, 160),
-              },
-            })
-          }
-        } else if (statusKey !== lastStatusKey) {
+      case "session.execution.succeeded":
+        logs.push({ level: "info", message: "OpenCode assistant is idle." })
+        break
+
+      case "session.retry.scheduled":
+        if (!seenRetryAttempts.has(event.data.attempt)) {
+          seenRetryAttempts.add(event.data.attempt)
           logs.push({
             level: "info",
-            message:
-              event.properties.status.type === "busy"
-                ? "OpenCode assistant is working."
-                : "OpenCode assistant is idle.",
-          })
-        }
-
-        lastStatusKey = statusKey
-        break
-      }
-
-      case "message.part.updated": {
-        if (event.properties.part.type !== "tool") {
-          break
-        }
-
-        const part = event.properties.part
-        const previous = toolStatesByCallId[part.callID]
-        const baseFields = getToolProgressFields(part)
-
-        switch (part.state.status) {
-          case "running":
-            if (previous?.status !== "running") {
-              logs.push({
-                level: "info",
-                message: getToolProgressMessage("started", part, baseFields),
-              })
-            }
-            break
-          case "completed":
-            break
-          case "error":
-            if (previous?.status !== "error") {
-              logs.push({
-                level: "warning",
-                message: getToolProgressMessage("failed", part, baseFields),
-                fields: {
-                  ...baseFields,
-                  error: truncateForLog(part.state.error, 200),
-                },
-              })
-            }
-            break
-          case "pending":
-            break
-        }
-
-        toolStatesByCallId[part.callID] = {
-          status: part.state.status,
-        }
-        break
-      }
-
-      case "todo.updated": {
-        // Fingerprint counts instead of todo bodies so repeated updates do not
-        // spam logs with the same workplan details.
-        const counts = summarizeTodoCounts(event.properties.todos)
-        const fingerprint = todoFingerprint(counts)
-
-        if (fingerprint !== nextTodoFingerprint) {
-          logs.push({
-            level: "info",
-            message: "OpenCode updated its task plan.",
+            message: "OpenCode is retrying the assistant response.",
             fields: {
-              total: event.properties.todos.length,
-              counts,
+              attempt: event.data.attempt,
+              nextDelayMs: Math.max(0, event.data.at - event.created),
+              retryMessage: truncateForLog(event.data.error.message, 160),
             },
           })
-          nextTodoFingerprint = fingerprint
         }
+        break
+
+      case "session.tool.input.started":
+        toolStatesByCallId[event.data.id] = { name: event.data.name, started: false }
+        break
+
+      case "session.tool.called": {
+        const previous = toolStatesByCallId[event.data.id]
+        const tool = {
+          name: previous?.name ?? "tool",
+          title: titleFromToolInput(event.data.input),
+          started: true,
+        }
+
+        if (!previous?.started) {
+          logs.push({ level: "info", message: getToolProgressMessage("started", tool) })
+        }
+        toolStatesByCallId[event.data.id] = tool
         break
       }
 
-      case "session.error": {
-        const error = event.properties.error
+      case "session.tool.failed": {
+        const tool = toolStatesByCallId[event.data.id] ?? { name: "tool", started: true }
 
         logs.push({
           level: "warning",
-          message: "OpenCode reported a session error.",
+          message: getToolProgressMessage("failed", tool),
           fields: {
-            ...(error?.name ? { name: error.name } : {}),
-            ...(error?.data && typeof error.data === "object" && "message" in error.data
-              ? { errorMessage: truncateForLog(String(error.data.message), 200) }
-              : {}),
+            tool: tool.name,
+            callId: event.data.id,
+            ...(tool.title ? { title: tool.title } : {}),
+            error: truncateForLog(event.data.error.message, 200),
           },
         })
         break
       }
+
+      case "session.execution.failed":
+        logs.push({
+          level: "warning",
+          message: "OpenCode reported a session error.",
+          fields: {
+            name: event.data.error.type,
+            errorMessage: truncateForLog(event.data.error.message, 200),
+          },
+        })
+        break
     }
   }
 
   return {
     state: {
-      lastStatusKey,
       toolStatesByCallId,
       seenRetryAttempts: [...seenRetryAttempts],
-      todoFingerprint: nextTodoFingerprint,
       eventStreamFailed: state.eventStreamFailed,
     },
     logs,
@@ -435,253 +333,282 @@ export const runOpenCodeProgressLogger = ({
     )
   })
 
-const findAvailablePort = Effect.tryPromise({
-  try: () =>
-    new Promise<number>((resolve, reject) => {
-      const server = createServer()
-      server.unref()
+const ServerReadyLine = Schema.fromJsonString(Schema.Struct({ url: Schema.String }))
 
-      server.once("error", reject)
-      server.listen(0, SERVER_HOST, () => {
-        const address = server.address()
+const readReadyUrl = (line: string) =>
+  Schema.decodeUnknownOption(ServerReadyLine)(line).pipe(Option.map(({ url }) => url))
 
-        server.close((error) => {
-          if (error) {
-            reject(error)
-            return
-          }
-
-          if (!address || typeof address === "string") {
-            reject(new Error("Failed to resolve the temporary localhost port for the OpenCode server."))
-            return
-          }
-
-          resolve(address.port)
-        })
-      })
-    }),
-  catch: (error) =>
-    toInvocationError({
-      message: "Failed to allocate a localhost port for the OpenCode server.",
-      detail: formatUnknownDetail(error),
-    }),
-})
-
-const readReadyUrl = (line: string) => {
-  const match = line.match(/opencode server listening.*\s(https?:\/\/[^\s]+)/i)
-  return match?.[1]
-}
-
+/**
+ * Waits for the `--stdio` ready line while draining server output for the
+ * rest of the server's life, because a full pipe would block the server. A
+ * bounded tail of the output explains early exits.
+ */
 const waitForServerUrl = (handle: ChildProcessHandle, timeout: Duration.Duration) =>
-  handle.all.pipe(
-    Stream.decodeText(),
-    Stream.splitLines,
-    Stream.map((line) => readReadyUrl(line.trim())),
-    Stream.filter((url): url is string => typeof url === "string"),
-    Stream.runHead,
-    Effect.flatMap(
-      Option.match({
-        onNone: () =>
-          Effect.fail(
-            toInvocationError({
-              message: "OpenCode server exited before reporting a listening URL.",
-            }),
-          ),
-        onSome: Effect.succeed,
-      }),
-    ),
-    (effect) =>
-      awaitWithin(effect, timeout, () =>
-        toInvocationError({
-          message: `Timed out waiting for the OpenCode server to start after ${Duration.format(timeout)}.`,
+  Effect.gen(function* () {
+    const ready = yield* Deferred.make<string, OpenCodeInvocationError>()
+    const tail = yield* Ref.make<ReadonlyArray<string>>([])
+
+    yield* handle.all.pipe(
+      Stream.decodeText(),
+      Stream.splitLines,
+      Stream.runForEach((line) =>
+        Option.match(readReadyUrl(line.trim()), {
+          onNone: () => Ref.update(tail, (lines) => [...lines, line].slice(-SERVER_OUTPUT_TAIL_LINES)),
+          onSome: (url) => Deferred.succeed(ready, url),
         }),
       ),
-    Effect.mapError((error) =>
-      error instanceof OpenCodeInvocationError
-        ? error
-        : toInvocationError({
-            message: "Failed while waiting for the OpenCode server to start.",
-            detail: formatUnknownDetail(error),
+      Effect.ignore,
+      Effect.andThen(Ref.get(tail)),
+      Effect.flatMap((lines) =>
+        Deferred.fail(
+          ready,
+          toInvocationError({
+            message: "OpenCode server exited before reporting a listening URL.",
+            detail: lines.join("\n"),
           }),
-    ),
-  )
+        ),
+      ),
+      Effect.forkScoped,
+    )
 
-const collectTextResponse = (parts: ReadonlyArray<Part> | undefined) =>
-  (parts ?? [])
-    .filter((part): part is Extract<Part, { readonly type: "text" }> => part.type === "text")
-    .map((part) => part.text.trim())
+    return yield* awaitWithin(Deferred.await(ready), timeout, () =>
+      toInvocationError({
+        message: `Timed out waiting for the OpenCode server to start after ${Duration.format(timeout)}.`,
+      }),
+    )
+  })
+
+const collectTextResponse = (message: SessionMessageAssistant | undefined) =>
+  (message?.content ?? [])
+    .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
     .filter((text) => text.length > 0)
     .join("\n")
     .trim()
 
-const toModelError = (error: AssistantMessage["error"]): OpenCodeModelError | undefined => {
-  if (!error) {
-    return undefined
-  }
+const toModelError = (error: SessionStructuredError | undefined): OpenCodeModelError | undefined =>
+  error ? { name: error.type, message: error.message } : undefined
 
-  const message =
-    "data" in error && error.data && typeof error.data === "object" && "message" in error.data
-      ? String(error.data.message)
-      : error.name
-  const retries =
-    error.name === "StructuredOutputError" &&
-    error.data &&
-    typeof error.data === "object" &&
-    "retries" in error.data &&
-    typeof error.data.retries === "number"
-      ? error.data.retries
-      : undefined
-
-  return {
-    name: error.name,
-    message,
-    ...(retries !== undefined ? { retries } : {}),
-  }
-}
-
-const toUsage = (message: AssistantMessage): OpenCodeRunUsage => {
+const toUsage = (session: SessionInfo): OpenCodeRunUsage => {
   const tokens: OpenCodeRunTokens = {
-    input: message.tokens.input,
-    output: message.tokens.output,
-    reasoning: message.tokens.reasoning,
-    cacheRead: message.tokens.cache.read,
-    cacheWrite: message.tokens.cache.write,
+    input: session.tokens.input,
+    output: session.tokens.output,
+    reasoning: session.tokens.reasoning,
+    cacheRead: session.tokens.cache.read,
+    cacheWrite: session.tokens.cache.write,
   }
 
-  return {
-    ...(message.cost !== undefined ? { costUsd: message.cost } : {}),
-    tokens,
-  }
+  return { costUsd: session.cost, tokens }
 }
 
-const failForAssistantError = (error: NonNullable<AssistantMessage["error"]>) =>
-  toOutputError(
-    "OpenCode returned an assistant error.",
-    stringifyJson({
-      name: error.name,
-      ...(error.data ? { data: error.data } : {}),
-    }),
-  )
+// `response.body` is left out on purpose: provider bodies can echo request data.
+const failForAssistantError = (error: SessionStructuredError) =>
+  toOutputError("OpenCode returned an assistant error.", stringifyJson({ name: error.type, message: error.message }))
 
-const selectLatestAssistantReply = (
-  messages: ReadonlyArray<{
-    readonly info:
-      | AssistantMessage
-      | { readonly role: string; readonly time?: { readonly created?: number | undefined } | undefined }
-    readonly parts: ReadonlyArray<Part>
-  }>,
-) =>
-  messages
+const findSubmittedResult = (message: SessionMessageAssistant) =>
+  message.content
     .filter(
-      (message): message is { readonly info: AssistantMessage; readonly parts: ReadonlyArray<Part> } =>
-        message.info.role === "assistant",
+      (part): part is SessionMessageAssistantTool =>
+        part.type === "tool" && part.name === OPEN_CODE_STRUCTURED_OUTPUT_TOOL,
     )
-    .sort((left, right) => (right.info.time.created ?? 0) - (left.info.time.created ?? 0))[0]
+    .findLast((part) => part.state.status === "completed")?.state.input
 
-const loadLatestAssistantReply = ({
+/**
+ * Reads the finished turn's newest assistant message and, when a structured
+ * result is wanted, the newest completed submission. A submission does not end
+ * V2's model loop, so it can sit many steps behind the newest message and the
+ * assistant history has to be followed backward until one turns up.
+ */
+const loadAssistantTurn = ({
   client,
   sessionId,
+  wantsSubmission,
 }: {
-  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly client: OpenCodeClient
   readonly sessionId: string
+  readonly wantsSubmission: boolean
 }) =>
   Effect.tryPromise({
-    try: async () => {
-      const [messagesResult, statusResult] = await Promise.all([
-        client.session.messages<true>({
-          sessionID: sessionId,
-          limit: 20,
-        }),
-        client.session.status<true>(),
-      ])
-      const assistantReply =
-        messagesResult.response.status === 200 && messagesResult.data
-          ? selectLatestAssistantReply(
-              messagesResult.data as ReadonlyArray<{ info: AssistantMessage; parts: ReadonlyArray<Part> }>,
-            )
-          : undefined
+    try: async (signal) => {
+      let latest: SessionMessageAssistant | undefined
+      let structured: unknown
+      let cursor: string | null | undefined
 
-      return {
-        assistantReply,
-        status: statusResult.response.status === 200 && statusResult.data ? statusResult.data[sessionId] : undefined,
-      }
+      do {
+        const page = await client.message.list(
+          {
+            sessionID: sessionId,
+            type: "assistant",
+            limit: ASSISTANT_PAGE_SIZE,
+            ...(cursor ? { cursor } : { order: "desc" as const }),
+          },
+          { signal },
+        )
+        const messages = page.data.filter((message) => message.type === "assistant")
+
+        latest ??= messages[0]
+        structured = messages.map(findSubmittedResult).find((input) => input !== undefined)
+        cursor = page.data.length === ASSISTANT_PAGE_SIZE ? page.cursor.next : undefined
+      } while (wantsSubmission && structured === undefined && cursor)
+
+      const session = await client.session.get({ sessionID: sessionId }, { signal })
+
+      return { latest, structured, session }
     },
     catch: (error) => toOutputError("Failed to resolve the OpenCode assistant reply.", formatUnknownDetail(error)),
   })
 
-const resolveAssistantReply = ({
-  client,
-  sessionId,
-  response,
-}: {
-  readonly client: ReturnType<typeof createOpencodeClient>
-  readonly sessionId: string
-  readonly response: { readonly info?: AssistantMessage; readonly parts?: ReadonlyArray<Part> }
-}): Effect.Effect<
-  { readonly info: AssistantMessage; readonly parts: ReadonlyArray<Part> | undefined },
-  OpenCodeOutputError
-> =>
-  response.info
-    ? Effect.succeed({
-        info: response.info,
-        parts: response.parts,
-      })
-    : Effect.gen(function* () {
-        while (true) {
-          const { assistantReply, status } = yield* loadLatestAssistantReply({
-            client,
-            sessionId,
-          })
+const loadIdleMessage = (client: OpenCodeClient, sessionId: string) =>
+  Effect.tryPromise({
+    try: async (signal) => {
+      const page = await client.message.list(
+        { sessionID: sessionId, type: "idle", order: "desc", limit: 1 },
+        { signal },
+      )
 
-          if (assistantReply) {
-            return assistantReply
-          }
+      return page.data.find((message) => message.type === "idle")
+    },
+    catch: (error) =>
+      toInvocationError({
+        message: "Failed while waiting for the OpenCode session to finish.",
+        detail: formatUnknownDetail(error),
+      }),
+  })
 
-          if (status?.type !== "busy" && status?.type !== "retry") {
-            return yield* Effect.fail(
-              toOutputError("OpenCode returned no assistant reply payload.", stringifyJson(response)),
-            )
-          }
+/**
+ * Polls for the session's terminal `idle` message. Completion deliberately does
+ * not depend on the live event stream, which has no replay or reconnect and
+ * only drives optional progress logs.
+ */
+const awaitIdleMessage = (client: OpenCodeClient, sessionId: string) =>
+  Effect.gen(function* () {
+    while (true) {
+      const idle = yield* loadIdleMessage(client, sessionId)
 
-          yield* Effect.sleep(Duration.millis(250))
-        }
-      })
+      if (idle) {
+        return idle
+      }
 
+      yield* Effect.sleep(IDLE_POLL_INTERVAL)
+    }
+  })
+
+/**
+ * Decodes a finished turn. Usable text or a submitted result survives a later
+ * failure, so a run only fails when the turn produced nothing to work with.
+ */
 export const decodePromptResult = ({
-  info,
-  parts,
+  sessionId,
+  latest,
+  structured,
+  idle,
+  usage,
 }: {
-  readonly info: AssistantMessage
-  readonly parts: ReadonlyArray<Part> | undefined
-}): Effect.Effect<OpenCodeSdkPromptResult, OpenCodeOutputError> => {
-  const response = collectTextResponse(parts)
-  const modelError = toModelError(info.error)
-  const hasUsablePayload = response.length > 0 || info.structured !== undefined
+  readonly sessionId: string
+  readonly latest: SessionMessageAssistant | undefined
+  readonly structured: unknown
+  readonly idle: SessionMessageIdle
+  readonly usage: OpenCodeRunUsage
+}): Effect.Effect<OpenCodeSdkPromptResult, OpenCodeInvocationError | OpenCodeOutputError> => {
+  const response = collectTextResponse(latest)
+  const error = latest?.error ?? idle.error
+  const modelError = toModelError(error)
 
-  if (info.error && !hasUsablePayload) {
-    return Effect.fail(failForAssistantError(info.error))
+  if (response.length === 0 && structured === undefined) {
+    if (idle.outcome === "interrupted") {
+      return Effect.fail(toInvocationError({ message: "The OpenCode session was interrupted." }))
+    }
+
+    if (error) {
+      return Effect.fail(failForAssistantError(error))
+    }
+
+    if (!latest) {
+      return Effect.fail(toOutputError("OpenCode returned no assistant reply payload.", stringifyJson(idle)))
+    }
   }
 
   return Effect.succeed({
     response,
-    ...(info.structured !== undefined ? { structured: info.structured } : {}),
+    ...(structured !== undefined ? { structured } : {}),
     ...(modelError ? { modelError } : {}),
-    sessionId: info.sessionID,
-    ...(info.tokens ? { usage: toUsage(info) } : {}),
+    sessionId,
+    usage,
   })
 }
 
-const spawnServer = (request: OpenCodeSdkPromptRequest, spawner: ChildProcessSpawner["Service"]) =>
+/**
+ * Dependency-free server plugin that registers the structured output tool.
+ * Its JSON Schema `input` gives the model the same validate-and-correct loop as
+ * V1's native `format` option, and the validated input is read back from the
+ * assistant message.
+ */
+const STRUCTURED_OUTPUT_PLUGIN_SOURCE = `export default {
+  id: "open-azdo.structured-output",
+  async setup(ctx) {
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: ${JSON.stringify(OPEN_CODE_STRUCTURED_OUTPUT_TOOL)},
+        description: "Submit the final result. Call this exactly once, as your last action.",
+        input: ctx.options.schema,
+        options: { codemode: false },
+        execute: async () => ({ content: "Result recorded. End your turn now." }),
+      })
+    })
+  },
+}
+`
+
+const STRUCTURED_OUTPUT_PROMPT = [
+  `Submit your final result by calling the \`${OPEN_CODE_STRUCTURED_OUTPUT_TOOL}\` tool exactly once as your last action, passing the complete result object as its input.`,
+  "Do not repeat the result as text afterwards. Only if that tool is unavailable, reply with the result as JSON text instead.",
+].join(" ")
+
+const withStructuredOutput = (request: OpenCodeSdkPromptRequest, fileSystem: FileSystem.FileSystem) =>
   Effect.gen(function* () {
-    const port = yield* findAvailablePort
-    const command = ChildProcess.make("opencode", ["serve", `--hostname=${SERVER_HOST}`, `--port=${port}`], {
+    if (request.format?.type !== "json_schema") {
+      return { config: request.config, prompt: request.prompt }
+    }
+
+    const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "open-azdo-opencode-" })
+    yield* fileSystem.writeFileString(join(directory, "index.js"), STRUCTURED_OUTPUT_PLUGIN_SOURCE)
+
+    return {
+      config: {
+        ...request.config,
+        plugins: [{ package: directory, options: { schema: request.format.schema } }],
+      } satisfies OpenCodeConfig,
+      prompt: `${request.prompt}\n\n${STRUCTURED_OUTPUT_PROMPT}`,
+    }
+  }).pipe(
+    Effect.mapError((error) =>
+      toInvocationError({
+        message: "Failed to prepare the OpenCode structured output plugin.",
+        detail: formatUnknownDetail(error),
+      }),
+    ),
+  )
+
+/**
+ * Starts this run's private server. `--stdio` takes a free port, removes the
+ * password from the environment tools inherit, and ties the server's lifetime
+ * to the stdin pipe held here, so it also exits if this process dies.
+ */
+const spawnServer = (
+  request: OpenCodeSdkPromptRequest,
+  config: OpenCodeConfig,
+  spawner: ChildProcessSpawner["Service"],
+) =>
+  Effect.gen(function* () {
+    const password = randomBytes(32).toString("base64url")
+    const command = ChildProcess.make("opencode", ["serve", "--stdio", `--hostname=${SERVER_HOST}`, "--port=0"], {
       cwd: request.workspace,
       env: {
         ...request.inheritedEnv,
-        OPENCODE_CONFIG_CONTENT: stringifyJson(request.config),
+        OPENCODE_PASSWORD: password,
+        OPENCODE_CONFIG_CONTENT: stringifyJson(config),
       },
       extendEnv: false,
-      stdin: "ignore",
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     })
@@ -699,66 +626,104 @@ const spawnServer = (request: OpenCodeSdkPromptRequest, spawner: ChildProcessSpa
     return {
       handle,
       url,
+      authorization: `Basic ${Buffer.from(`${SERVER_USERNAME}:${password}`).toString("base64")}`,
     }
   })
 
 const createSession = (
-  client: ReturnType<typeof createOpencodeClient>,
-  timeout: Duration.Duration,
-): Effect.Effect<{ readonly id: string }, OpenCodeInvocationError> =>
+  client: OpenCodeClient,
+  request: OpenCodeSdkPromptRequest,
+): Effect.Effect<SessionInfo, OpenCodeInvocationError> =>
   Effect.tryPromise({
-    try: async () => {
-      const result = await client.session.create<true>()
-
-      if (result.response.status !== 200 || !result.data) {
-        throw new Error(`Unexpected OpenCode session creation status: ${result.response.status}`)
-      }
-
-      return result.data
-    },
+    try: (signal) =>
+      client.session.create(
+        {
+          // A preset title also skips OpenCode's title generation model call.
+          title: SESSION_TITLE,
+          agent: request.agent,
+          model: {
+            id: request.model.modelID,
+            providerID: request.model.providerID,
+            ...(request.variant ? { variant: request.variant } : {}),
+          },
+          location: { directory: request.workspace },
+        },
+        { signal },
+      ),
     catch: (error) =>
       toInvocationError({
         message: "Failed to create the OpenCode session.",
         detail: formatUnknownDetail(error),
       }),
   }).pipe((effect) =>
-    awaitWithin(effect, timeout, () =>
+    awaitWithin(effect, request.timeout, () =>
       toInvocationError({
-        message: `Timed out creating the OpenCode session after ${Duration.format(timeout)}.`,
+        message: `Timed out creating the OpenCode session after ${Duration.format(request.timeout)}.`,
       }),
     ),
   )
 
 /**
- * Opens the OpenCode event SSE subscription used for live progress reporting.
+ * Stops the session before its server goes away. Shutdown alone is not a
+ * cancellation: V2 keeps the execution claim so a later server on the same data
+ * directory would resume the review. Interruption settles asynchronously, hence
+ * the bounded wait for idle.
+ */
+const interruptSession = (client: OpenCodeClient, sessionId: string) =>
+  Effect.tryPromise((signal) => client.session.interrupt({ sessionID: sessionId }, { signal })).pipe(
+    Effect.flatMap(({ interrupted }) => (interrupted ? awaitIdleMessage(client, sessionId) : Effect.void)),
+    Effect.timeoutOption(INTERRUPT_SETTLE_TIMEOUT),
+    ignoreFailure,
+  )
+
+/**
+ * Opens the OpenCode event subscription used for live progress reporting and
+ * waits for its `server.connected` marker. The subscription is lazy and has no
+ * replay, so it must be connected before prompting to observe the whole turn.
  *
- * The OpenCode SDK expects a native AbortSignal, so this boundary lets Effect
- * own cancellation for the async subscription handshake instead of introducing
- * a separate controller only to bridge into the foreign API.
+ * `lifetime` ends an established stream, while the Effect signal cancels the
+ * handshake itself.
  */
 export const subscribeToOpenCodeEvents = ({
   client,
+  lifetime,
 }: {
   readonly client: OpenCodeEventClient
-}): Effect.Effect<Awaited<ReturnType<OpenCodeEventClient["event"]["subscribe"]>>, OpenCodeInvocationError> =>
+  readonly lifetime: AbortSignal
+}): Effect.Effect<AsyncIterable<OpenCodeEvent>, OpenCodeInvocationError> =>
   Effect.tryPromise({
-    try: (signal) => client.event.subscribe({}, { signal }),
+    try: async (signal) => {
+      const events = client.event.subscribe({ signal: AbortSignal.any([signal, lifetime]) })
+      const iterator = events[Symbol.asyncIterator]()
+      const connected = await iterator.next()
+
+      if (connected.done) {
+        throw new Error("The OpenCode event stream ended before connecting.")
+      }
+
+      return { [Symbol.asyncIterator]: () => iterator }
+    },
     catch: (error) =>
       toInvocationError({
         message: "Failed to subscribe to the OpenCode event stream.",
         detail: formatUnknownDetail(error),
       }),
-  })
+  }).pipe((effect) =>
+    awaitWithin(effect, PROGRESS_CONNECT_TIMEOUT, () =>
+      toInvocationError({
+        message: `Timed out connecting to the OpenCode event stream after ${Duration.format(PROGRESS_CONNECT_TIMEOUT)}.`,
+      }),
+    ),
+  )
 
 /**
  * Runs an effect while a matching OpenCode event subscription is active for
- * the session, then guarantees the SDK stream and consumer fiber are both
- * cleaned up when the scoped Effect exits.
+ * the session, then guarantees the stream and consumer fiber are both cleaned
+ * up when the scoped Effect exits.
  *
- * Effect still owns cancellation for the async `event.subscribe()` call. The
- * extra lifetime controller exists only because the SDK exposes stream teardown
- * through AbortSignal rather than a close/dispose handle on the returned
- * subscription object.
+ * Effect owns cancellation for the subscription handshake. The extra lifetime
+ * controller exists only because the client exposes stream teardown through
+ * AbortSignal rather than a close/dispose handle on the returned iterable.
  */
 export const withOpenCodeProgressSubscription = <A, E, R>(
   {
@@ -773,8 +738,9 @@ export const withOpenCodeProgressSubscription = <A, E, R>(
   Effect.acquireRelease(
     Effect.gen(function* () {
       const streamLifetime = new AbortController()
-      const subscription = yield* subscribeToOpenCodeEvents({
-        client: withSubscriptionLifetime(client, streamLifetime.signal),
+      const events = yield* subscribeToOpenCodeEvents({
+        client,
+        lifetime: streamLifetime.signal,
       }).pipe(
         Effect.catch((error) =>
           logWarning("OpenCode progress streaming is unavailable. Continuing without live milestones.", {
@@ -785,12 +751,12 @@ export const withOpenCodeProgressSubscription = <A, E, R>(
         ),
       )
 
-      if (!subscription) {
+      if (!events) {
         return undefined
       }
 
       const fiber = yield* runOpenCodeProgressLogger({
-        events: subscription.stream,
+        events,
         sessionId,
       }).pipe(Effect.forkScoped)
 
@@ -815,31 +781,25 @@ const validatePromptModel = ({
   client,
   request,
 }: {
-  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly client: OpenCodeClient
   readonly request: OpenCodeSdkPromptRequest
 }): Effect.Effect<void, OpenCodeInvocationError | OpenCodeOutputError> =>
   Effect.tryPromise({
-    try: async () => {
-      const result = await client.provider.list<true>()
+    try: async (signal) => {
+      const { data: models } = await client.model.list({ location: { directory: request.workspace } }, { signal })
+      const providerModels = models.filter((model) => model.providerID === request.model.providerID)
 
-      if (result.response.status !== 200 || !result.data) {
-        throw new Error(`Unexpected OpenCode provider list status: ${result.response.status}`)
-      }
-
-      const provider = result.data.all.find((entry) => entry.id === request.model.providerID)
-      const providerDefaultModel = result.data.default[request.model.providerID]
-
-      if (!provider) {
+      if (providerModels.length === 0) {
         throw toOutputError(
           `OpenCode provider "${request.model.providerID}" is not available.`,
           stringifyJson({
             providerID: request.model.providerID,
-            connectedProviders: result.data.connected,
+            connectedProviders: [...new Set(models.map((model) => model.providerID))],
           }),
         )
       }
 
-      if (request.model.modelID in provider.models) {
+      if (providerModels.some((model) => model.id === request.model.modelID)) {
         return
       }
 
@@ -848,8 +808,7 @@ const validatePromptModel = ({
         stringifyJson({
           providerID: request.model.providerID,
           requestedModelID: request.model.modelID,
-          defaultModelID: providerDefaultModel,
-          availableModelIDs: Object.keys(provider.models).slice(0, 20),
+          availableModelIDs: providerModels.map((model) => model.id).slice(0, 20),
         }),
       )
     },
@@ -872,10 +831,12 @@ const promptSession = ({
   client,
   sessionId,
   request,
+  prompt,
 }: {
-  readonly client: ReturnType<typeof createOpencodeClient>
+  readonly client: OpenCodeClient
   readonly sessionId: string
   readonly request: OpenCodeSdkPromptRequest
+  readonly prompt: string
 }): Effect.Effect<OpenCodeSdkPromptResult, OpenCodeInvocationError | OpenCodeOutputError> =>
   validatePromptModel({
     client,
@@ -887,36 +848,26 @@ const promptSession = ({
           client,
           sessionId,
         },
+        // V2 prompting only enqueues the turn, so the reply is awaited separately.
         Effect.tryPromise({
-          try: async () => {
-            const result = await client.session.prompt<true>({
-              sessionID: sessionId,
-              model: request.model,
-              agent: request.agent,
-              ...(request.variant ? { variant: request.variant } : {}),
-              ...(request.format ? { format: request.format } : {}),
-              parts: [
-                {
-                  type: "text",
-                  text: request.prompt,
-                },
-              ],
-            })
-
-            if (result.response.status !== 200 || !result.data) {
-              throw new Error(`Unexpected OpenCode prompt status: ${result.response.status}`)
-            }
-
-            return result.data
-          },
+          try: (signal) => client.session.prompt({ sessionID: sessionId, text: prompt }, { signal }),
           catch: (error) =>
-            error instanceof OpenCodeOutputError
-              ? error
-              : toInvocationError({
-                  message: "Failed while prompting OpenCode.",
-                  detail: formatUnknownDetail(error),
-                }),
-        }),
+            toInvocationError({
+              message: "Failed while prompting OpenCode.",
+              detail: formatUnknownDetail(error),
+            }),
+        }).pipe(Effect.andThen(awaitIdleMessage(client, sessionId))),
+      ),
+    ),
+    Effect.flatMap((idle) =>
+      loadAssistantTurn({
+        client,
+        sessionId,
+        wantsSubmission: request.format?.type === "json_schema",
+      }).pipe(
+        Effect.flatMap(({ latest, structured, session }) =>
+          decodePromptResult({ sessionId, latest, structured, idle, usage: toUsage(session) }),
+        ),
       ),
     ),
     (effect) =>
@@ -925,32 +876,29 @@ const promptSession = ({
           message: `Timed out waiting for the OpenCode prompt after ${Duration.format(request.timeout)}.`,
         }),
       ),
-    Effect.flatMap((response) =>
-      resolveAssistantReply({
-        client,
-        sessionId,
-        response: response as { readonly info?: AssistantMessage; readonly parts?: ReadonlyArray<Part> },
-      }),
-    ),
-    Effect.flatMap(decodePromptResult),
   )
 
 const makeOpenCodeSdkRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner
+  const fileSystem = yield* FileSystem.FileSystem
   const prompt: OpenCodeSdkRuntime["Service"]["prompt"] = Effect.fn("OpenCodeSdkRuntime.prompt")(function* (request) {
     return yield* Effect.gen(function* () {
-      const server = yield* Effect.acquireRelease(spawnServer(request, spawner), ({ handle }) =>
+      const { config, prompt } = yield* withStructuredOutput(request, fileSystem)
+      const server = yield* Effect.acquireRelease(spawnServer(request, config, spawner), ({ handle }) =>
         handle
           .kill({
             forceKillAfter: Duration.seconds(2),
           })
           .pipe(ignoreFailure),
       )
-      const client = createOpencodeClient({
+      const client = OpenCode.make({
         baseUrl: server.url,
-        directory: request.workspace,
+        headers: { authorization: server.authorization },
       })
-      const session = yield* createSession(client, request.timeout)
+      // Released before the server, so a failed or cancelled turn is stopped while it is still reachable.
+      const session = yield* Effect.acquireRelease(createSession(client, request), (session, exit) =>
+        Exit.isSuccess(exit) ? Effect.void : interruptSession(client, session.id),
+      )
       yield* logInfo("Created OpenCode session.")
       yield* logInfo(getAssistantRunMessage(request))
 
@@ -958,6 +906,7 @@ const makeOpenCodeSdkRuntime = Effect.gen(function* () {
         client,
         sessionId: session.id,
         request,
+        prompt,
       })
     }).pipe(Effect.scoped)
   })

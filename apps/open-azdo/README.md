@@ -13,7 +13,7 @@ This package is the published-package path for secure PR review automation. Unli
 - rely on tokenized clone URLs
 
 The CLI consumes the Azure Pipeline checkout workspace directly and uses the built-in `System.AccessToken` for the minimal Azure DevOps REST surface.
-Each review run starts a short-lived localhost OpenCode server, prompts it through the SDK v2 client with JSON-schema structured output, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
+Each review run starts a short-lived localhost OpenCode server, prompts it through `@opencode/client`, collects the JSON-schema result through a run-scoped submission tool, and tears it down before exit. If the model returns malformed JSON, `open-azdo` attempts repair before degrading to a summary-only `"concerns"` result.
 
 ## Install And Run
 
@@ -62,7 +62,7 @@ Use `--json` when you want fully machine-readable output:
 - operational logs stay on `stderr` as JSON
 - `review` and `sandbox capture` both follow the same contract
 
-During OpenCode execution, `open-azdo` now emits live progress milestones such as session start, retries, tool start/completion, todo-plan updates, and session errors. Raw assistant text deltas and full tool outputs are intentionally omitted from default logs to keep them readable.
+During OpenCode execution, `open-azdo` now emits live progress milestones such as session start, retries, tool start and failure, and session errors. Raw assistant text deltas and full tool outputs are intentionally omitted from default logs to keep them readable.
 
 ## Sandbox Capture
 
@@ -118,7 +118,7 @@ Exit behavior:
 
 The canonical example is in [examples/azure-pipelines.review.yml](./examples/azure-pipelines.review.yml).
 For first-time rollout or debugging, use [examples/azure-pipelines.review.debug.yml](./examples/azure-pipelines.review.debug.yml).
-For pnpm-managed repositories that want dependency install, `.NET` provisioning, restore, and experimental LSP access, use [examples/azure-pipelines.review.pnpm.yml](./examples/azure-pipelines.review.pnpm.yml).
+For pnpm-managed repositories that want dependency install, `.NET` provisioning, and restore, use [examples/azure-pipelines.review.pnpm.yml](./examples/azure-pipelines.review.pnpm.yml).
 
 Key requirements:
 
@@ -129,8 +129,8 @@ Key requirements:
 - grant repository read and pull request thread read/write permissions
 
 Attach the pipeline as a branch build-validation policy. Findings are posted as PR comments by default and do not fail the build.
-`open-azdo` does not install language-specific prerequisites itself. LSP prerequisites are provided by the pipeline environment, and the pnpm example enables OpenCode's experimental LSP tool while provisioning `.NET` plus `dotnet restore` for C# projects.
-For nested JS or TS packages, install dependencies in the package directory that owns the lockfile before running `open-azdo`. `open-azdo` keeps the review workspace at the checkout root and relies on workspace-local TypeScript resolution.
+`open-azdo` does not install language-specific prerequisites itself. The pnpm example provisions `.NET` plus `dotnet restore` for C# projects. OpenCode V2 does not run language servers, so reviews rely on the read, search, and git tools.
+For nested JS or TS packages, install dependencies in the package directory that owns the lockfile before running `open-azdo`. `open-azdo` keeps the review workspace at the checkout root.
 
 ```yaml
 trigger: none
@@ -154,7 +154,7 @@ steps:
       unzip -q bun.zip
       export PATH="$PWD/bun-linux-x64:$PATH"
 
-      curl -fsSL https://github.com/sst/opencode/releases/download/v1.19.5/opencode-linux-x64.tar.gz -o opencode.tar.gz
+      curl -fsSL https://github.com/anomalyco/opencode/releases/download/v2.2.3/opencode-linux-x64.tar.gz -o opencode.tar.gz
       mkdir -p opencode-bin
       tar -xzf opencode.tar.gz -C opencode-bin
       export PATH="$PWD/opencode-bin:$PATH"

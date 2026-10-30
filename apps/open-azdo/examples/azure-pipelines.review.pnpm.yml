@@ -11,8 +11,8 @@ variables:
   DotNetSdkVersion: 10.0.x
   BunVersion: 1.4.4
   BunLinuxX64Sha256: bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c
-  OpenCodeVersion: 1.19.5
-  OpenCodeLinuxX64Sha256: 588310a336fa3b9df36b3f0225b26f679d453efaad0cf3d66c3651ef3ec1647a
+  OpenCodeVersion: 2.2.3
+  OpenCodeLinuxX64Sha256: ef3aeeaf5522b10d69a3da7bbd6e6d8d259f845833d96b8310767d3407b18a35
   OpenAzdoVersion: 0.3.9
 
 steps:
@@ -36,8 +36,7 @@ steps:
       corepack enable
       corepack prepare "pnpm@$(PnpmVersion)" --activate
       # For nested JS/TS packages, install from the package directory that owns
-      # the lockfile. open-azdo keeps the review workspace at the checkout root
-      # and resolves TypeScript from the detected package root.
+      # the lockfile. open-azdo keeps the review workspace at the checkout root.
       pnpm install --frozen-lockfile
 
       # Adjust the restore target if your solution or project is not rooted at the repository checkout.
@@ -48,7 +47,7 @@ steps:
       unzip -q bun.zip
       export PATH="$PWD/bun-linux-x64:$PATH"
 
-      curl -fsSL "https://github.com/sst/opencode/releases/download/v$(OpenCodeVersion)/opencode-linux-x64.tar.gz" -o opencode.tar.gz
+      curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v$(OpenCodeVersion)/opencode-linux-x64.tar.gz" -o opencode.tar.gz
       echo "$(OpenCodeLinuxX64Sha256)  opencode.tar.gz" | sha256sum -c -
       mkdir -p opencode-bin
       tar -xzf opencode.tar.gz -C opencode-bin
@@ -66,4 +65,3 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
       OPENAI_API_KEY: $(OPENAI_API_KEY)
       OPEN_AZDO_OPENCODE_TIMEOUT: "15 minutes"
-      OPENCODE_EXPERIMENTAL_LSP_TOOL: "true"

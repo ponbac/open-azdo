@@ -43,7 +43,8 @@
 
 - Opt-in real-environment validation is available through `bun run sandbox:capture` and `bun test ./apps/open-azdo/test/live.integration.test.ts` with `.env.integration.local` loaded.
 - The sandbox app can be used to inspect a real captured review locally on `http://127.0.0.1:4317`.
-- Pipeline examples use OpenCode `1.19.5` with `openai/gpt-5.4-mini`.
+- Pipeline examples use OpenCode `2.2.3` with `openai/gpt-5.4-mini`.
+- `OPEN_AZDO_OPENCODE_BIN=/path/to/opencode bun test --cwd packages/workflows test/opencode-v2.integration.test.ts` checks V2 protocol compatibility against a real binary and a local mock provider. Run it after changing the OpenCode pin or runtime adapter; the default suite skips it.
 
 # TypeScript Tooling Policy
 
