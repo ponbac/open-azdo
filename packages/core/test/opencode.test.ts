@@ -254,7 +254,7 @@ describe("opencode", () => {
     expect(receivedRequest?.config).toEqual(buildOpenCodeConfig(request.agent))
   })
 
-  test("denies by default and only allows read-only tools for the review agent", () => {
+  test("denies by default and allows inspection plus unrestricted shell verification", () => {
     const config = buildOpenCodeConfig("azdo-review")
     const permissions = config.agents["azdo-review"]?.permissions ?? []
 
@@ -262,9 +262,13 @@ describe("opencode", () => {
     expect(permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" })
     expect(permissions.slice(1).every((rule) => rule.effect === "allow")).toBe(true)
     expect(new Set(permissions.slice(1).map((rule) => rule.action))).toEqual(
-      new Set(["read", "glob", "grep", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
+      new Set(["read", "glob", "grep", "shell", OPEN_CODE_STRUCTURED_OUTPUT_TOOL]),
     )
-    expect(permissions.filter((rule) => rule.action === "shell")).toEqual([])
+    expect(permissions.find((rule) => rule.action === "shell")).toEqual({
+      action: "shell",
+      resource: "*",
+      effect: "allow",
+    })
   })
 
   test("returns structured output and model error metadata from the sdk runtime", async () => {

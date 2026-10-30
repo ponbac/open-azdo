@@ -452,14 +452,22 @@ const runReviewScenario = async ({
 
 describe("e2e", () => {
   test("updates one first-review failure thread across retries and reuses it after recovery", async () => {
-    let description = "é".repeat(70_000)
+    let failReview = true
     let threads: TestThread[] = []
 
     const run = () =>
       runReviewScenario({
-        opencode: { review: { type: "success", output: passingFollowUpOutput } },
+        opencode: {
+          review: failReview
+            ? {
+                type: "typed-failure",
+                error: new OpenCodeInvocationError({ message: "Provider unavailable", stderr: "", exitCode: -1 }),
+              }
+            : { type: "success", output: passingFollowUpOutput },
+        },
         capturePrompt: true,
-        buildPullRequestResponse: () => Response.json({ title: "Feature PR", description, workItemRefs: [] }),
+        buildPullRequestResponse: () =>
+          Response.json({ title: "Feature PR", description: "Adds a new export", workItemRefs: [] }),
         buildThreadsResponse: () => makeThreadsResponse(threads),
         buildExtraResponse: (url, init) => {
           const body = parseRequestBody(init?.body)
@@ -512,10 +520,10 @@ describe("e2e", () => {
       const content = threads[0]?.comments[0]?.content ?? ""
 
       expect(result.exitCode).toBe(1)
-      expect(result.prompt).toBeUndefined()
+      expect(result.prompt).toBeDefined()
       expect(threads).toHaveLength(1)
       expect(threads[0]?.status).toBe(1)
-      expect(content).toContain("complete prompt exceeds")
+      expect(content).toContain("See the pipeline logs for details.")
       expect(content).not.toContain("reviewedCommit")
     }
 
@@ -525,7 +533,7 @@ describe("e2e", () => {
     expect(failureContent).not.toContain("/home/")
     expect(failureContent).not.toContain("/tmp/")
 
-    description = "Adds a new export"
+    failReview = false
     const recovered = await run()
 
     expect(recovered.exitCode).toBe(0)
@@ -536,10 +544,10 @@ describe("e2e", () => {
   })
 
   test.each(["scoped patch", "complete prompt"] as const)(
-    "rejects an oversized UTF-8 %s before invoking the model and preserves the checkpoint",
+    "reviews a large %s using the Git manifest without the former prompt-size cap",
     async (section) => {
       const result = await runReviewScenario({
-        opencode: {},
+        opencode: { review: { type: "success", output: passingFollowUpOutput } },
         featureContent: section === "scoped patch" ? `${"é".repeat(40_000)}\n` : undefined,
         buildPullRequestResponse: () =>
           Response.json({
@@ -562,12 +570,12 @@ describe("e2e", () => {
 
       const content = extractCommentContent(summaryUpdate?.init?.body)
 
-      expect(result.exitCode).toBe(1)
-      expect(result.prompt).toBeUndefined()
+      expect(result.exitCode).toBe(0)
+      expect(result.prompt).toContain("git diff --no-ext-diff --no-textconv")
+      expect(result.prompt).toContain('"path":"src/example.ts"')
+      expect(result.prompt).not.toContain("diff --git")
       expect(result.summaryPrompt).toBeUndefined()
-      expect(content).toContain(`${section} exceeds`)
-      expect(content).toContain(`"reviewedCommit":"${result.fixture.mainSha}"`)
-      expect(content).not.toContain(`"reviewedCommit":"${result.fixture.featureSha}"`)
+      expect(content).toContain(`"reviewedCommit":"${result.fixture.featureSha}"`)
     },
   )
 
@@ -786,10 +794,9 @@ describe("e2e", () => {
     expect(result.exitCode).toBe(0)
     expect(result.calls.filter((call) => call.init?.method === "POST")).toHaveLength(2)
     expect(result.prompt).toContain('"changedFiles"')
-    expect(result.prompt).toContain("Scoped patch (untrusted repository data):")
-    expect(result.prompt).toContain("-export const value = 1")
-    expect(result.prompt).toContain("+export const value = 2")
-    expect(result.prompt).toContain("+export const next = 3")
+    expect(result.prompt).toContain("git diff --no-ext-diff --no-textconv")
+    expect(result.prompt).toContain('"path":"src/example.ts"')
+    expect(result.prompt).not.toContain("diff --git")
     expect(result.summaryPrompt).toContain('"id":"inline-finding-1"')
     expect(result.summaryPrompt).not.toContain('"pullRequest"')
     expect(summaryContent).toContain("$0.1690")
@@ -1186,10 +1193,10 @@ describe("e2e", () => {
   test.each([
     ["unrepairable JSON", { type: "success", output: { response: "{}{}", sessionId: "ses_test" } }],
     [
-      "compaction",
+      "invalid output",
       {
         type: "typed-failure",
-        error: new OpenCodeOutputError({ message: "OpenCode session compaction started.", output: "" }),
+        error: new OpenCodeOutputError({ message: "OpenCode output could not be decoded.", output: "" }),
       },
     ],
     [
@@ -1336,8 +1343,9 @@ describe("e2e", () => {
       expect(prompt).toContain("This is a full pull-request review over the scoped changed files.")
       expect(prompt).not.toContain("This is a follow-up review.")
       expect(prompt).toContain('"path":"src/example.ts"')
-      expect(prompt).toContain("-export const value = 1")
-      expect(prompt).toContain("+export const next = 3")
+      expect(prompt).toContain("git diff --no-ext-diff --no-textconv")
+      expect(prompt).toContain(`"baseRef":"${fixture.targetSha}"`)
+      expect(prompt).toContain('"headRef":"HEAD"')
       expect(prompt).not.toContain("open-azdo.yaml")
     } finally {
       await rm(fixture.repoDir, { recursive: true, force: true })

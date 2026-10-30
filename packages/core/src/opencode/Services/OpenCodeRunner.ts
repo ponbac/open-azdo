@@ -50,7 +50,7 @@ export type OpenCodeRunRequest = {
   readonly format?: OpenCodeOutputFormat | undefined
 }
 
-/** Runs one bounded, read-only assistant review through the configured OpenCode runtime. */
+/** Runs one bounded assistant review with repository inspection and shell-based verification. */
 export interface OpenCodeRunnerService {
   readonly run: (
     request: OpenCodeRunRequest,

@@ -21,15 +21,15 @@ type ParsedModel = {
 const allow = (action: string, resource = "*"): OpenCodePermissionRule => ({ action, resource, effect: "allow" })
 
 /**
- * Deny-by-default read-only rules. The leading catch-all also keeps headless
- * runs moving: V2 treats an unmatched request as `ask`, and nobody can answer.
- * Shell has no exceptions: even git read commands accept flags that write files.
+ * Keep native capabilities explicit while allowing shell-based inspection and verification.
+ * The leading catch-all avoids unattended permission prompts for unrelated native tools.
  */
 const openCodePermissions: ReadonlyArray<OpenCodePermissionRule> = [
   { action: "*", resource: "*", effect: "deny" },
   allow("read"),
   allow("glob"),
   allow("grep"),
+  allow("shell"),
   allow(OPEN_CODE_STRUCTURED_OUTPUT_TOOL),
 ]
 
@@ -41,7 +41,7 @@ export const buildOpenCodeConfig = (agentName: string): OpenCodeConfig => ({
   agents: {
     [agentName]: {
       mode: "primary",
-      description: "Read-only Azure DevOps pull request reviewer",
+      description: "Azure DevOps pull request reviewer with shell verification",
       permissions: openCodePermissions,
     },
   },

@@ -17,6 +17,7 @@ export type OpenCodeConfig = {
   readonly $schema: string
   readonly update: "disable"
   readonly default_agent: string
+  readonly instructions?: ReadonlyArray<string>
   readonly agents: Readonly<
     Record<
       string,

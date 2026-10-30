@@ -29,7 +29,6 @@ import {
   ReviewResultJsonSchema,
 } from "./ReviewOutput"
 import { buildReviewPrompt } from "./ReviewPrompt"
-import { ReviewInputLimitError } from "../errors"
 import {
   buildReviewSummarySubjects,
   decodeReviewSummaryPassOutput,
@@ -791,7 +790,7 @@ const planAuthenticatedReview = Effect.fn("ReviewWorkflow.planAuthenticated")(fu
 
   yield* logInfo(`Built ${reviewMode} review context.`)
 
-  const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext, scopedDiff.diffText)
+  const prompt = yield* buildReviewPrompt(config.promptFile, reviewContext)
   yield* logInfo("Built review prompt.")
 
   const managedFindingCandidateIds = new Set(reviewContext.managedFindingCandidates?.items.map((item) => item.id) ?? [])
@@ -972,13 +971,7 @@ export const runReviewWorkflow = Effect.fn("ReviewWorkflow.run")(function* (conf
     return yield* Effect.failCause(exit.cause)
   }
 
-  const failureReason = Option.match(Cause.findErrorOption(exit.cause), {
-    onSome: (error) =>
-      error instanceof ReviewInputLimitError
-        ? error.message
-        : "The review could not be completed. See the pipeline logs for details.",
-    onNone: () => "The review could not be completed. See the pipeline logs for details.",
-  })
+  const failureReason = "The review could not be completed. See the pipeline logs for details."
 
   // A failed listing is not an empty authoritative view. Failure publication remains best effort,
   // and can only reuse state freshly decoded from this token's nondeleted comments.

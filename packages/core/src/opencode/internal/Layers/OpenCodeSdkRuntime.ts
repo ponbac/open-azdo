@@ -522,42 +522,11 @@ const loadIdleMessage = (client: OpenCodeClient, sessionId: string) =>
       }),
   })
 
-/**
- * V2 persists a compaction message when `session.compaction.started` is projected, including
- * compactions that later finish or fail. Each run owns a fresh session, so any such record means
- * the original instructions and scoped patch may have been replaced and no result is trustworthy.
- */
-const verifyUncompactedSession = Effect.fn("OpenCodeSdkRuntime.verifyUncompactedSession")(function* (
-  client: OpenCodeClient,
-  sessionId: string,
-) {
-  const history = yield* Effect.tryPromise({
-    try: (signal) =>
-      client.message.list({ sessionID: sessionId, type: "compaction", order: "desc", limit: 1 }, { signal }),
-    catch: () => toOutputError("Unable to verify OpenCode compaction history; the review cannot be accepted."),
-  })
-
-  if (history.data.length > 0) {
-    return yield* toOutputError(
-      "OpenCode session compaction started; the original review context may have been replaced.",
-    )
-  }
-})
-
-/**
- * Polls authoritative persisted completion messages, optionally checking that review evidence
- * remains intact. The check runs after the idle read, so successful completion cannot race ahead
- * of an earlier compaction record. Cancellation cleanup omits the check and still waits for idle.
- */
-const awaitIdleMessage = (
-  client: OpenCodeClient,
-  sessionId: string,
-  verifyContext: Effect.Effect<void, OpenCodeOutputError> = Effect.void,
-) =>
+/** Poll persisted completion messages independently of the optional live progress stream. */
+const awaitIdleMessage = (client: OpenCodeClient, sessionId: string) =>
   Effect.gen(function* () {
     while (true) {
       const idle = yield* loadIdleMessage(client, sessionId)
-      yield* verifyContext
 
       if (idle) {
         return idle
@@ -568,8 +537,8 @@ const awaitIdleMessage = (
   })
 
 /**
- * Decodes a finished turn after its context-integrity check. Usable text or a submitted result
- * survives a later provider error; compaction is rejected before this decoder can accept a payload.
+ * Decodes a finished turn. Usable text or a submitted result survives a later provider error;
+ * task recovery after context compaction is guided by the run's persistent instruction file.
  */
 export const decodePromptResult = ({
   sessionId,
@@ -638,30 +607,73 @@ const STRUCTURED_OUTPUT_PROMPT = [
   "Do not repeat the result as text afterwards. Only if that tool is unavailable, reply with the result as JSON text instead.",
 ].join(" ")
 
-const withStructuredOutput = (request: OpenCodeSdkPromptRequest, fileSystem: FileSystem.FileSystem) =>
-  Effect.gen(function* () {
-    if (request.format?.type !== "json_schema") {
-      return { config: request.config, prompt: request.prompt }
+/**
+ * Keep the complete task and a short recovery instruction in the run-owned directory. OpenCode
+ * reloads configured instruction files independently of compacted conversation history, alongside
+ * its ordinary agent system prompt. The same scope owns these files and the output plugin.
+ */
+const prepareTask = Effect.fn("OpenCodeSdkRuntime.prepareTask")(
+  function* (request: OpenCodeSdkPromptRequest, fileSystem: FileSystem.FileSystem) {
+    const agent = request.config.agents[request.agent]
+
+    if (!agent) {
+      return yield* toInvocationError({
+        message: `OpenCode agent "${request.agent}" is missing from the run configuration.`,
+      })
     }
 
     const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "open-azdo-opencode-" })
-    yield* fileSystem.writeFileString(join(directory, "index.js"), STRUCTURED_OUTPUT_PLUGIN_SOURCE)
+    const taskPath = join(directory, "task.md")
+    const recoveryPath = join(directory, "recovery.md")
 
-    return {
-      config: {
-        ...request.config,
-        plugins: [{ package: directory, options: { schema: request.format.schema } }],
-      } satisfies OpenCodeConfig,
-      prompt: `${request.prompt}\n\n${STRUCTURED_OUTPUT_PROMPT}`,
+    const recovery = [
+      `Task file: ${JSON.stringify(taskPath)}`,
+      "Read this file before starting. After compaction, read it again as needed to recover the original task, scope, and output requirements.",
+    ].join("\n")
+
+    const config: Types.Mutable<OpenCodeConfig> = {
+      ...request.config,
+      instructions: [...(request.config.instructions ?? []), recoveryPath],
+      agents: {
+        ...request.config.agents,
+        [request.agent]: {
+          ...agent,
+          permissions: [
+            ...agent.permissions,
+            { action: "external_directory", resource: `${directory.replaceAll("\\", "/")}/*`, effect: "allow" },
+          ],
+        },
+      },
     }
-  }).pipe(
-    Effect.mapError((error) =>
-      toInvocationError({
-        message: "Failed to prepare the OpenCode structured output plugin.",
-        detail: formatUnknownDetail(error),
-      }),
+
+    let prompt = request.prompt
+
+    if (request.format?.type === "json_schema") {
+      yield* fileSystem.writeFileString(join(directory, "index.js"), STRUCTURED_OUTPUT_PLUGIN_SOURCE)
+      config.plugins = [
+        ...(request.config.plugins ?? []),
+        { package: directory, options: { schema: request.format.schema } },
+      ]
+      prompt = `${prompt}\n\n${STRUCTURED_OUTPUT_PROMPT}`
+    }
+
+    yield* fileSystem.writeFileString(taskPath, prompt)
+    yield* fileSystem.writeFileString(recoveryPath, recovery)
+
+    return { config, prompt }
+  },
+  (effect) =>
+    effect.pipe(
+      Effect.mapError((error) =>
+        error instanceof OpenCodeInvocationError
+          ? error
+          : toInvocationError({
+              message: "Failed to prepare the OpenCode task and output plugin.",
+              detail: formatUnknownDetail(error),
+            }),
+      ),
     ),
-  )
+)
 
 /**
  * Starts this run's private server. `--stdio` takes a free port, removes the
@@ -942,7 +954,7 @@ const promptSession = ({
               message: "Failed while prompting OpenCode.",
               detail: formatUnknownDetail(error),
             }),
-        }).pipe(Effect.andThen(awaitIdleMessage(client, sessionId, verifyUncompactedSession(client, sessionId)))),
+        }).pipe(Effect.andThen(awaitIdleMessage(client, sessionId))),
       ),
     ),
     Effect.flatMap((idle) =>
@@ -970,7 +982,7 @@ const makeOpenCodeSdkRuntime = Effect.gen(function* () {
 
   const prompt: OpenCodeSdkRuntime["Service"]["prompt"] = Effect.fn("OpenCodeSdkRuntime.prompt")(function* (request) {
     return yield* Effect.gen(function* () {
-      const { config, prompt } = yield* withStructuredOutput(request, fileSystem)
+      const { config, prompt } = yield* prepareTask(request, fileSystem)
 
       const server = yield* Effect.acquireRelease(spawnServer(request, config, spawner), ({ handle }) =>
         handle

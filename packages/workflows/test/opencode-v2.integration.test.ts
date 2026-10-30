@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { Duration, Effect, Layer, Result, type Schema } from "effect"
+import { Duration, Effect, Layer, Schema, Option } from "effect"
 
 import { BaseRuntimeLayer } from "@open-azdo/core/base-runtime"
 import { OpenCodeInvocationError, OpenCodeOutputError } from "@open-azdo/core/errors"
@@ -21,8 +21,9 @@ const binary = process.env.OPEN_AZDO_OPENCODE_BIN
 type MockStep = (
   | { readonly tool: string; readonly input: Record<string, Schema.Json> }
   | { readonly text: string }
-  | { readonly status: number; readonly message: string; readonly code?: string }
+  | { readonly status: number; readonly message: string }
   | { readonly hang: true }
+  | { readonly recoverTask: true }
 ) & { readonly inputTokens?: number }
 
 const usageChunk = (inputTokens = 11) => ({
@@ -39,18 +40,41 @@ const toSse = (chunks: ReadonlyArray<Schema.Json>) =>
     headers: { "content-type": "text/event-stream" },
   })
 
+const ChatRequest = Schema.Struct({
+  messages: Schema.Array(
+    Schema.Struct({
+      role: Schema.String,
+      content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    }),
+  ),
+})
+
+const decodeChatRequest = Schema.decodeUnknownSync(Schema.fromJsonString(ChatRequest))
+
+const taskFileFromSystem = (request: typeof ChatRequest.Type) => {
+  const system = request.messages
+    .flatMap((message) => (message.role === "system" && message.content ? [message.content] : []))
+    .join("\n")
+
+  const path = /^Task file: (.+)$/mu.exec(system)?.[1]
+
+  return path
+    ? Option.getOrUndefined(Schema.decodeUnknownOption(Schema.fromJsonString(Schema.String))(path))
+    : undefined
+}
+
 /** Minimal OpenAI-compatible chat endpoint that replays a scripted conversation. */
 const startMockProvider = () => {
   let steps: Array<MockStep> = []
 
   const state = {
     requests: 0,
-    requestBodies: new Array<string>(),
+    transcripts: new Array<typeof ChatRequest.Type>(),
     authorizations: new Array<string | null>(),
     script: (next: ReadonlyArray<MockStep>) => {
       steps = [...next]
       state.requests = 0
-      state.requestBodies.length = 0
+      state.transcripts.length = 0
       state.authorizations.length = 0
     },
   }
@@ -61,19 +85,25 @@ const startMockProvider = () => {
     idleTimeout: 0,
     fetch: async (request) => {
       state.requests += 1
-      state.requestBodies.push(await request.text())
+      const transcript = decodeChatRequest(await request.text())
+      state.transcripts.push(transcript)
       state.authorizations.push(request.headers.get("authorization"))
-      const step = steps.shift() ?? { text: "Done." }
+      const scriptedStep = steps.shift() ?? { text: "Done." }
+      const taskPath = taskFileFromSystem(transcript)
+
+      const step: Exclude<MockStep, { readonly recoverTask: true }> =
+        "recoverTask" in scriptedStep
+          ? taskPath
+            ? { tool: "read", input: { path: taskPath } }
+            : { text: "No task recovery instructions were provided." }
+          : scriptedStep
 
       if ("hang" in step) {
         return new Promise<Response>(() => undefined)
       }
 
       if ("status" in step) {
-        return Response.json(
-          { error: { message: step.message, type: "mock", code: step.code } },
-          { status: step.status },
-        )
+        return Response.json({ error: { message: step.message, type: "mock" } }, { status: step.status })
       }
 
       return "tool" in step
@@ -218,21 +248,27 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
   }, 60_000)
 
   test.each([
-    "sed -i s/hello/PWNED/ permission-sentinel.txt",
-    "git diff --output=permission-output.txt",
-    "cat /proc/self/environ",
+    {
+      command: "bash -lc 'grep -qx hello example.txt && printf bash-verification-ok'",
+      expected: "bash-verification-ok",
+    },
+    {
+      command: `python3 -c 'from pathlib import Path; assert Path("example.txt").read_text() == "hello\\n"; print("python-verification-ok")'`,
+      expected: "python-verification-ok",
+    },
   ])(
-    "denies model shell command %s",
-    async (command) => {
-      await writeFile(join(workspace, "permission-sentinel.txt"), "hello\n")
-      await rm(join(workspace, "permission-output.txt"), { force: true })
+    "allows workspace verification with $expected",
+    async ({ command, expected }) => {
       mock.state.script([{ tool: "shell", input: { command } }, submit(validResult)])
 
-      await Effect.runPromise(run())
+      const result = await Effect.runPromise(run())
 
-      expect(mock.state.requestBodies.some((body) => body.includes("No tool named"))).toBe(true)
-      expect(await Bun.file(join(workspace, "permission-sentinel.txt")).text()).toBe("hello\n")
-      expect(await Bun.file(join(workspace, "permission-output.txt")).exists()).toBe(false)
+      expect(result.structured).toEqual(validResult)
+      expect(
+        mock.state.transcripts.some((request) =>
+          request.messages.some((message) => message.role === "tool" && message.content?.includes(expected)),
+        ),
+      ).toBe(true)
     },
     60_000,
   )
@@ -246,70 +282,72 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
     expect(mock.state.authorizations.every((header) => header === "Bearer provider-sentinel::::")).toBe(true)
   }, 60_000)
 
-  test.each([
-    {
-      scenario: "before the oversized prompt reaches the model",
-      model: "mock/compact-1",
-      prompt: "scoped patch line\n".repeat(60_000),
-      prefix: new Array<MockStep>(),
-    },
-    {
-      scenario: "after the provider rejects the context length",
-      model: "mock/mock-1",
-      prompt: "scoped patch line\n".repeat(60_000),
-      prefix: [
-        { status: 400, message: "Input exceeds the model's maximum context length", code: "context_length_exceeded" },
-      ] satisfies MockStep[],
-    },
-    {
-      scenario: "mid-run after a repository read exhausts the model context",
-      model: "mock/compact-1",
-      prompt: "Scoped patch evidence must survive this review.\n".repeat(100),
-      prefix: [{ tool: "read", input: { path: "example.txt" }, inputTokens: 45_000 }] satisfies MockStep[],
-    },
-  ])(
-    "fails if compaction starts $scenario",
-    async ({ model, prompt, prefix }) => {
-      mock.state.script([
-        ...prefix,
-        {
-          text: [
-            "## Objective",
-            "- Review the change.",
-            "## Requirements",
-            "- (none)",
-            "## Decisions",
-            "- (none)",
-            "## Work State",
-            "### Completed",
-            "- Read the request.",
-            "### Active",
-            "- Submit the review.",
-            "### Blocked",
-            "- (none)",
-            "## Next Move",
-            "1. Submit the review.",
-            "## Relevant Files",
-            "- (none)",
-            "## Important Context",
-            "- (none)",
-          ].join("\n"),
-        },
-        submit(validResult),
-        { text: "Done." },
-      ])
+  test("recovers the original task through native read after mid-run compaction", async () => {
+    const prompt = "Original task scope sentinel: inspect example.txt and submit a review for the exact supplied refs."
+    mock.state.script([
+      { tool: "read", input: { path: "example.txt" }, inputTokens: 45_000 },
+      { text: "## Objective\n- Continue reviewing.\n\n## Next Move\n1. Recover the original task." },
+      { recoverTask: true },
+      submit(validResult),
+      { text: "Done." },
+    ])
 
-      const result = await Effect.runPromise(run({ model, prompt }).pipe(Effect.result))
+    const result = await Effect.runPromise(run({ model: "mock/compact-1", prompt }))
 
-      expect(Result.isFailure(result)).toBe(true)
+    const afterCompaction = mock.state.transcripts.filter((request) =>
+      request.messages.some((message) => message.content?.includes("<conversation-checkpoint>")),
+    )
 
-      if (Result.isFailure(result)) {
-        expect(result.failure).toBeInstanceOf(OpenCodeOutputError)
-        expect(result.failure.message).toContain("compaction")
-      }
-    },
-    60_000,
-  )
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(result.structured).toEqual(validResult)
+    expect(afterCompaction.length).toBeGreaterThan(0)
+    expect(afterCompaction.every((request) => taskFileFromSystem(request) === taskPath)).toBe(true)
+    expect(
+      afterCompaction.every((request) =>
+        request.messages.some(
+          (message) =>
+            message.role === "system" && message.content?.includes("You are an AI agent running in OpenCode"),
+        ),
+      ),
+    ).toBe(true)
+    expect(
+      afterCompaction.some((request) =>
+        request.messages.some(
+          (message) =>
+            message.role === "tool" &&
+            message.content?.includes(prompt) &&
+            message.content.includes("open_azdo_submit_result"),
+        ),
+      ),
+    ).toBe(true)
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
+  }, 60_000)
+
+  test("provides and cleans a recoverable task file for text requests", async () => {
+    const prompt = "Text task scope sentinel: inspect example.txt and explain the result."
+    mock.state.script([{ recoverTask: true }, { text: "Text task complete." }])
+
+    const result = await Effect.runPromise(run({ prompt, format: { type: "text" } }))
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(result.response).toBe("Text task complete.")
+    expect(
+      mock.state.transcripts[0]?.messages.some(
+        (message) => message.role === "system" && message.content?.includes("You are an AI agent running in OpenCode"),
+      ),
+    ).toBe(true)
+    expect(
+      mock.state.transcripts.some((request) =>
+        request.messages.some((message) => message.role === "tool" && message.content?.includes(prompt)),
+      ),
+    ).toBe(true)
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
+  }, 60_000)
 
   test("fails provider errors without a usable payload", async () => {
     mock.state.script([{ status: 401, message: "Invalid API key" }])
@@ -337,6 +375,12 @@ describe.skipIf(!binary)("OpenCode V2 runtime", () => {
 
     expect(failure).toBeInstanceOf(OpenCodeInvocationError)
     expect(failure.message).toContain("Timed out waiting for the OpenCode prompt")
+
+    const taskPath = taskFileFromSystem(mock.state.transcripts[0] ?? { messages: [] })
+
+    expect(taskPath).toBeDefined()
+
+    if (taskPath) expect(await Bun.file(taskPath).exists()).toBe(false)
 
     // Only the managed service resumes unreleased execution claims at boot, private servers never do.
     mock.state.script([])
